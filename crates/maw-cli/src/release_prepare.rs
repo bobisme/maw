@@ -48,9 +48,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use toml_edit::{DocumentMut, Item, Table, Value};
 
-/// Files `prepare` is allowed to have already modified when re-run on a
-/// not-yet-clean tree. Matched by file name.
+/// Root files `prepare` is allowed to have already modified when re-run on a
+/// not-yet-clean tree. Nested Cargo.tomls are also part of the edit surface.
 const PREPARE_EDIT_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "CHANGELOG.md", "README.md"];
 
 #[derive(Args)]
@@ -107,7 +108,12 @@ pub fn run_prepare(args: &PrepareArgs) -> Result<()> {
         bail!(msg);
     }
 
-    let tomls = collect_cargo_tomls(&root);
+    // Keep the root manifest last. In Single mode its package version is the
+    // durable record of which member versions still belong to the lockstep
+    // set. If prepare is interrupted while members are being written, a retry
+    // can still read the old root version and finish them. Once the root moves,
+    // every other manifest has already been updated.
+    let tomls = release_manifest_order(&root);
     let mut bumped = 0usize;
 
     // 1. Lockstep version bump across every Cargo.toml.
@@ -400,18 +406,23 @@ fn read_workspace_version(root: &WorkspaceRoot) -> Result<String> {
     let path = root.path.join("Cargo.toml");
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let want_section = root.mode.version_location();
-    let mut in_section = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_section = trimmed == want_section;
-            continue;
-        }
-        if in_section && let Some(val) = parse_quoted_assignment(trimmed, "version") {
-            return Ok(val);
-        }
+    let manifest: toml::Value = text
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let version = match root.mode {
+        VersionMode::Inherited => manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("version")),
+        VersionMode::Single => manifest
+            .get("package")
+            .and_then(|package| package.get("version")),
     }
+    .and_then(toml::Value::as_str);
+    if let Some(version) = version {
+        return Ok(version.to_owned());
+    }
+    let want_section = root.mode.version_location();
     bail!(
         "no `version = \"…\"` under {want_section} in {}",
         path.display()
@@ -446,6 +457,15 @@ fn collect_cargo_tomls(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Manifests in release-edit order, with the root manifest as the commit
+/// point written after every nested manifest.
+fn release_manifest_order(root: &Path) -> Vec<PathBuf> {
+    let root_manifest = root.join("Cargo.toml");
+    let mut manifests = collect_cargo_tomls(root);
+    manifests.sort_by_key(|path| path == &root_manifest);
+    manifests
+}
+
 // ---------------------------------------------------------------------------
 // Cargo.toml editing
 // ---------------------------------------------------------------------------
@@ -469,53 +489,36 @@ fn bump_cargo_toml(
 ) -> Result<usize> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut changed = 0usize;
-    let mut section = String::new();
-    let mut out = String::with_capacity(text.len());
+    let mut document = text
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let mut changed = bump_path_dependencies(document.as_table_mut(), version, mode, old_version);
 
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            section = trimmed.to_string();
-            out.push_str(line);
-            out.push('\n');
-            continue;
+    match mode {
+        VersionMode::Inherited if is_root => {
+            let value = nested_value_mut(
+                document.as_table_mut(),
+                &["workspace", "package", "version"],
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no string `version` under [workspace.package] in {}",
+                    path.display()
+                )
+            })?;
+            changed += usize::from(replace_toml_string(value, version));
         }
-
-        // Internal path-dep line: has both `path = "…"` and `version = "…"`.
-        let is_path_dep = line.contains("path = \"") && line.contains("version = \"");
-        let is_bumpable = match mode {
-            VersionMode::Inherited => {
-                let is_ws_version = is_root
-                    && section == "[workspace.package]"
-                    && parse_quoted_assignment(trimmed, "version").is_some();
-                is_ws_version || is_path_dep
+        VersionMode::Single => {
+            if let Some(value) = nested_value_mut(document.as_table_mut(), &["package", "version"])
+                && value.as_str() == Some(old_version)
+            {
+                changed += usize::from(replace_toml_string(value, version));
             }
-            VersionMode::Single => {
-                let is_pkg_version =
-                    section == "[package]" && parse_quoted_assignment(trimmed, "version").is_some();
-                (is_pkg_version || is_path_dep)
-                    && extract_version_value(line).as_deref() == Some(old_version)
-            }
-        };
-
-        if is_bumpable && let Some((rewritten, did)) = replace_version_value(line, version) {
-            changed += usize::from(did);
-            out.push_str(&rewritten);
-            out.push('\n');
-            continue;
         }
-
-        out.push_str(line);
-        out.push('\n');
+        VersionMode::Inherited => {}
     }
 
-    // Preserve a trailing-newline-free original faithfully.
-    let final_text = if text.ends_with('\n') {
-        out
-    } else {
-        out.trim_end_matches('\n').to_string()
-    };
+    let final_text = document.to_string();
 
     if final_text != text {
         std::fs::write(path, &final_text).with_context(|| format!("writing {}", path.display()))?;
@@ -523,23 +526,101 @@ fn bump_cargo_toml(
     Ok(changed)
 }
 
-/// Replace the first `version = "…"` value on a line. Returns the rewritten
-/// line and whether the value actually changed, or `None` if there is no
-/// `version = "…"` on the line.
-fn replace_version_value(line: &str, new_version: &str) -> Option<(String, bool)> {
-    let key = "version = \"";
-    let start = line.find(key)?;
-    let value_start = start + key.len();
-    let rest = &line[value_start..];
-    let end = rest.find('"')?;
-    let old = &rest[..end];
-    let changed = old != new_version;
-    let rewritten = format!(
-        "{}{new_version}{}",
-        &line[..value_start],
-        &line[value_start + end..]
-    );
-    Some((rewritten, changed))
+fn nested_value_mut<'a>(table: &'a mut Table, path: &[&str]) -> Option<&'a mut Value> {
+    let (first, rest) = path.split_first()?;
+    let item = table.get_mut(first)?;
+    if rest.is_empty() {
+        return item.as_value_mut();
+    }
+    nested_value_mut(item.as_table_mut()?, rest)
+}
+
+/// Replace a TOML string while retaining its surrounding whitespace/comments.
+fn replace_toml_string(value: &mut Value, new_value: &str) -> bool {
+    if value.as_str() == Some(new_value) {
+        return false;
+    }
+    let decor = value.decor().clone();
+    *value = Value::from(new_value);
+    *value.decor_mut() = decor;
+    true
+}
+
+fn is_dependency_section(parent: &[String], key: &str) -> bool {
+    matches!(
+        key,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    ) && (parent.is_empty()
+        || parent == ["workspace"]
+        || (parent.len() == 2 && parent.first().is_some_and(|part| part == "target")))
+}
+
+/// Rewrite every versioned path dependency, including multiline inline tables,
+/// `[dependencies.name]` tables, workspace dependencies, and target-specific
+/// dependency sections.
+fn bump_path_dependencies(
+    table: &mut Table,
+    new_version: &str,
+    mode: VersionMode,
+    old_version: &str,
+) -> usize {
+    fn bump_spec(
+        item: &mut Item,
+        new_version: &str,
+        mode: VersionMode,
+        old_version: &str,
+    ) -> usize {
+        let (has_path, version) = match item {
+            Item::Value(Value::InlineTable(inline)) => (
+                inline.get("path").and_then(Value::as_str).is_some(),
+                inline.get_mut("version"),
+            ),
+            Item::Table(table) => (
+                table
+                    .get("path")
+                    .and_then(Item::as_value)
+                    .and_then(Value::as_str)
+                    .is_some(),
+                table.get_mut("version").and_then(Item::as_value_mut),
+            ),
+            Item::None | Item::Value(_) | Item::ArrayOfTables(_) => (false, None),
+        };
+        let Some(version) = version.filter(|_| has_path) else {
+            return 0;
+        };
+        if mode == VersionMode::Single && version.as_str() != Some(old_version) {
+            return 0;
+        }
+        usize::from(replace_toml_string(version, new_version))
+    }
+
+    fn visit(
+        table: &mut Table,
+        parent: &mut Vec<String>,
+        new_version: &str,
+        mode: VersionMode,
+        old_version: &str,
+    ) -> usize {
+        let mut changed = 0;
+        for (key, item) in table.iter_mut() {
+            if is_dependency_section(parent, key.get()) {
+                if let Some(dependencies) = item.as_table_mut() {
+                    for (_, spec) in dependencies.iter_mut() {
+                        changed += bump_spec(spec, new_version, mode, old_version);
+                    }
+                }
+                continue;
+            }
+            if let Some(child) = item.as_table_mut() {
+                parent.push(key.get().to_owned());
+                changed += visit(child, parent, new_version, mode, old_version);
+                parent.pop();
+            }
+        }
+        changed
+    }
+
+    visit(table, &mut Vec::new(), new_version, mode, old_version)
 }
 
 /// Parse `key = "value"` from a trimmed line, returning the value.
@@ -653,40 +734,26 @@ enum PackageVersion {
 
 /// Read the `[package]` version declaration out of a manifest's text.
 fn package_version_decl(text: &str) -> Option<PackageVersion> {
-    let mut in_pkg = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_pkg = trimmed == "[package]";
-            continue;
-        }
-        if !in_pkg {
-            continue;
-        }
-        if let Some(v) = parse_quoted_assignment(trimmed, "version") {
-            return Some(PackageVersion::Literal(v));
-        }
-        if trimmed.replace(' ', "") == "version.workspace=true" {
-            return Some(PackageVersion::Inherited);
-        }
+    let manifest: toml::Value = text.parse().ok()?;
+    let version = manifest.get("package")?.get("version")?;
+    if let Some(version) = version.as_str() {
+        return Some(PackageVersion::Literal(version.to_owned()));
     }
-    None
+    version
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        .filter(|inherited| *inherited)
+        .map(|_| PackageVersion::Inherited)
 }
 
 /// Read a quoted `[package]` field (e.g. `name`) out of a manifest's text.
 fn package_field(text: &str, key: &str) -> Option<String> {
-    let mut in_pkg = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_pkg = trimmed == "[package]";
-            continue;
-        }
-        if in_pkg && let Some(val) = parse_quoted_assignment(trimmed, key) {
-            return Some(val);
-        }
-    }
-    None
+    let manifest: toml::Value = text.parse().ok()?;
+    manifest
+        .get("package")?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
@@ -713,38 +780,22 @@ fn scan_version_skew(root: &Path, version: &str, mode: VersionMode) -> Result<Ve
 
 fn scan_version_skew_inherited(root: &Path, version: &str) -> Result<Vec<String>> {
     let mut problems = Vec::new();
-    let root_toml = root.join("Cargo.toml");
     for toml in collect_cargo_tomls(root) {
-        let is_root = toml == root_toml;
         let text = std::fs::read_to_string(&toml)
             .with_context(|| format!("reading {}", toml.display()))?;
+        let manifest: toml::Value = text
+            .parse()
+            .with_context(|| format!("parsing {}", toml.display()))?;
         let rel = toml
             .strip_prefix(root)
             .unwrap_or(&toml)
             .display()
             .to_string();
-        let mut in_ws_pkg = false;
-        for (idx, line) in text.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_ws_pkg = trimmed == "[workspace.package]";
-                continue;
-            }
-            let is_ws_version =
-                is_root && in_ws_pkg && parse_quoted_assignment(trimmed, "version").is_some();
-            let is_path_dep = line.contains("path = \"") && line.contains("version = \"");
-            if (is_ws_version || is_path_dep)
-                && let Some(val) = extract_version_value(line)
-                && val != version
-            {
-                let lineno = idx + 1;
-                let what = if is_ws_version {
-                    "workspace version"
-                } else {
-                    "internal path-dep"
-                };
+        for dependency in path_dependencies(&manifest) {
+            if dependency.version != version {
                 problems.push(format!(
-                    "version skew: {rel}:{lineno} {what} = \"{val}\" but workspace version is \"{version}\""
+                    "version skew: {rel} internal path-dep '{}' at '{}' pins \"{}\" but workspace version is \"{version}\"",
+                    dependency.name, dependency.path, dependency.version
                 ));
             }
         }
@@ -765,26 +816,23 @@ fn scan_path_dep_target_skew(root: &Path) -> Result<Vec<String>> {
             .unwrap_or(&toml)
             .display()
             .to_string();
+        let manifest: toml::Value = text
+            .parse()
+            .with_context(|| format!("parsing {}", toml.display()))?;
         let Some(dir) = toml.parent() else { continue };
-        for (idx, line) in text.lines().enumerate() {
-            let (Some(dep_path), Some(pinned)) =
-                (extract_path_value(line), extract_version_value(line))
-            else {
-                continue;
-            };
-            let target = dir.join(&dep_path).join("Cargo.toml");
+        for dependency in path_dependencies(&manifest) {
+            let target = dir.join(&dependency.path).join("Cargo.toml");
             let Ok(target_text) = std::fs::read_to_string(&target) else {
                 continue;
             };
             // An inheriting target is by definition at the workspace version,
             // which the caller has already verified.
             if let Some(PackageVersion::Literal(actual)) = package_version_decl(&target_text)
-                && actual != pinned
+                && actual != dependency.version
             {
                 problems.push(format!(
-                    "version skew: {rel}:{} path-dep pins \"{pinned}\" but {dep_path} declares \
-                     \"{actual}\"",
-                    idx + 1
+                    "version skew: {rel} path-dep '{}' pins \"{}\" but {} declares \"{actual}\"",
+                    dependency.name, dependency.version, dependency.path
                 ));
             }
         }
@@ -792,23 +840,52 @@ fn scan_path_dep_target_skew(root: &Path) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// Extract the first `version = "…"` value on a line.
-fn extract_version_value(line: &str) -> Option<String> {
-    extract_quoted_value(line, "version")
+struct PathDependency {
+    name: String,
+    path: String,
+    version: String,
 }
 
-/// Extract the first `path = "…"` value on a line.
-fn extract_path_value(line: &str) -> Option<String> {
-    extract_quoted_value(line, "path")
-}
+/// Collect versioned path dependencies from every Cargo dependency section.
+/// `toml::Value` normalizes inline and multiline/table forms into the same
+/// shape, which keeps preflight aligned with the `toml_edit` rewriter.
+fn path_dependencies(manifest: &toml::Value) -> Vec<PathDependency> {
+    fn visit(table: &toml::Table, parent: &mut Vec<String>, out: &mut Vec<PathDependency>) {
+        for (key, value) in table {
+            if is_dependency_section(parent, key) {
+                if let Some(dependencies) = value.as_table() {
+                    for (name, spec) in dependencies {
+                        let Some(spec) = spec.as_table() else {
+                            continue;
+                        };
+                        let (Some(path), Some(version)) = (
+                            spec.get("path").and_then(toml::Value::as_str),
+                            spec.get("version").and_then(toml::Value::as_str),
+                        ) else {
+                            continue;
+                        };
+                        out.push(PathDependency {
+                            name: name.clone(),
+                            path: path.to_owned(),
+                            version: version.to_owned(),
+                        });
+                    }
+                }
+                continue;
+            }
+            if let Some(child) = value.as_table() {
+                parent.push(key.clone());
+                visit(child, parent, out);
+                parent.pop();
+            }
+        }
+    }
 
-/// Extract the first `{key} = "…"` value anywhere on a line.
-fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key} = \"");
-    let start = line.find(&needle)?;
-    let rest = &line[start + needle.len()..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    let mut dependencies = Vec::new();
+    if let Some(table) = manifest.as_table() {
+        visit(table, &mut Vec::new(), &mut dependencies);
+    }
+    dependencies
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,14 +1132,22 @@ fn dirty_paths(root: &Path) -> Result<Vec<String>> {
 fn dirty_paths_outside_edit_surface(root: &Path) -> Result<Vec<String>> {
     Ok(dirty_paths(root)?
         .into_iter()
-        .filter(|p| {
-            let name = Path::new(p)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            !PREPARE_EDIT_FILES.contains(&name.as_str())
-        })
+        .filter(|path| !is_prepare_edit_path(path))
         .collect())
+}
+
+fn is_prepare_edit_path(path: &str) -> bool {
+    let path = Path::new(path);
+    let is_manifest = path.file_name().is_some_and(|name| name == "Cargo.toml");
+    let is_root_release_file = path
+        .parent()
+        .is_some_and(|parent| parent.as_os_str().is_empty())
+        && path.file_name().is_some_and(|name| {
+            PREPARE_EDIT_FILES
+                .iter()
+                .any(|allowed| name == std::ffi::OsStr::new(allowed))
+        });
+    is_manifest || is_root_release_file
 }
 
 #[cfg(test)]
@@ -1078,25 +1163,43 @@ mod tests {
     }
 
     #[test]
-    fn replace_version_value_rewrites_and_reports_change() {
-        let line =
-            r#"maw-lfs = { path = "../maw-lfs", version = "1.0.0-pre.10", optional = true }"#;
-        let (out, changed) = replace_version_value(line, "1.0.0-pre.11").unwrap();
-        assert!(changed);
-        assert_eq!(
-            out,
-            r#"maw-lfs = { path = "../maw-lfs", version = "1.0.0-pre.11", optional = true }"#
+    fn toml_rewriter_handles_spacing_and_dependency_table_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = write_at(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers=[]\n\n\
+             [package]\nname='root'\nversion='0.27.0'\n\n\
+             [dependencies]\n\
+             inline={path='crates/inline',version='0.27.0'}\n\
+             external={version='0.27.0'}\n\n\
+             [dependencies.table]\npath='crates/table'\nversion='0.27.0'\n\n\
+             [target.'cfg(unix)'.build-dependencies.target-table]\npath='crates/target-table'\nversion='0.27.0'\n",
         );
-        // Idempotent second application reports no change.
-        let (out2, changed2) = replace_version_value(&out, "1.0.0-pre.11").unwrap();
-        assert!(!changed2);
-        assert_eq!(out2, out);
-    }
 
-    #[test]
-    fn replace_version_value_none_without_version_key() {
-        let line = r#"maw = { path = "../..", package = "maw-workspaces" }"#;
-        assert!(replace_version_value(line, "1.0.0").is_none());
+        let changed =
+            bump_cargo_toml(&manifest, "0.28.0", true, VersionMode::Single, "0.27.0").unwrap();
+        assert_eq!(changed, 4);
+        let output = std::fs::read_to_string(&manifest).unwrap();
+        let parsed: toml::Value = output.parse().unwrap();
+        assert_eq!(parsed["package"]["version"].as_str(), Some("0.28.0"));
+        assert_eq!(
+            parsed["dependencies"]["inline"]["version"].as_str(),
+            Some("0.28.0")
+        );
+        assert_eq!(
+            parsed["dependencies"]["table"]["version"].as_str(),
+            Some("0.28.0")
+        );
+        assert_eq!(
+            parsed["target"]["cfg(unix)"]["build-dependencies"]["target-table"]["version"].as_str(),
+            Some("0.28.0")
+        );
+        assert_eq!(
+            parsed["dependencies"]["external"]["version"].as_str(),
+            Some("0.27.0"),
+            "non-path dependencies must remain untouched"
+        );
     }
 
     #[test]
@@ -1254,6 +1357,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_valid_toml_without_spaces_around_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_at(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers=[]\n[package]\nname='solo'\nversion='0.27.0'\n",
+        );
+        let ws = find_workspace_root_from(tmp.path()).unwrap();
+        assert_eq!(read_workspace_version(&ws).unwrap(), "0.27.0");
+    }
+
+    #[test]
     fn ascends_from_member_to_enclosing_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         single_workspace(tmp.path());
@@ -1389,5 +1504,40 @@ mod tests {
         // Inheriting members are lockstep regardless of what they declare.
         let members = lockstep_member_names(tmp.path(), "1.0.0-pre.12").unwrap();
         assert!(members.contains("maw-git") && members.contains("maw-cli"));
+    }
+
+    #[test]
+    fn inherited_mode_flags_dependency_subtable_skew() {
+        let tmp = tempfile::tempdir().unwrap();
+        inherited_workspace(tmp.path());
+        write_at(
+            tmp.path(),
+            "crates/maw-cli/Cargo.toml",
+            "[package]\nname='maw-cli'\nversion.workspace=true\n\n\
+             [dependencies.maw-git]\npath='../maw-git'\nversion='1.0.0-pre.11'\n",
+        );
+        let problems =
+            scan_version_skew(tmp.path(), "1.0.0-pre.12", VersionMode::Inherited).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("maw-git"), "{problems:?}");
+    }
+
+    #[test]
+    fn release_manifest_order_writes_root_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        let manifests = release_manifest_order(tmp.path());
+        assert_eq!(manifests.last(), Some(&tmp.path().join("Cargo.toml")));
+    }
+
+    #[test]
+    fn dirty_edit_surface_does_not_allow_unrelated_nested_release_files() {
+        assert!(is_prepare_edit_path("Cargo.toml"));
+        assert!(is_prepare_edit_path("crates/member/Cargo.toml"));
+        assert!(is_prepare_edit_path("Cargo.lock"));
+        assert!(is_prepare_edit_path("CHANGELOG.md"));
+        assert!(!is_prepare_edit_path("docs/CHANGELOG.md"));
+        assert!(!is_prepare_edit_path("examples/demo/Cargo.lock"));
+        assert!(!is_prepare_edit_path("nested/README.md"));
     }
 }

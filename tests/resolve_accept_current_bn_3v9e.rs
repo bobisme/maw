@@ -54,6 +54,27 @@ fn setup_two_committed_conflicts(repo: &TestRepo) {
     ]);
 }
 
+fn setup_named_committed_conflict(repo: &TestRepo, path: &str) {
+    repo.seed_files(&[(path, "base\n")]);
+    repo.maw_ok(&["ws", "create", "a"]);
+    repo.maw_ok(&["ws", "create", "b"]);
+    repo.add_file("a", path, "from a\n");
+    repo.git_in_workspace("a", &["add", "--", path]);
+    repo.git_in_workspace("a", &["commit", "-qm", "a change"]);
+    repo.add_file("b", path, "from b\n");
+    repo.git_in_workspace("b", &["add", "--", path]);
+    repo.git_in_workspace("b", &["commit", "-qm", "b change"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--message",
+        "merge a",
+    ]);
+}
+
 fn placeholder_header(content: &str) -> &str {
     let end = content
         .find("\n\n")
@@ -287,4 +308,32 @@ fn accept_current_refuses_placeholder_header_for_a_different_path() {
         content,
         "header validation failure must not mutate the file"
     );
+}
+
+#[test]
+fn structured_json_escapes_conflict_paths() {
+    let repo = TestRepo::new();
+    let path = "quoted\"name.txt";
+    setup_named_committed_conflict(&repo, path);
+
+    let listed = repo.maw_ok(&["ws", "resolve", "b", "--list", "--format", "json"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&listed).expect("list output must escape special path characters");
+    assert_eq!(listed["conflicts"][0]["path"].as_str(), Some(path));
+
+    std::fs::write(repo.workspace_path("b").join(path), "manual\n")
+        .expect("write manual resolution");
+    let accepted = repo.maw_ok(&[
+        "ws",
+        "resolve",
+        "b",
+        "--accept-current",
+        "--format",
+        "json",
+        "--",
+        path,
+    ]);
+    let accepted: serde_json::Value = serde_json::from_str(&accepted)
+        .expect("accept-current output must escape special path characters");
+    assert_eq!(accepted["accepted_current"][0].as_str(), Some(path));
 }

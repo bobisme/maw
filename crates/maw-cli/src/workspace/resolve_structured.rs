@@ -175,35 +175,32 @@ pub fn list_conflicts(
         .collect();
 
     if format == OutputFormat::Json {
-        let items: Vec<String> = entries
+        let items: Vec<serde_json::Value> = entries
             .iter()
             .map(|(path, conflict)| {
                 let shape = conflict.variant_name();
                 let side_count = conflict.side_count();
-                let workspaces: Vec<String> = conflict
-                    .workspaces()
-                    .iter()
-                    .map(|w| format!("\"{}\"", w.replace('"', "\\\"")))
-                    .collect();
+                let workspaces = conflict.workspaces();
                 let atom_count = match conflict {
                     Conflict::Content { atoms, .. } => atoms.len(),
                     _ => 0,
                 };
-                format!(
-                    r#"{{"path":"{}","shape":"{}","sides":{},"atoms":{},"workspaces":[{}]}}"#,
-                    path.display(),
-                    shape,
-                    side_count,
-                    atom_count,
-                    workspaces.join(","),
-                )
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "shape": shape,
+                    "sides": side_count,
+                    "atoms": atom_count,
+                    "workspaces": workspaces,
+                })
             })
             .collect();
-        println!(
-            r#"{{"workspace":"{workspace}","conflict_count":{},"structured":true,"conflicts":[{}]}}"#,
-            entries.len(),
-            items.join(","),
-        );
+        let output = serde_json::json!({
+            "workspace": workspace,
+            "conflict_count": entries.len(),
+            "structured": true,
+            "conflicts": items,
+        });
+        println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
 
@@ -357,46 +354,46 @@ fn list_conflicts_with_placeholders(
     let structured_count = entries.len();
     let total = structured_count + placeholder_only.len();
     if format == OutputFormat::Json {
-        let conflicts: Vec<String> = entries
+        let conflicts: Vec<serde_json::Value> = entries
             .iter()
             .map(|(path, conflict)| {
-                let workspaces = conflict
-                    .workspaces()
-                    .iter()
-                    .map(|workspace| format!("\"{}\"", workspace.replace('"', "\\\"")))
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let workspaces = conflict.workspaces();
                 let atoms = match conflict {
                     Conflict::Content { atoms, .. } => atoms.len(),
                     _ => 0,
                 };
-                format!(
-                    r#"{{"path":"{}","shape":"{}","sides":{},"atoms":{atoms},"workspaces":[{workspaces}]}}"#,
-                    path.display(),
-                    conflict.variant_name(),
-                    conflict.side_count()
-                )
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "shape": conflict.variant_name(),
+                    "sides": conflict.side_count(),
+                    "atoms": atoms,
+                    "workspaces": workspaces,
+                })
             })
             .collect();
-        let placeholders: Vec<String> = placeholder_only
+        let placeholders: Vec<serde_json::Value> = placeholder_only
             .iter()
             .map(|path| {
-                format!(
-                    r#"{{"path":"{}","state":"placeholder_only"}}"#,
-                    path.display()
-                )
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "state": "placeholder_only",
+                })
             })
             .collect();
         let pending: Vec<String> = pending_current
             .iter()
-            .map(|path| format!("\"{}\"", path.display()))
+            .map(|path| path.display().to_string())
             .collect();
-        println!(
-            r#"{{"workspace":"{workspace}","conflict_count":{total},"structured":true,"recorded_conflict_count":{structured_count},"conflicts":[{}],"placeholder_only":[{}],"pending_current":[{}]}}"#,
-            conflicts.join(","),
-            placeholders.join(","),
-            pending.join(",")
-        );
+        let output = serde_json::json!({
+            "workspace": workspace,
+            "conflict_count": total,
+            "structured": true,
+            "recorded_conflict_count": structured_count,
+            "conflicts": conflicts,
+            "placeholder_only": placeholders,
+            "pending_current": pending,
+        });
+        println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
 
@@ -806,18 +803,21 @@ fn run_accept_current(
     };
 
     if format == OutputFormat::Json {
-        let accepted_json = accepted
+        let accepted_json: Vec<String> = accepted
             .iter()
-            .map(|path| format!("\"{}\"", path.display()))
-            .collect::<Vec<_>>()
-            .join(",");
-        let committed = auto_commit_msg
-            .as_ref()
-            .map_or_else(String::new, |sha| format!(r#","auto_committed":"{sha}""#));
-        println!(
-            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"accepted_current":[{accepted_json}],"conflicts_remaining":{}{committed}}}"#,
-            remaining.len()
-        );
+            .map(|path| path.display().to_string())
+            .collect();
+        let mut output = serde_json::json!({
+            "status": "ok",
+            "workspace": workspace,
+            "structured": true,
+            "accepted_current": accepted_json,
+            "conflicts_remaining": remaining.len(),
+        });
+        if let Some(sha) = &auto_commit_msg {
+            output["auto_committed"] = serde_json::Value::String(sha.clone());
+        }
+        println!("{}", serde_json::to_string(&output)?);
         return Ok(true);
     }
 
@@ -2588,45 +2588,42 @@ fn run_structured_impl(
     if format == OutputFormat::Json {
         let resolved_json: Vec<String> = resolved
             .iter()
-            .map(|p| format!("\"{}\"", p.display()))
+            .map(|path| path.display().to_string())
             .collect();
-        let skipped_json: Vec<String> = skipped
+        let skipped_json: Vec<serde_json::Value> = skipped
             .iter()
-            .map(|(p, r)| {
-                format!(
-                    r#"{{"path":"{}","reason":"{}"}}"#,
-                    p.display(),
-                    r.replace('"', "\\\"")
-                )
+            .map(|(path, reason)| {
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "reason": reason,
+                })
             })
             .collect();
-        let committed_field = auto_commit_msg
-            .as_ref()
-            .map_or_else(String::new, |sha| format!(r#","auto_committed":"{sha}""#));
         // bn-c5ui: include sanity_warnings in JSON output.
-        let sanity_warnings_json: Vec<String> = sanity_warnings
+        let sanity_warnings_json: Vec<serde_json::Value> = sanity_warnings
             .iter()
-            .map(|(p, f)| {
-                format!(
-                    r#"{{"path":"{}","reason":"{}"}}"#,
-                    p.display(),
-                    f.to_string().replace('"', "\\\"")
-                )
+            .map(|(path, failure)| {
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "reason": failure.to_string(),
+                })
             })
             .collect();
-        let sanity_field = if sanity_warnings_json.is_empty() {
-            String::new()
-        } else {
-            format!(r#","sanity_warnings":[{}]"#, sanity_warnings_json.join(","))
-        };
-        println!(
-            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}{}}}"#,
-            resolved_json.join(","),
-            remaining_paths.len(),
-            skipped_json.join(","),
-            committed_field,
-            sanity_field,
-        );
+        let mut output = serde_json::json!({
+            "status": "ok",
+            "workspace": workspace,
+            "structured": true,
+            "resolved": resolved_json,
+            "conflicts_remaining": remaining_paths.len(),
+            "skipped": skipped_json,
+        });
+        if let Some(sha) = &auto_commit_msg {
+            output["auto_committed"] = serde_json::Value::String(sha.clone());
+        }
+        if !sanity_warnings_json.is_empty() {
+            output["sanity_warnings"] = serde_json::Value::Array(sanity_warnings_json);
+        }
+        println!("{}", serde_json::to_string(&output)?);
     } else {
         for p in &resolved {
             // bn-3mbj / bn-1nwn: surface how each resolution was produced so
