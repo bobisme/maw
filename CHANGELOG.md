@@ -2,6 +2,20 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.13 (2026-08-02)
+
+Thirteenth dogfood pre-release, focused on preserving user decisions during conflict resolution, hardening working-copy recovery, and making release automation reliable across maw's workspace layouts.
+
+**Conflict resolution and recovery**
+- **Manual resolutions are preserved (bn-3v9e).** Structured `--keep` now refuses to overwrite a path that diverged from its recorded placeholder. The explicit `--accept-current` flow validates headers, rejects remaining conflict markers, preserves header-free bytes exactly, limits auto-commits to selected paths, and reports honestly that build/test verification is still required.
+- **Conflict state stays coherent.** `ws resolve --list`, `ws conflicts`, and merge gates now use the same effective union of structured metadata and committed placeholders, prune stale entries per path, and provide actionable guidance for header-only and marker-bearing states.
+- **Working-copy restoration is safer (bn-3v9e follow-ups).** Snapshot and replay paths now preserve file/directory transitions and manual content without sweeping unrelated staged work; unsafe relative paths and symlink escapes are rejected before mutation.
+
+**Release and workflow tooling**
+- **Release preparation handles single-version workspaces (bn-3oae).** `maw release prepare` and `preflight` now correctly update and validate the root package plus internal path dependencies, with deterministic lockfile regeneration.
+- **Publish dry-runs are workspace-safe (bn-2s4x).** The CI publish check patches internal crates to local paths so the dry-run validates the repository's actual package graph.
+- Improved consolidated-layout help, default-rebase guidance, and the `gh` override path used by change workflows.
+
 ## v1.0.0-pre.12 — reliability top-5 + field report 2 + release automation (2026-07-11)
 
 Twelfth dogfood pre-release. The largest batch since pre.1: the "30 ideas → top 5" reliability push, full closure of a second mess field report (bn-1m4d, ~30 workspaces / 147 commits, zero data loss), the release-automation tooling used to cut this very release, and a fresh-eyes sweep across merge, clean, history, and fsck.
