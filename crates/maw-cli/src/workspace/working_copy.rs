@@ -442,6 +442,10 @@ pub fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyCon
 // TODO(gix): replace CLI calls with GitRepo trait methods when git add -A, stash create,
 // reset, reset --hard, and clean -fd are supported. Currently gix stash_create only
 // captures index state (not working tree modifications).
+#[expect(
+    clippy::too_many_lines,
+    reason = "snapshot lifecycle stays in one ordered, failure-safe flow"
+)]
 #[instrument(skip_all, fields(workspace = ws_name))]
 pub fn snapshot_working_copy(
     ws_path: &Path,
@@ -520,10 +524,19 @@ pub fn snapshot_working_copy(
     let mut unstage_args: Vec<String> =
         vec!["reset".into(), "-q".into(), "HEAD".into(), "--".into()];
     unstage_args.extend(ADMIN_EXCLUDES.iter().map(|s| (*s).to_string()));
-    let _ = Command::new("git")
+    let unstage_output = Command::new("git")
         .args(&unstage_args)
         .current_dir(ws_path)
-        .output();
+        .output()
+        .context("failed to unstage admin paths during snapshot")?;
+    if !unstage_output.status.success() {
+        let stderr = String::from_utf8_lossy(&unstage_output.stderr);
+        let _ = repo.unstage_all();
+        bail!(
+            "failed to unstage admin paths during snapshot: {}",
+            stderr.trim()
+        );
+    }
 
     // Step 3: Create a stash commit (does NOT modify HEAD or stash list).
     let stash_result = repo.stash_create().map_err(|e| {
@@ -566,10 +579,19 @@ pub fn snapshot_working_copy(
     // Without this, `git checkout <branch>` would fail if the branch has
     // moved and there are conflicting modifications, and `git stash apply`
     // would fail if untracked files captured in the stash still exist.
-    let _ = Command::new("git")
+    let reset_output = Command::new("git")
         .args(["reset", "--hard", "HEAD"])
         .current_dir(ws_path)
-        .output();
+        .output()
+        .context("failed to run git reset --hard HEAD during snapshot")?;
+    if !reset_output.status.success() {
+        let stderr = String::from_utf8_lossy(&reset_output.stderr);
+        bail!(
+            "git reset --hard HEAD failed during snapshot (snapshot preserved at {}): {}",
+            ref_name,
+            stderr.trim()
+        );
+    }
     // `git clean -fd` removes untracked files captured in the stash. Exclude
     // the admin/git dirs so it can never delete the repository (bn-3bkn): in
     // the consolidated layout the root checkout contains the untracked
@@ -579,10 +601,19 @@ pub fn snapshot_working_copy(
         clean_args.push("-e".into());
         clean_args.push(p.into());
     }
-    let _ = Command::new("git")
+    let clean_output = Command::new("git")
         .args(&clean_args)
         .current_dir(ws_path)
-        .output();
+        .output()
+        .context("failed to run git clean -fd during snapshot")?;
+    if !clean_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clean_output.stderr);
+        bail!(
+            "git clean -fd failed during snapshot (snapshot preserved at {}): {}",
+            ref_name,
+            stderr.trim()
+        );
+    }
 
     tracing::info!(
         ref_name = %ref_name,
@@ -853,7 +884,7 @@ pub fn replay_snapshot_with_merge_protection(
                 &merge_label,
                 &local_label,
             );
-            let _ = std::fs::write(&full, &markers);
+            write_replay_output(&full, &markers, "write delete/modify conflict markers")?;
             conflicts.push(WorkingCopyConflict {
                 path: path.display().to_string(),
                 conflict_type: "delete_mod_conflict".to_owned(),
@@ -864,7 +895,7 @@ pub fn replay_snapshot_with_merge_protection(
         // If stash version equals merge version, nothing to do.
         if stash_content == *merge_content {
             // Restore merge version (stash_apply may have overwritten).
-            let _ = std::fs::write(&full, merge_content);
+            write_replay_output(&full, merge_content, "restore merged content")?;
             continue;
         }
 
@@ -872,7 +903,12 @@ pub fn replay_snapshot_with_merge_protection(
 
         // Ensure parent directories exist.
         if let Some(parent) = full.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create parent directory {} while replaying snapshot",
+                    parent.display()
+                )
+            })?;
         }
 
         // Look up the merge driver for this path.
@@ -926,7 +962,11 @@ pub fn replay_snapshot_with_merge_protection(
                             &merge_label,
                             &local_label,
                         );
-                        let _ = std::fs::write(&full, &markers);
+                        write_replay_output(
+                            &full,
+                            &markers,
+                            "write post-merge sanity conflict markers",
+                        )?;
                         conflicts.push(WorkingCopyConflict {
                             path: path.display().to_string(),
                             conflict_type: "sanity-flag".to_owned(),
@@ -939,19 +979,11 @@ pub fn replay_snapshot_with_merge_protection(
                     );
                 }
                 // Non-overlapping edits merged cleanly — write the result.
-                if let Err(e) = std::fs::write(&full, &merged) {
-                    tracing::warn!("failed to write merged file {}: {e}", path.display());
-                }
+                write_replay_output(&full, &merged, "write merged content")?;
             }
             Ok((marker_output, true)) => {
                 // True conflict — write the markers.
-                if let Err(e) = std::fs::write(&full, &marker_output) {
-                    tracing::warn!(
-                        "failed to write conflict markers for {}: {e}",
-                        path.display()
-                    );
-                    continue;
-                }
+                write_replay_output(&full, &marker_output, "write conflict markers")?;
                 conflicts.push(WorkingCopyConflict {
                     path: path.display().to_string(),
                     conflict_type: "content".to_owned(),
@@ -970,7 +1002,7 @@ pub fn replay_snapshot_with_merge_protection(
                     &merge_label,
                     &local_label,
                 );
-                let _ = std::fs::write(&full, &markers);
+                write_replay_output(&full, &markers, "write fallback conflict markers")?;
                 conflicts.push(WorkingCopyConflict {
                     path: path.display().to_string(),
                     conflict_type: "content".to_owned(),
@@ -994,6 +1026,33 @@ pub fn replay_snapshot_with_merge_protection(
     } else {
         Ok(SnapshotReplayResult::Conflicts(conflicts))
     }
+}
+
+/// Write one replay result and preserve the error as part of the replay
+/// outcome. A failed write must not be downgraded to a warning: callers may
+/// otherwise clean up the durable snapshot and report a successful replay
+/// while the user's merged or conflict-marked content was never persisted.
+fn write_replay_output(path: &Path, bytes: &[u8], action: &str) -> Result<()> {
+    let mut current = path;
+    loop {
+        if let Ok(metadata) = current.symlink_metadata()
+            && metadata.file_type().is_symlink()
+        {
+            bail!(
+                "refusing to {action} at {} because path component {} is a symlink",
+                path.display(),
+                current.display()
+            );
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    std::fs::write(path, bytes).with_context(|| format!("failed to {action} at {}", path.display()))
 }
 
 /// Perform a 3-way text merge using gix's built-in text driver (pure Rust).
@@ -2067,5 +2126,38 @@ mod tests {
         let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws")
             .expect("operation should succeed");
         assert!(ref_oid.is_some(), "snapshot ref should be kept on conflict");
+    }
+
+    #[test]
+    fn replay_output_write_failure_is_reported() {
+        let temp = TempDir::new().expect("operation should succeed");
+        let path = temp.path().join("output");
+        fs::create_dir(&path).expect("create blocking directory");
+
+        let error = write_replay_output(&path, b"content", "write merged content")
+            .expect_err("writing a directory must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("write merged content"),
+            "message={message}"
+        );
+        assert!(message.contains("output"), "message={message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_output_refuses_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("operation should succeed");
+        let outside = temp.path().join("outside");
+        let path = temp.path().join("output");
+        fs::write(&outside, b"protected").expect("create outside file");
+        symlink(&outside, &path).expect("create symlink");
+
+        let error = write_replay_output(&path, b"replacement", "write merged content")
+            .expect_err("replay must not follow a symlink");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(fs::read(&outside).expect("read outside file"), b"protected");
     }
 }

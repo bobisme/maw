@@ -2153,7 +2153,13 @@ fn restore_epoch_region(
         let bytes = repo
             .read_blob(blob_oid)
             .map_err(|e| anyhow::anyhow!("read_blob({blob_oid}) failed: {e}"))?;
-        write_restored_entry(&ws_path.join(&rel), &bytes, mode)?;
+        // The current worktree may contain attacker- or user-created
+        // symlinks after the conflict was recorded. Validate every concrete
+        // destination before creating parent directories or writing bytes so
+        // restoring an epoch side cannot escape the workspace through one of
+        // those links.
+        let destination = checked_workspace_path(ws_path, &rel)?;
+        write_restored_entry(&destination, &bytes, mode)?;
         written.push(rel);
     }
     Ok(written)
@@ -3030,6 +3036,65 @@ mod tests {
         let error = checked_workspace_path(&workspace, Path::new("escape/resolved.rs"))
             .expect_err("symlink must not escape the workspace");
         assert!(error.to_string().contains("outside workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_epoch_region_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let (_td, _root, ws_path, repo) = setup_ws_repo("ws-df-escape");
+        std::fs::create_dir_all(ws_path.join("region")).expect("create epoch region");
+        std::fs::write(ws_path.join("region/child.txt"), b"epoch content\n")
+            .expect("write epoch content");
+        let add = std::process::Command::new("git")
+            .args(["add", "region/child.txt"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("stage epoch content");
+        assert!(add.success(), "git add must succeed");
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", "epoch region"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("commit epoch content");
+        assert!(commit.success(), "git commit must succeed");
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("read epoch oid");
+        assert!(head.status.success());
+        let epoch_oid = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        let epoch_oid = GitOid::new(&epoch_oid).expect("valid epoch oid");
+        maw_core::refs::write_ref(
+            &ws_path,
+            &maw_core::refs::workspace_epoch_ref("ws-df-escape"),
+            &epoch_oid,
+        )
+        .expect("write workspace epoch ref");
+
+        let outside = ws_path.parent().expect("workspace parent").join("outside");
+        std::fs::create_dir(&outside).expect("create outside dir");
+        std::fs::remove_dir_all(ws_path.join("region")).expect("remove epoch region");
+        symlink(&outside, ws_path.join("region")).expect("create escaping symlink");
+
+        let error = restore_epoch_region(
+            &repo,
+            &ws_path,
+            "ws-df-escape",
+            &ws_path,
+            Path::new("region"),
+        )
+        .expect_err("restoration must reject an escaping symlink");
+        assert!(
+            error.to_string().contains("outside workspace"),
+            "error={error}"
+        );
+        assert!(
+            !outside.join("child.txt").exists(),
+            "restore must not write outside the workspace"
+        );
     }
 
     #[test]
