@@ -12,6 +12,11 @@
 //!   (`git rev-list --all`), *unless the just-executed op legitimately moved
 //!   that workspace* — so a merge that orphans a NON-target sibling's work
 //!   trips it, while a sibling's own commit/advance/replay does not.
+//!   bn-286g extends it with Oracle A's bn-3g6o conflict-as-data carveout: a
+//!   sibling replay that CONFLICTS rewrites the sibling's blob into a
+//!   diff3-marker blob (fresh OID) while preserving the bytes verbatim and
+//!   pinning the original OID in the sibling's conflict sidecar — preserved,
+//!   not orphaned.
 //! - [`TrunkDirtyPreservation`] — the **bn-1xmk** class. Trunk
 //!   preserve-and-replay clobbered uncommitted tracked trunk files whose
 //!   committed content changed via a merge. This oracle asserts the recorded
@@ -153,6 +158,31 @@ impl std::error::Error for EscapeViolation {}
 /// reset (which leaves the blobs unreferenced) trips it. The op-targeting skip
 /// lets a workspace's own commit legitimately drop content (e.g. deleting a
 /// file) without a false positive.
+///
+/// # Conflict-as-data carveout (bn-3g6o, extended here by bn-286g)
+///
+/// Blob reachability alone is NOT the whole preservation story. When the
+/// post-merge sibling auto-rebase replays a sibling whose committed path also
+/// changed in the epoch range, maw produces a **diff3 conflict-marker blob**:
+/// the sibling's original blob OID stops being tree-reachable, but its bytes
+/// survive VERBATIM inside the marker blob and its OID is pinned in the
+/// sibling's conflict sidecars. That is maw's first-class conflict-as-data
+/// state — recoverable via `maw ws resolve` / `maw ws recover` — not work
+/// loss. Oracle A has carried this carveout since bn-3g6o; this oracle did
+/// not, so it false-positived on every conflicting sibling replay (bn-286g,
+/// found by `DST_TRACES=48 DST_STEPS=48`, invisible at the 16x24 default).
+/// The same two rescue tests are applied here, in the same order and via the
+/// SAME shared helpers so the two oracles cannot drift:
+///
+///   (a) the blob OID is recorded as a conflict side in a **live** workspace's
+///       `rebase-conflicts.json` / `conflict-tree.json` sidecar; or
+///   (b) the blob's raw bytes appear verbatim inside some reachable blob that
+///       is ITSELF a conflict-marker blob (covers arbitrarily-deep nested
+///       marker wrapping, where the sidecar only names the immediately-prior
+///       side OIDs).
+///
+/// A blob in NO reachable tree, NO live sidecar and NO reachable marker blob
+/// is genuinely orphaned and still fires.
 #[derive(Debug, Default, Clone)]
 pub struct SiblingRefFaithfulness {
     /// `ws name -> set of blob OIDs committed by that workspace (as of the last
@@ -186,6 +216,12 @@ impl SiblingRefFaithfulness {
     /// leaving them reachable from no root) turns red — the bn-rah2
     /// sibling-orphan signature. Orphaned objects are excluded from `rev-list`
     /// even before `git gc` prunes them, so the reset is detected immediately.
+    ///
+    /// bn-286g: a blob missing from the reachable set is then run through the
+    /// bn-3g6o conflict-as-data rescue tests (sidecar OID pin, then containment
+    /// in a reachable conflict-marker blob) before being reported — see the
+    /// type-level docs. Both tests are computed lazily, so a clean step pays
+    /// nothing extra.
     pub fn check_step(&mut self, repo_root: &Path, op: &Op) -> Vec<EscapeViolation> {
         let worktrees = list_worktrees(repo_root);
         let roots = frontier_roots(repo_root, &worktrees);
@@ -194,6 +230,12 @@ impl SiblingRefFaithfulness {
             Err(v) => return vec![v],
         };
         let targeted = op_targets(op);
+
+        // bn-286g: the conflict-as-data rescue sets, computed LAZILY and at
+        // most once per step — only when some tracked blob is missing from the
+        // reachable set. The green fast path pays nothing.
+        let mut sidecar_blobs: Option<std::collections::HashSet<String>> = None;
+        let mut marker_blobs: Option<Vec<Vec<u8>>> = None;
 
         let mut violations = Vec::new();
         for (ws, blobs) in &self.committed_blobs {
@@ -209,12 +251,47 @@ impl SiblingRefFaithfulness {
                 continue;
             }
             for blob in blobs {
-                if !reachable.contains(blob) {
-                    violations.push(EscapeViolation::SiblingWorkOrphaned {
-                        workspace: ws.clone(),
-                        blob: blob.clone(),
-                    });
+                if reachable.contains(blob) {
+                    continue;
                 }
+                // (a) bn-3g6o sidecar OID match — the blob is pinned as a
+                //     conflict side by a LIVE workspace, so `maw ws resolve` /
+                //     `maw ws recover` can still reach it. Only live
+                //     workspaces count: a stale sidecar left by a destroyed
+                //     workspace must never rescue.
+                let pinned = sidecar_blobs.get_or_insert_with(|| {
+                    crate::oracle_a::conflict_sidecar_blobs_for(
+                        repo_root,
+                        worktrees.keys().map(String::as_str),
+                    )
+                });
+                if pinned.contains(blob) {
+                    continue;
+                }
+                // (b) bn-3g6o content containment — the bytes survive verbatim
+                //     inside a reachable CONFLICT-MARKER blob (possibly nested
+                //     several rebases deep, where no sidecar names the original
+                //     OID any more). Bounded to marker blobs so a coincidental
+                //     substring match against an ordinary file cannot mask a
+                //     genuine loss.
+                if let Some(bytes) = crate::oracle_a::read_blob_bytes(repo_root, blob) {
+                    let markers = marker_blobs.get_or_insert_with(|| {
+                        crate::oracle_a::reachable_marker_blob_bytes(
+                            repo_root,
+                            reachable.iter().map(String::as_str),
+                        )
+                    });
+                    if markers
+                        .iter()
+                        .any(|m| crate::oracle_a::contains_subslice(m, &bytes))
+                    {
+                        continue;
+                    }
+                }
+                violations.push(EscapeViolation::SiblingWorkOrphaned {
+                    workspace: ws.clone(),
+                    blob: blob.clone(),
+                });
             }
         }
 
@@ -786,6 +863,156 @@ mod tests {
         assert!(
             v.is_empty(),
             "a replay preserving the blobs must stay green: {v:?}"
+        );
+    }
+
+    // ----- bn-286g: conflict-as-data carveout (bn-3g6o parity) -------------
+
+    /// The exact diff3 shape maw's rebase writes when a sibling's committed
+    /// path also changed in the epoch range: the sibling's ORIGINAL bytes
+    /// survive verbatim between the markers under a brand-new blob OID.
+    fn marker_wrap(epoch_side: &str, ws_side: &str) -> String {
+        format!(
+            "<<<<<<< epoch (current)\n{epoch_side}||||||| base\n=======\n{ws_side}>>>>>>> sibling (workspace changes)\n"
+        )
+    }
+
+    /// Plant a `rebase-conflicts.json` sidecar pinning `theirs` for `ws_name`,
+    /// exactly as `maw`'s auto-rebase does (V2 layout: `.manifold/artifacts/`).
+    fn write_rebase_conflicts_sidecar(root: &Path, ws_name: &str, path: &str, theirs: &str) {
+        let dir = root
+            .join(".manifold")
+            .join("artifacts")
+            .join("ws")
+            .join(ws_name);
+        fs::create_dir_all(&dir).unwrap();
+        let json = format!(
+            r#"{{"conflicts":[{{"path":"{path}","original_commit":"{theirs}","ours":"blob:{theirs}","theirs":"blob:{theirs}"}}],"rebase_from":"{theirs}","rebase_to":"{theirs}"}}"#
+        );
+        fs::write(dir.join("rebase-conflicts.json"), json).unwrap();
+    }
+
+    /// bn-286g REGRESSION (the DST 48x48 failure, seeds 0/15/18): the
+    /// post-merge sibling auto-rebase replays a sibling onto the new epoch and
+    /// CONFLICTS on a path the sibling committed. The sibling's original blob
+    /// OID stops being tree-reachable — it is now wrapped in diff3 markers
+    /// under a fresh OID — but the bytes survive verbatim and the OID is pinned
+    /// in the sibling's `rebase-conflicts.json`. That is conflict-as-data, not
+    /// work loss: the oracle must stay GREEN (Oracle A has done so since
+    /// bn-3g6o).
+    #[test]
+    fn conflict_marker_rewrite_with_sidecar_stays_green_bn_286g() {
+        let (dir, root_oid) = setup_repo();
+        let root = dir.path();
+        let ws_side = "sibling private work\n";
+        let sib = commit_unique_file(root, &root_oid, "shared.txt", ws_side);
+        make_ws(root, "sibling", &sib);
+
+        let mut oracle = SiblingRefFaithfulness::new();
+        let v1 = oracle.check_step(root, &gc_op());
+        assert!(v1.is_empty(), "step 1 should be clean: {v1:?}");
+
+        // The blob the sibling committed, before the replay rewrites it.
+        let original_blob = git(root, &["rev-parse", &format!("{sib}:shared.txt")]);
+
+        // Replay-with-conflict: a NEW commit whose `shared.txt` is the marker
+        // blob. The original blob OID is now in no tree.
+        let wrapped = marker_wrap("epoch version of shared\n", ws_side);
+        let replayed = commit_unique_file(root, &root_oid, "shared.txt", &wrapped);
+        move_ws_tip(root, "sibling", &replayed);
+        write_rebase_conflicts_sidecar(root, "sibling", "shared.txt", &original_blob);
+
+        let v = oracle.check_step(root, &gc_op());
+        assert!(
+            v.is_empty(),
+            "bn-286g: a blob pinned as a conflict side by a LIVE workspace is \
+             preserved (conflict-as-data), not orphaned: {v:?}"
+        );
+    }
+
+    /// bn-286g / bn-3g6o §(b): after a SECOND auto-rebase the sidecar only
+    /// names the immediately-prior (already-wrapped) side OIDs, so the original
+    /// blob is in no sidecar at all — but its bytes are still nested inside the
+    /// reachable marker blob. Containment must rescue it.
+    #[test]
+    fn nested_marker_wrapped_blob_without_sidecar_stays_green_bn_286g() {
+        let (dir, root_oid) = setup_repo();
+        let root = dir.path();
+        let ws_side = "sibling private work\n";
+        let sib = commit_unique_file(root, &root_oid, "shared.txt", ws_side);
+        make_ws(root, "sibling", &sib);
+
+        let mut oracle = SiblingRefFaithfulness::new();
+        let _ = oracle.check_step(root, &gc_op());
+
+        // Two levels of marker wrapping, NO sidecar written at all.
+        let once = marker_wrap("epoch v1\n", ws_side);
+        let twice = marker_wrap("epoch v2\n", &once);
+        let replayed = commit_unique_file(root, &root_oid, "shared.txt", &twice);
+        move_ws_tip(root, "sibling", &replayed);
+
+        let v = oracle.check_step(root, &gc_op());
+        assert!(
+            v.is_empty(),
+            "bn-286g: bytes nested inside a reachable marker blob are preserved: {v:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the bn-286g carveout: the same orphaning shape, but
+    /// the bytes live in NO sidecar and inside NO conflict-marker blob (the
+    /// replacement blob is an ordinary file). The oracle must STILL fire —
+    /// the carveout must not become a blanket amnesty.
+    #[test]
+    fn orphaned_blob_without_sidecar_or_marker_still_trips_bn_286g() {
+        let (dir, root_oid) = setup_repo();
+        let root = dir.path();
+        let sib = commit_unique_file(root, &root_oid, "shared.txt", "sibling private work\n");
+        make_ws(root, "sibling", &sib);
+
+        let mut oracle = SiblingRefFaithfulness::new();
+        let _ = oracle.check_step(root, &gc_op());
+
+        // Replacement content contains NO conflict markers and no sidecar is
+        // planted: the sibling's bytes are genuinely gone.
+        let replayed = commit_unique_file(root, &root_oid, "shared.txt", "epoch version only\n");
+        move_ws_tip(root, "sibling", &replayed);
+
+        let v = oracle.check_step(root, &gc_op());
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                EscapeViolation::SiblingWorkOrphaned { workspace, .. } if workspace == "sibling"
+            )),
+            "bn-286g: genuinely orphaned work must still trip the oracle: {v:?}"
+        );
+    }
+
+    /// A sidecar left behind by a DESTROYED workspace must not rescue a live
+    /// workspace's orphaned blob — only live workspaces' sidecars count.
+    #[test]
+    fn stale_sidecar_of_destroyed_ws_does_not_rescue_bn_286g() {
+        let (dir, root_oid) = setup_repo();
+        let root = dir.path();
+        let sib = commit_unique_file(root, &root_oid, "shared.txt", "sibling private work\n");
+        make_ws(root, "sibling", &sib);
+
+        let mut oracle = SiblingRefFaithfulness::new();
+        let _ = oracle.check_step(root, &gc_op());
+        let original_blob = git(root, &["rev-parse", &format!("{sib}:shared.txt")]);
+
+        let replayed = commit_unique_file(root, &root_oid, "shared.txt", "epoch version only\n");
+        move_ws_tip(root, "sibling", &replayed);
+        // The pin exists — but under a workspace that has no worktree.
+        write_rebase_conflicts_sidecar(root, "ghost", "shared.txt", &original_blob);
+
+        let v = oracle.check_step(root, &gc_op());
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                EscapeViolation::SiblingWorkOrphaned { workspace, .. } if workspace == "sibling"
+            )),
+            "bn-286g: a stale sidecar of a non-existent workspace must not \
+             rescue an orphaned blob: {v:?}"
         );
     }
 

@@ -76,6 +76,12 @@
 //! default 24). Deep runs are clean: e.g. `DST_TRACES=64 DST_STEPS=80` →
 //! 5120 op-steps, 0 violations (the depth ceiling that needed bn-3g6o — Oracle
 //! A recognizing content preserved inside conflict-marker rewrites — is fixed).
+//!
+//! bn-286g: `DST_TRACES=48 DST_STEPS=48` surfaced the SAME conflict-as-data
+//! gap in the later-added `SiblingRefFaithfulness` escape oracle (seeds
+//! 0/15/18). The default 16x24 budget never reaches a *conflicting* sibling
+//! auto-rebase, which is why CI stayed green — so the shape is now pinned at
+//! the default budget by `bn_286g_conflicted_sibling_replay_is_green` below.
 
 mod manifold_common;
 
@@ -1023,6 +1029,27 @@ fn dst_production_tier_survives_faults() {
 /// corresponding oracle turn red here within the plan's bounded step count.
 #[cfg(feature = "assurance")]
 fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<String> {
+    drive_regression_plan_reported(plan).violations
+}
+
+/// What [`drive_regression_plan_reported`] observed while driving a regression
+/// plan: the oracle violations plus the NON-VACUITY evidence a caller needs to
+/// prove the plan actually reached the state it exists to cover.
+#[cfg(feature = "assurance")]
+struct RegressionRun {
+    /// Oracle violation strings (empty == the plan is green).
+    violations: Vec<String>,
+    /// Workspaces that ended the run with a `rebase-conflicts.json` sidecar —
+    /// i.e. whose auto-rebase actually produced conflict-as-data (bn-286g).
+    conflicted_workspaces: Vec<String>,
+    /// `true` if some blob reachable at the end of the run bears maw's diff3
+    /// conflict markers — the marker rewrite the bn-286g carveout is about.
+    saw_conflict_marker_blob: bool,
+}
+
+/// [`drive_regression_plan`] plus the non-vacuity evidence.
+#[cfg(feature = "assurance")]
+fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan) -> RegressionRun {
     let repo = TestRepo::new();
     repo.seed_files(&[("base.txt", "base content\n")]);
 
@@ -1077,7 +1104,67 @@ fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<S
             violations.push(format!("step={i} op={name} CleanMaterialization: {v}"));
         }
     }
-    violations
+
+    let conflicted_workspaces = workspaces_with_conflict_sidecar(repo.root());
+    let saw_conflict_marker_blob = repo_has_conflict_marker_blob(repo.root());
+    RegressionRun {
+        violations,
+        conflicted_workspaces,
+        saw_conflict_marker_blob,
+    }
+}
+
+/// Names of workspaces whose `artifacts/ws/<name>/rebase-conflicts.json`
+/// sidecar exists — the on-disk proof that maw's auto-rebase produced
+/// conflict-as-data for that workspace (bn-286g non-vacuity).
+#[cfg(feature = "assurance")]
+fn workspaces_with_conflict_sidecar(root: &std::path::Path) -> Vec<String> {
+    let dir = maw_core::model::layout::LayoutFlavor::detect(root)
+        .manifold_dir(root)
+        .join("artifacts")
+        .join("ws");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().join("rebase-conflicts.json").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// `true` if ANY object in the repo is a blob bearing maw's diff3 conflict
+/// markers — the marker rewrite that made the sibling's original blob OID
+/// unreachable (bn-286g non-vacuity).
+#[cfg(feature = "assurance")]
+fn repo_has_conflict_marker_blob(root: &std::path::Path) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--objects", "--all"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else { return false };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some(oid) = line.split_whitespace().next() else {
+            continue;
+        };
+        let Ok(blob) = std::process::Command::new("git")
+            .args(["cat-file", "blob", oid])
+            .current_dir(root)
+            .output()
+        else {
+            continue;
+        };
+        if !blob.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&blob.stdout);
+        if text.contains("<<<<<<<") && text.contains(">>>>>>>") {
+            return true;
+        }
+    }
+    false
 }
 
 /// The bn-rah2 regression scenario (FF-absorb orphaned committed-ahead
@@ -1095,6 +1182,47 @@ fn bn_rah2_regression_is_green() {
         violations.is_empty(),
         "bn-rah2 regression must be clean with the fix in place; oracle violations:\n{}",
         violations.join("\n"),
+    );
+}
+
+/// bn-286g: a post-merge sibling auto-rebase that CONFLICTS must be GREEN.
+///
+/// This is the default-budget regression for the deep-DST failure
+/// (`DST_TRACES=48 DST_STEPS=48`, seeds 0/15/18): maw rewrites the sibling's
+/// committed blob into a diff3 conflict-marker blob and pins the original OID
+/// in `rebase-conflicts.json`. The bytes survive verbatim and the state is
+/// recoverable (`maw ws resolve`), so this is conflict-as-data, not an
+/// orphaned sibling — `SiblingRefFaithfulness` must not fire. Reverting the
+/// bn-286g carveout in `oracle_escape.rs` turns this test RED.
+///
+/// The two non-vacuity assertions are load-bearing: without a real conflict
+/// (sidecar written AND a marker blob in the object store) the plan would
+/// exercise nothing and a green result would say nothing.
+#[cfg(feature = "assurance")]
+#[test]
+fn bn_286g_conflicted_sibling_replay_is_green() {
+    let plan = maw::assurance::scenario::bn_286g_regression_plan();
+    let run = drive_regression_plan_reported(&plan);
+
+    assert!(
+        run.conflicted_workspaces.iter().any(|w| w == "ws-sibling"),
+        "NON-VACUITY (bn-286g): the sibling auto-rebase did not produce a \
+         conflict sidecar, so the conflict-as-data path was never exercised. \
+         Workspaces with sidecars: {:?}",
+        run.conflicted_workspaces,
+    );
+    assert!(
+        run.saw_conflict_marker_blob,
+        "NON-VACUITY (bn-286g): no conflict-marker blob exists in the repo, \
+         so no committed blob was ever rewritten — the oracle carveout under \
+         test was never reached."
+    );
+
+    assert!(
+        run.violations.is_empty(),
+        "bn-286g: a conflicting sibling replay is conflict-as-data, not work \
+         loss; oracle violations:\n{}",
+        run.violations.join("\n"),
     );
 }
 

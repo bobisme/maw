@@ -77,6 +77,11 @@ pub mod oracle_b;
 /// (trunk preserve-and-replay clobbered dirty tracked files — bn-1xmk), and
 /// [`oracle_escape::check_record_ref_coherence`] (gc desynced recovery refs from
 /// destroy records — bn-3uou).
+///
+/// bn-286g: `SiblingRefFaithfulness` shares Oracle A's bn-3g6o
+/// conflict-as-data carveout, so a sibling replay that CONFLICTS (original blob
+/// rewritten into a diff3-marker blob, original OID pinned in the sibling's
+/// conflict sidecar) reads as preserved rather than orphaned.
 #[cfg(feature = "oracles")]
 pub mod oracle_escape;
 /// **Clean-materialization oracle** for the bn-p3m9 class (bn-3gba).

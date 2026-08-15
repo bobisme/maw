@@ -288,7 +288,10 @@ impl OracleA {
                 // arbitrarily-deep nested marker-wrapping).
                 if let Some(bytes) = read_blob_bytes(&self.repo_root, blob) {
                     let markers = marker_blobs.get_or_insert_with(|| {
-                        reachable_marker_blob_bytes(&self.repo_root, &self.reachable_blobs)
+                        reachable_marker_blob_bytes(
+                            &self.repo_root,
+                            self.reachable_blobs.iter().map(String::as_str),
+                        )
                     });
                     if markers.iter().any(|m| contains_subslice(m, &bytes)) {
                         continue;
@@ -743,15 +746,34 @@ fn ls_tree_blobs(repo_root: &Path, tip: &str) -> Result<Vec<String>, AssuranceVi
 /// drift in either sidecar and cannot itself mask a genuine loss — a blob
 /// that is in no frontier tree AND no sidecar still fires G1.
 fn collect_conflict_sidecar_blobs(repo_root: &Path, state: &AssuranceState) -> HashSet<String> {
+    // Only extant workspaces preserve content via their sidecars; a destroyed
+    // workspace's content must live on a recovery ref (handled by the
+    // frontier), not a stale sidecar.
+    let live = state
+        .workspaces
+        .iter()
+        .filter(|(_, status)| status.exists)
+        .map(|(name, _)| name.as_str());
+    conflict_sidecar_blobs_for(repo_root, live)
+}
+
+/// The workspace-name-driven core of [`collect_conflict_sidecar_blobs`],
+/// shared with [`crate::oracle_escape::SiblingRefFaithfulness`] (bn-286g) so
+/// both oracles honour the SAME bn-3g6o conflict-as-data carveout and cannot
+/// drift apart.
+///
+/// `live_workspaces` must contain only workspaces that still exist — a stale
+/// sidecar left behind by a destroyed workspace must never rescue a blob.
+pub(crate) fn conflict_sidecar_blobs_for<'a, I>(
+    repo_root: &Path,
+    live_workspaces: I,
+) -> HashSet<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let manifold = LayoutFlavor::detect_with_env(repo_root).manifold_dir(repo_root);
     let mut out = HashSet::new();
-    for (ws_name, status) in &state.workspaces {
-        // Only extant workspaces preserve content via their sidecars; a
-        // destroyed workspace's content must live on a recovery ref (handled
-        // by the frontier), not a stale sidecar.
-        if !status.exists {
-            continue;
-        }
+    for ws_name in live_workspaces {
         let ws_dir = manifold.join("artifacts").join("ws").join(ws_name);
         for sidecar in ["rebase-conflicts.json", "conflict-tree.json"] {
             let path = ws_dir.join(sidecar);
@@ -816,7 +838,7 @@ const CONFLICT_MARKER_CLOSE: &[u8] = b">>>>>>>";
 /// Used ONLY in the rare lazy-confirm path (bn-3g6o content-containment).
 ///
 /// TODO(gix): assurance carveout — see [`rev_list_objects`].
-fn read_blob_bytes(repo_root: &Path, oid: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_blob_bytes(repo_root: &Path, oid: &str) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .args(["cat-file", "blob", oid])
         .current_dir(repo_root)
@@ -841,7 +863,14 @@ fn read_blob_bytes(repo_root: &Path, oid: &str) -> Option<Vec<u8>> {
 /// and (2) contain both marker sentinels. Non-blob OIDs simply fail the
 /// `cat-file blob` read and are skipped. Computed at most once per
 /// lazy-confirm step.
-fn reachable_marker_blob_bytes(repo_root: &Path, reachable: &HashSet<String>) -> Vec<Vec<u8>> {
+///
+/// bn-286g: generic over the reachable-set iterator so
+/// [`crate::oracle_escape::SiblingRefFaithfulness`] (which keeps its reachable
+/// set in a `BTreeSet`) shares this exact implementation.
+pub(crate) fn reachable_marker_blob_bytes<'a, I>(repo_root: &Path, reachable: I) -> Vec<Vec<u8>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut out = Vec::new();
     for oid in reachable {
         let Some(bytes) = read_blob_bytes(repo_root, oid) else {
@@ -860,7 +889,7 @@ fn reachable_marker_blob_bytes(repo_root: &Path, reachable: &HashSet<String>) ->
 ///
 /// Empty needle is vacuously contained (a witnessed empty blob is trivially
 /// present in any marker blob — and an empty original is not "lost" content).
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }

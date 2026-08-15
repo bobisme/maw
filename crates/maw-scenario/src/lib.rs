@@ -668,6 +668,11 @@ pub const BN_RAH2_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0001;
 /// clobbered by preserve-and-replay). See [`BN_RAH2_REGRESSION_SEED`].
 pub const BN_1XMK_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0002;
 
+/// Sentinel seed tagging the [`bn_286g_regression_plan`] (conflicting sibling
+/// auto-rebase — conflict-as-data must not read as an orphan). See
+/// [`BN_RAH2_REGRESSION_SEED`].
+pub const BN_286G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0003;
+
 /// Build a `PlannedStep` with a monotonic seed-independent clock derived from
 /// the step index (regression plans are hand-built, so the clock is a simple
 /// deterministic ramp off `GIT_TIME_BASE`).
@@ -841,6 +846,99 @@ pub fn bn_1xmk_regression_plan() -> ScenarioPlan {
     ];
     ScenarioPlan {
         seed: BN_1XMK_REGRESSION_SEED,
+        profile: ConditionProfile::default().with_escape_weight(1),
+        steps,
+    }
+}
+
+/// The **bn-286g** shape as a named, deterministic regression plan: a
+/// post-merge sibling auto-rebase that **conflicts**.
+///
+/// A sibling workspace commits `shared/hot.txt`; a second workspace commits a
+/// DIFFERENT `shared/hot.txt` and is merged into default. The merge advances
+/// the epoch and auto-rebases the sibling, which conflicts on that path — so
+/// maw rewrites the sibling's committed blob into a diff3 conflict-marker blob
+/// (fresh OID) and pins the original OID in the sibling's
+/// `rebase-conflicts.json`. The original blob is then reachable from no tree.
+///
+/// That is maw's first-class **conflict-as-data** state, not work loss:
+/// `SiblingRefFaithfulness` must stay GREEN. Before bn-286g it fired
+/// `SiblingWorkOrphaned` here — the deep-DST failure (`DST_TRACES=48
+/// DST_STEPS=48`, seeds 0/15/18) that the 16x24 default budget never reached.
+/// Reverting the bn-286g conflict-as-data carveout turns this plan RED.
+///
+/// Steps:
+/// 0. create `ws-sibling` (persistent), from main
+/// 1. edit `shared/hot.txt` in `ws-sibling`
+/// 2. commit `ws-sibling` → committed-ahead, owns a unique blob
+/// 3. create `ws-merge`, from main
+/// 4. edit the SAME `shared/hot.txt` in `ws-merge`, different content
+/// 5. commit `ws-merge`
+/// 6. merge `ws-merge` into default → epoch bump + conflicting sibling replay
+#[must_use]
+pub fn bn_286g_regression_plan() -> ScenarioPlan {
+    let sibling = WsId("ws-sibling".to_owned());
+    let merge_ws = WsId("ws-merge".to_owned());
+    let steps = vec![
+        regression_step(
+            0,
+            Op::WsCreate {
+                ws: sibling.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            1,
+            Op::EditFiles {
+                ws: sibling.clone(),
+                files: vec![edit(
+                    "shared/hot.txt",
+                    "SIBLING SIDE: committed-ahead content (bn-286g)\n",
+                )],
+            },
+        ),
+        regression_step(
+            2,
+            Op::Commit {
+                ws: sibling,
+                msg: Seeded("sibling: commit shared/hot.txt (bn-286g)".to_owned()),
+            },
+        ),
+        regression_step(
+            3,
+            Op::WsCreate {
+                ws: merge_ws.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            4,
+            Op::EditFiles {
+                ws: merge_ws.clone(),
+                files: vec![edit(
+                    "shared/hot.txt",
+                    "MERGE SIDE: conflicting content (bn-286g)\n",
+                )],
+            },
+        ),
+        regression_step(
+            5,
+            Op::Commit {
+                ws: merge_ws.clone(),
+                msg: Seeded("merge-ws: commit shared/hot.txt (bn-286g)".to_owned()),
+            },
+        ),
+        regression_step(
+            6,
+            Op::Merge {
+                srcs: vec![merge_ws],
+                into: Target::Default,
+                destroy: false,
+            },
+        ),
+    ];
+    ScenarioPlan {
+        seed: BN_286G_REGRESSION_SEED,
         profile: ConditionProfile::default().with_escape_weight(1),
         steps,
     }
@@ -1853,6 +1951,52 @@ mod tests {
                 into: Target::Default,
                 ..
             }
+        ));
+        validate_plan_against_model(&plan, plan.seed);
+    }
+
+    /// The bn-286g regression plan makes TWO workspaces commit the SAME path
+    /// before merging one of them — that collision is what forces the sibling
+    /// auto-rebase to conflict (and rewrite the sibling's blob into markers).
+    /// Without the collision the plan would be vacuous.
+    #[test]
+    fn bn_286g_regression_plan_has_expected_shape() {
+        let plan = bn_286g_regression_plan();
+        assert_eq!(plan.seed, BN_286G_REGRESSION_SEED);
+        let hot = "shared/hot.txt";
+        let mut committers: Vec<&str> = Vec::new();
+        for step in &plan.steps {
+            if let Op::EditFiles { ws, files } = &step.op
+                && files.iter().any(|f| f.path == hot)
+            {
+                committers.push(ws.0.as_str());
+            }
+        }
+        committers.sort_unstable();
+        assert_eq!(
+            committers,
+            vec!["ws-merge", "ws-sibling"],
+            "both workspaces must edit {hot} or the sibling replay cannot conflict"
+        );
+        // The two sides must carry DIFFERENT bytes, else the replay is clean.
+        let mut contents: Vec<&str> = plan
+            .steps
+            .iter()
+            .filter_map(|s| match &s.op {
+                Op::EditFiles { files, .. } => files
+                    .iter()
+                    .find(|f| f.path == hot)
+                    .map(|f| f.content.as_str()),
+                _ => None,
+            })
+            .collect();
+        contents.sort_unstable();
+        contents.dedup();
+        assert_eq!(contents.len(), 2, "the two sides must differ textually");
+        // The conflicting-sibling merge is last, and only ws-merge is a source.
+        assert!(matches!(
+            &plan.steps.last().unwrap().op,
+            Op::Merge { srcs, into: Target::Default, .. } if srcs.len() == 1 && srcs[0].0 == "ws-merge"
         ));
         validate_plan_against_model(&plan, plan.seed);
     }

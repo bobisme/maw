@@ -506,6 +506,21 @@ blob (handles arbitrary nesting; bounded to marker blobs so a genuine loss still
 fires). With both fixes the tier runs **deep clean**: `DST_TRACES=64
 DST_STEPS=80` → 5120 op-steps, 0 violations (was 23/64 failing).
 
+**bn-286g** is the same gap, re-found in a different oracle. The bn-2bcx escape
+oracle `SiblingRefFaithfulness` was added later (2026-07) as a bare
+blob-OID-reachability check and never inherited the bn-3g6o carveout, so every
+*conflicting* sibling auto-rebase read as an orphaned sibling. It was invisible
+at the default 16×24 budget and fired at `DST_TRACES=48 DST_STEPS=48` (seeds
+0/15/18, all four violations proven to be conflict-marker rewrites whose
+original OID was pinned in the sibling's `rebase-conflicts.json`). Fixed by
+sharing Oracle A's carveout helpers verbatim rather than re-implementing them,
+so the two oracles cannot drift apart again. **Lesson: any new
+content-reachability oracle must consume the shared conflict-as-data rescue,
+and must be exercised at a budget deep enough to reach a conflicting replay** —
+`tests/dst_production_tier.rs::bn_286g_conflicted_sibling_replay_is_green` now
+pins that shape at the DEFAULT budget, with non-vacuity assertions that a
+sidecar and a marker blob really were produced.
+
 So the §0 / §7.1 caveat is **relaxed but not retired**: the soak *campaign's*
 1e8 number is still in-proc-model evidence (volume), but the Prime Invariant now
 ALSO has authoritative-oracle coverage of the real code path — real
