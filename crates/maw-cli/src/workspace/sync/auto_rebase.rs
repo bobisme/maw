@@ -419,6 +419,7 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
     drop(lock);
 
     let result = classify_outcome(outcome_res, overlap.clone());
+    verify_sibling_materialization(root, name, &ws_path, &result);
     record_rebase_notice(
         root,
         name,
@@ -429,6 +430,32 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
         overlap.as_ref(),
     );
     result
+}
+
+/// bn-3gba: assert the post-materialization `worktree == HEAD` contract for a
+/// just-auto-rebased sibling, repairing (and recording) any divergence.
+///
+/// `RebasedClean` is the ONLY auto-rebase outcome whose contract is "clean
+/// worktree at the new HEAD": the sibling was proven clean under the lock, zero
+/// conflicts were produced, and `worktree_updated == true`. Every other outcome
+/// is deliberately skipped:
+///
+/// * `RebasedCleanRefsOnly` / `RebasedWithConflictsRefsOnly` — the worktree
+///   update was intentionally skipped, so the worktree is EXPECTED to lag HEAD;
+/// * `RebasedWithConflicts` — conflict-as-data is a first-class state, not
+///   divergence;
+/// * `UpToDate` / `SkippedInUse` / `SkippedDirty` / `SkippedInProgress` /
+///   `Failed` — nothing was materialized, and `SkippedDirty` in particular means
+///   the worktree is dirty ON PURPOSE (repairing it would destroy real work).
+fn verify_sibling_materialization(root: &Path, name: &str, ws_path: &Path, result: &SiblingResult) {
+    if matches!(result, SiblingResult::RebasedClean { .. }) {
+        super::super::materialize_verify::verify_clean_materialization(
+            root,
+            name,
+            ws_path,
+            super::super::materialize_verify::MaterializeOp::AutoRebase,
+        );
+    }
 }
 
 /// bn-2cvx: intersect (paths touched by the epoch range `old_epoch..new_epoch`

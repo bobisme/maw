@@ -14,6 +14,12 @@
 //!   workspace head/owned refs and merge-state orphans (the bn-cm63 class). It
 //!   reuses maw's PRODUCTION live-merge classification, so it understands maw's
 //!   real ref shapes.
+//! - **`CleanMaterialization`** (`maw::assurance::oracle_worktree`, bn-3gba) —
+//!   after every op, every live, expected-clean, non-default workspace's
+//!   WORKING TREE must equal its own HEAD tree. This is the bn-p3m9 class
+//!   (`ws create` produced HEAD/index at the right commit but stale-epoch blobs
+//!   on disk) that Oracles A and B are blind to by construction: every ref was
+//!   correct and the stale blobs were perfectly reachable.
 //!
 //! These are the same oracles the in-proc soak (`maw-assurance::in_proc`) gates
 //! on. Because they reason about CONTENT (blob reachability) and maw's real
@@ -85,6 +91,8 @@ use maw::assurance::oracle_b;
 use maw::assurance::oracle_escape::{
     SiblingRefFaithfulness, TrunkDirtyPreservation, check_record_ref_coherence,
 };
+#[cfg(feature = "assurance")]
+use maw::assurance::oracle_worktree::CleanMaterialization;
 #[cfg(feature = "assurance")]
 use maw::assurance::scenario::{BaseRef, ConditionProfile, FaultSpec, Op, Target, generate_plan};
 
@@ -188,6 +196,11 @@ struct Liveness {
     dirty_trunk_writes: u64,
     /// bn-2bcx: successful `maw gc` runs.
     gc_runs: u64,
+    /// bn-3gba: workspace-level `worktree == HEAD` assertions the
+    /// `CleanMaterialization` oracle actually performed. The non-vacuity signal
+    /// for the bn-p3m9 gate: 0 checks means the oracle judged nothing and a
+    /// green run proves nothing about the class.
+    clean_materialization_checks: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -593,6 +606,9 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     // recorded dirty writes; RecordRefCoherence is stateless.
     let mut sibling_oracle = SiblingRefFaithfulness::new();
     let mut trunk_oracle = TrunkDirtyPreservation::new();
+    // bn-3gba: CleanMaterialization is incremental (one per seed, fed every
+    // step in order with the op's success verdict).
+    let mut clean_materialization = CleanMaterialization::new();
     let mut last_epoch = repo.current_epoch();
 
     for (i, step) in plan.steps.iter().enumerate() {
@@ -709,6 +725,18 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
                 "seed={seed} step={i} op={name} RecordRefCoherence: {v}"
             ));
         }
+        // --- bn-3gba clean-materialization oracle ---
+        // After every create/sync/absorb/auto-rebase (in fact after EVERY op),
+        // every live, expected-clean, non-default workspace's worktree must
+        // equal its own HEAD tree. This is the bn-p3m9 class that Oracle A
+        // (blob reachability) and Oracle B (refs + merge-state) are blind to by
+        // construction. Fed the op's success verdict so a FAILED commit does
+        // not clear the workspace's expected-dirty bit.
+        for v in clean_materialization.check_step(repo.root(), op, succeeded) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} CleanMaterialization: {v}"
+            ));
+        }
     }
 
     // Record how much content Oracle A actually witnessed this seed (the
@@ -716,6 +744,10 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     live.oracle_a_witnesses = live
         .oracle_a_witnesses
         .saturating_add(oracle_a.witness_count() as u64);
+    // bn-3gba: same discipline for the clean-materialization oracle.
+    live.clean_materialization_checks = live
+        .clean_materialization_checks
+        .saturating_add(clean_materialization.checks_run());
 
     violations
 }
@@ -778,6 +810,7 @@ fn drive_tier(
          {} ops succeeded, {} workspaces created, {} epoch advances, \
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
          {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx); \
+         {} clean-materialization checks (bn-3gba); \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
@@ -791,6 +824,7 @@ fn drive_tier(
         live.out_of_maw_commits,
         live.dirty_trunk_writes,
         live.gc_runs,
+        live.clean_materialization_checks,
         all_violations.len(),
         n_trials,
         wilson_ub,
@@ -838,6 +872,19 @@ fn assert_shared_liveness(live: &Liveness, count: u64, n_steps: usize) {
         live.ops_succeeded,
         live.ws_created,
         live.epoch_advances,
+    );
+
+    // bn-3gba non-vacuity: the CleanMaterialization oracle must have actually
+    // judged live workspaces. If it never ran a single `worktree == HEAD`
+    // assertion, the bn-p3m9 gate is vacuous — a silent regression in the
+    // expected-dirty model (or in the workspace enumeration) would look green.
+    assert!(
+        live.clean_materialization_checks > 0,
+        "LIVENESS FAILURE (bn-3gba): the CleanMaterialization oracle ran ZERO \
+         worktree==HEAD assertions across {count} seeds ({n_steps} steps/seed, \
+         {} ws created). Either no workspace was ever expected-clean or the \
+         workspace enumeration is broken — investigate before trusting a pass.",
+        live.ws_created,
     );
 
     // Non-vacuity for the Advance path: with advance_weight>0 enabled, the
@@ -982,12 +1029,13 @@ fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<S
     let mut oracle_a = OracleA::new(repo.root());
     let mut sibling_oracle = SiblingRefFaithfulness::new();
     let mut trunk_oracle = TrunkDirtyPreservation::new();
+    let mut clean_materialization = CleanMaterialization::new();
     let mut violations = Vec::new();
 
     for (i, step) in plan.steps.iter().enumerate() {
         let op = &step.op;
         let name = op_name(op);
-        let _succeeded = execute_op(&repo, op);
+        let succeeded = execute_op(&repo, op);
 
         match op {
             Op::OutOfMawCommit { files, .. } => {
@@ -1024,6 +1072,9 @@ fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<S
         }
         for v in check_record_ref_coherence(repo.root()) {
             violations.push(format!("step={i} op={name} RecordRefCoherence: {v}"));
+        }
+        for v in clean_materialization.check_step(repo.root(), op, succeeded) {
+            violations.push(format!("step={i} op={name} CleanMaterialization: {v}"));
         }
     }
     violations

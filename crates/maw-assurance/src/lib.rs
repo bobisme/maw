@@ -79,6 +79,18 @@ pub mod oracle_b;
 /// destroy records — bn-3uou).
 #[cfg(feature = "oracles")]
 pub mod oracle_escape;
+/// **Clean-materialization oracle** for the bn-p3m9 class (bn-3gba).
+///
+/// After any op whose contract is "the workspace ends clean at commit X", the
+/// working tree must equal the HEAD tree.
+/// [`oracle_worktree::CleanMaterialization`] models which workspaces the plan
+/// expects to be dirty and asserts every other live, non-default workspace is
+/// byte-clean at its own HEAD. Oracle A (blob reachability), Oracle B (refs +
+/// merge-state) and the bn-2bcx escape oracles are all blind to this class by
+/// construction: in bn-p3m9 every ref was correct and the stale blobs were
+/// perfectly reachable — only the *working tree* was wrong.
+#[cfg(feature = "oracles")]
+pub mod oracle_worktree;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 /// **Failing-seed shrinker** for SG1 DST (bn-32k3 / T1.6).

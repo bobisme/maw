@@ -34,7 +34,28 @@ pub enum FailpointAction {
     /// only — not expressible via `MAW_FP`. The deterministic interleaving
     /// primitive (bn-2byw); arm it with [`set_callback`].
     Callback(FailpointCallback),
+    /// Overwrite the file at the given path with [`CORRUPT_BYTES`], then
+    /// continue (returns `Ok`).
+    ///
+    /// The **partial-materialization** fault primitive (bn-3gba). Unlike the
+    /// crash-shaped actions, this one leaves the process running with a
+    /// *silently wrong worktree* — the bn-p3m9 signature (HEAD and index
+    /// correct, one file carrying foreign bytes). It is env-expressible
+    /// (`MAW_FP=FP_CREATE_AFTER_MATERIALIZE=corrupt:/abs/path`) so the faithful
+    /// subprocess tier can inject it into the real `maw` binary; the caller
+    /// knows the workspace path before the op runs, so an absolute path is
+    /// always available.
+    ///
+    /// A write failure is ignored: an injector must never crash the process it
+    /// is only supposed to perturb.
+    Corrupt(std::path::PathBuf),
 }
+
+/// Bytes written by [`FailpointAction::Corrupt`].
+///
+/// Deliberately recognisable so a test (or a confused human) can tell an
+/// injected corruption from real content at a glance.
+pub const CORRUPT_BYTES: &[u8] = b"FP_CORRUPT: injected stale bytes (bn-3gba)\n";
 
 // Manual `Debug` (the `Callback` closure is not `Debug`).
 impl std::fmt::Debug for FailpointAction {
@@ -46,6 +67,7 @@ impl std::fmt::Debug for FailpointAction {
             Self::Abort => write!(f, "Abort"),
             Self::Sleep(d) => f.debug_tuple("Sleep").field(d).finish(),
             Self::Callback(_) => write!(f, "Callback(<fn>)"),
+            Self::Corrupt(p) => f.debug_tuple("Corrupt").field(p).finish(),
         }
     }
 }
@@ -133,6 +155,13 @@ pub fn check(name: &str) -> Result<(), String> {
             cb();
             Ok(())
         }
+        Some(FailpointAction::Corrupt(path)) => {
+            let path = path.clone();
+            drop(registry); // release lock before touching the filesystem
+            // Best-effort: a failed injection must not crash the process.
+            let _ = std::fs::write(&path, CORRUPT_BYTES);
+            Ok(())
+        }
     }
 }
 
@@ -190,6 +219,7 @@ pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_COMMIT_AFTER_EPOCH_CAS",
     "FP_COMMIT_BEFORE_BRANCH_CAS",
     "FP_COMMIT_BETWEEN_CAS_OPS",
+    "FP_CREATE_AFTER_MATERIALIZE",
     "FP_DESTROY_AFTER_DELETE",
     "FP_DESTROY_AFTER_RECORD",
     "FP_DESTROY_AFTER_STATUS",
@@ -235,6 +265,13 @@ fn parse_action(token: &str) -> Option<FailpointAction> {
         "sleep" => {
             let ms: u64 = rest?.parse().ok()?;
             Some(FailpointAction::Sleep(Duration::from_millis(ms)))
+        }
+        // bn-3gba: `corrupt:<abs-path>` — overwrite that file with
+        // `CORRUPT_BYTES` and continue. Requires a non-empty path; a bare
+        // `corrupt` is dropped like any other malformed segment.
+        "corrupt" => {
+            let path = rest.filter(|s| !s.is_empty())?;
+            Some(FailpointAction::Corrupt(std::path::PathBuf::from(path)))
         }
         _ => None,
     }
@@ -455,6 +492,47 @@ mod tests {
         clear("FP_SLEEP");
     }
 
+    /// bn-3gba: an armed `Corrupt` action actually overwrites the target file
+    /// with `CORRUPT_BYTES` and lets execution continue (`check` returns Ok).
+    /// This is the partial-materialization fault primitive: it must perturb
+    /// state WITHOUT crashing the op, so the post-materialization verify has
+    /// something to catch.
+    #[test]
+    fn corrupt_action_overwrites_and_continues() {
+        let _g = lock_registry();
+        clear_all();
+
+        let dir = std::env::temp_dir().join(format!(
+            "maw-fp-corrupt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("victim.txt");
+        std::fs::write(&file, b"original content\n").expect("seed");
+
+        set("FP_TEST_CORRUPT", FailpointAction::Corrupt(file.clone()));
+        assert!(
+            check("FP_TEST_CORRUPT").is_ok(),
+            "Corrupt must not abort the op — it perturbs and continues"
+        );
+        clear("FP_TEST_CORRUPT");
+
+        let after = std::fs::read(&file).expect("read back");
+        assert_eq!(after, CORRUPT_BYTES);
+
+        // A missing target is swallowed: an injector must never crash the
+        // process it is only supposed to perturb.
+        set(
+            "FP_TEST_CORRUPT_MISSING",
+            FailpointAction::Corrupt(dir.join("no").join("such").join("file")),
+        );
+        assert!(check("FP_TEST_CORRUPT_MISSING").is_ok());
+        clear("FP_TEST_CORRUPT_MISSING");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// clear removes a single failpoint without affecting others.
     #[test]
     fn clear_single_failpoint() {
@@ -548,6 +626,26 @@ mod tests {
             for (_, a) in &v {
                 assert_eq!(a.clone_dur(), Some(Duration::from_secs(5)));
             }
+        }
+
+        /// bn-3gba: `corrupt:<abs-path>` parses to a `Corrupt` action holding
+        /// the path verbatim (paths are absolute, so the `split_once(':')`
+        /// grammar leaves them intact on unix).
+        #[test]
+        fn corrupt_parsing() {
+            let v = parse_env_spec("FP_CREATE_AFTER_MATERIALIZE=corrupt:/tmp/ws/a/file.txt");
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0].0, "FP_CREATE_AFTER_MATERIALIZE");
+            match &v[0].1 {
+                FailpointAction::Corrupt(p) => {
+                    assert_eq!(p, std::path::Path::new("/tmp/ws/a/file.txt"));
+                }
+                other => panic!("expected Corrupt, got {other:?}"),
+            }
+
+            // A bare `corrupt` (no path) is dropped like any malformed segment.
+            assert!(parse_env_spec("FP_X=corrupt").is_empty());
+            assert!(parse_env_spec("FP_X=corrupt:").is_empty());
         }
 
         /// An unknown glob matches nothing (no panic, empty result).

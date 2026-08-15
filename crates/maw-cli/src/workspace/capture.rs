@@ -61,6 +61,17 @@ pub fn clean_recovery_ref(workspace_name: &str, timestamp: &str) -> String {
     format!("{RECOVERY_PREFIX}{workspace_name}/clean-{safe_ts}")
 }
 
+/// Build the recovery ref name for a post-materialization repair capture
+/// (bn-3gba).
+///
+/// Distinct `materialize-<timestamp>` component so a divergence snapshot is
+/// self-describing next to `clean-*` and destroy captures.
+#[must_use]
+pub fn materialize_recovery_ref(workspace_name: &str, timestamp: &str) -> String {
+    let safe_ts = timestamp.replace(':', "-");
+    format!("{RECOVERY_PREFIX}{workspace_name}/materialize-{safe_ts}")
+}
+
 // ---------------------------------------------------------------------------
 // Capture result types
 // ---------------------------------------------------------------------------
@@ -157,14 +168,85 @@ pub fn capture_before_clean(
     ws_name: &str,
     paths: &[String],
 ) -> Result<Option<CaptureResult>> {
+    capture_paths_to_ref(ws_path, ws_name, paths, RefKind::Clean)
+}
+
+/// Capture the exact bytes at `paths` **before** the post-materialization
+/// verifier re-materializes them from HEAD (bn-3gba).
+///
+/// Same alternate-index technique as [`capture_before_clean`], pinned under
+/// `refs/manifold/recovery/<ws>/materialize-<ts>` instead. The divergent
+/// content is *by contract* not user work (the operation promised a clean
+/// worktree at a known commit), but the Prime Invariant is unconditional: maw
+/// never overwrites bytes it has not first made recoverable — **even wrong
+/// bytes**. In the bn-p3m9 class those bytes are the only forensic evidence of
+/// the (still unreproduced) mechanism, so pinning them is also what makes the
+/// next field report actionable.
+///
+/// # Fail-safe (Prime Invariant)
+///
+/// Returns `Err` when the snapshot could not be produced. The caller **must
+/// not** repair on `Err` — it must leave the divergence in place and report it.
+///
+/// Returns `Ok(None)` only when `paths` is empty.
+#[instrument(skip_all, fields(workspace = ws_name, paths = paths.len()))]
+pub fn capture_before_materialize_repair(
+    ws_path: &Path,
+    ws_name: &str,
+    paths: &[String],
+) -> Result<Option<CaptureResult>> {
+    capture_paths_to_ref(ws_path, ws_name, paths, RefKind::Materialize)
+}
+
+/// Which recovery-ref namespace an explicit-path capture pins into.
+#[derive(Clone, Copy)]
+enum RefKind {
+    /// `maw ws clean` pre-deletion snapshot (bn-auu5).
+    Clean,
+    /// Post-materialization pre-repair snapshot (bn-3gba).
+    Materialize,
+}
+
+impl RefKind {
+    fn ref_name(self, ws_name: &str, timestamp: &str) -> String {
+        match self {
+            Self::Clean => clean_recovery_ref(ws_name, timestamp),
+            Self::Materialize => materialize_recovery_ref(ws_name, timestamp),
+        }
+    }
+
+    const fn empty_snapshot_error(self) -> &'static str {
+        match self {
+            Self::Clean => "clean aborted to avoid data loss: files were selected for removal",
+            Self::Materialize => {
+                "post-materialization repair aborted to avoid data loss: divergent paths were \
+                 detected"
+            }
+        }
+    }
+}
+
+/// Shared body of [`capture_before_clean`] / [`capture_before_materialize_repair`].
+///
+/// The paths are force-staged (`git add -f`) in a temporary index seeded from
+/// `HEAD`, so gitignore'd files are captured too — `git add -A` alone would
+/// skip them and break the recovery guarantee. `git stash create` then builds a
+/// commit whose tree contains those blobs without moving HEAD, the stash list,
+/// or the caller's real index.
+fn capture_paths_to_ref(
+    ws_path: &Path,
+    ws_name: &str,
+    paths: &[String],
+    kind: RefKind,
+) -> Result<Option<CaptureResult>> {
     if paths.is_empty() {
         return Ok(None);
     }
 
     // Use an alternate index initialized from HEAD. Staging in the real index
     // and resetting it afterward destroys any staged work the caller already
-    // had, even though `maw ws clean` promises not to touch tracked state.
-    let temp_dir = tempfile::tempdir().context("failed to create clean-capture temp directory")?;
+    // had, even though these captures promise not to touch tracked state.
+    let temp_dir = tempfile::tempdir().context("failed to create capture temp directory")?;
     let temp_index = temp_dir.path().join("index");
     initialize_temporary_index(ws_path, &temp_index)?;
     stage_paths_force(ws_path, paths, &temp_index)?;
@@ -172,8 +254,8 @@ pub fn capture_before_clean(
     let stash_result = stash_create_with_index(ws_path, &temp_index)?;
     let Some(stash_oid_str) = stash_result else {
         return Err(anyhow::anyhow!(
-            "clean aborted to avoid data loss: files were selected for removal \
-             but `git stash create` produced no snapshot commit (paths = {paths:?})"
+            "{} but `git stash create` produced no snapshot commit (paths = {paths:?})",
+            kind.empty_snapshot_error()
         ));
     };
 
@@ -184,16 +266,16 @@ pub fn capture_before_clean(
     maw::fp!("FP_CLEAN_CAPTURE_BEFORE_PIN")?;
 
     let timestamp = super::now_timestamp_iso8601_precise();
-    let ref_name = clean_recovery_ref(ws_name, &timestamp);
+    let ref_name = kind.ref_name(ws_name, &timestamp);
     let repo_root = repo_root_from_worktree(ws_path)?;
     refs::write_ref(&repo_root, &ref_name, &commit_oid)
-        .map_err(|e| anyhow::anyhow!("failed to pin clean recovery ref: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to pin recovery ref: {e}"))?;
 
     tracing::info!(
         ref_name = %ref_name,
         oid = %commit_oid,
-        removed_count = paths.len(),
-        "captured clean snapshot before untracked-file removal"
+        path_count = paths.len(),
+        "captured explicit-path recovery snapshot"
     );
 
     Ok(Some(CaptureResult {

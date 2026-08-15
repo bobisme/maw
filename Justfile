@@ -307,6 +307,27 @@ sg1-faithful-test:
   cargo test -p maw-cli --features failpoints --test '*' -- --nocapture
   cargo test -p maw-cli --features failpoints --lib -- --nocapture
 
+# sg1-materialize-check: the bn-3gba fault-injection acceptance gate for the
+# post-materialization `worktree == HEAD` verify + auto-repair (defense for the
+# bn-p3m9 corruption class: fresh workspaces materialized with correct
+# HEAD/index but stale working-tree blobs).
+#
+# `MAW_FP=FP_CREATE_AFTER_MATERIALIZE=corrupt:<abs-path>` overwrites one file in
+# a fresh workspace AFTER the checkout and BEFORE the verify. The test asserts
+# the verify detects it, pins the pre-repair bytes to a recovery ref, repairs
+# the file byte-for-byte from HEAD, prints the WARNING, and records the oplog +
+# artifact event — plus the two negative controls (a clean create stays silent;
+# untracked scratch is never "repaired", i.e. never deleted).
+#
+# The `corrupt:` failpoint action only exists in the `--features failpoints`
+# build, so the default `just check` cannot run this — hence a dedicated gate
+# recipe wired into `.github/workflows/dst-faithful.yml` (the workflow that
+# already builds the failpoints binary), per the bn-1n2b lane-wiring convention.
+# The PURE parts of the same defense (divergence scoping, artifact schema,
+# `Corrupt` action semantics) are plain unit tests and DO run in `just check`.
+sg1-materialize-check:
+  cargo test -p maw-cli --features failpoints --test materialize_verify_bn_3gba -- --nocapture
+
 # sg1-flock-test: the REAL two-`maw`-process flock mutual-exclusion test
 # (bn-2byw step 3). Spawns two real `maw ws sync --rebase` processes on the
 # same workspace; process 1 holds the per-workspace rebase flock open with

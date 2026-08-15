@@ -70,6 +70,14 @@ jobs:
       - name: Clippy (assurance features)
         run: just sg1-assurance-clippy
 
+      # bn-3gba: fault-injection acceptance for the post-materialization
+      # `worktree == HEAD` verify + auto-repair (the mechanism-independent
+      # defense for the bn-p3m9 corruption class). Needs the `corrupt:`
+      # failpoint action, which only exists in the `--features failpoints`
+      # build — so it rides this workflow rather than `just check`.
+      - name: Post-materialization verify + repair (bn-3gba)
+        run: just sg1-materialize-check
+
       # Build the failpoints release binary so the faithful tier is
       # deployable (the nightly soak's faithful-binary step expects this
       # binary to compile cleanly).

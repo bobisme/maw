@@ -3794,6 +3794,21 @@ fn reconcile_epoch_with_branch(
                                 "  {}: replayed {} commit(s) onto absorbed epoch",
                                 c.name, outcome.replayed
                             ));
+                            // bn-3gba: only committed-ahead siblings that were
+                            // proven CLEAN reach the Replay plan (dirty ones
+                            // block the absorb above), so a conflict-free
+                            // replay with the worktree updated must end clean
+                            // at the new HEAD. Assert it; skip when the replay
+                            // produced conflicts (conflict-as-data) or left the
+                            // worktree deliberately untouched.
+                            if outcome.conflicts == 0 && outcome.worktree_updated {
+                                super::materialize_verify::verify_clean_materialization(
+                                    root,
+                                    &c.name,
+                                    &c.ws_path,
+                                    super::materialize_verify::MaterializeOp::FfAbsorbReplay,
+                                );
+                            }
                             // bn-1lhb: run the post-sync hook for this
                             // FF-absorbed sibling. Signal only — a failure never
                             // aborts the absorb (the replay already succeeded);
@@ -3851,6 +3866,25 @@ fn reconcile_epoch_with_branch(
                     }
                     let ff_sync =
                         sync_ff_paths_in_worktree(&c.ws_path, &c.name, branch_oid, &ff_paths);
+                    // bn-3gba: a sibling that was CLEAN before the FF-absorb
+                    // must be clean at the absorbed tip afterwards. Assert it;
+                    // `sync_ff_paths_in_worktree` only materializes the paths
+                    // in the global `epoch..branch` range, so a sibling whose
+                    // own base epoch predates `epoch_oid` can legitimately be
+                    // left short — the repair completes it from HEAD.
+                    //
+                    // DELIBERATELY skipped for `dirty: true`: the FF-absorb
+                    // safety predicate PROVED those uncommitted edits are
+                    // disjoint from the FF range and preserves them on purpose.
+                    // Asserting there would make the repair destroy real work.
+                    if !dirty {
+                        super::materialize_verify::verify_clean_materialization(
+                            root,
+                            &c.name,
+                            &c.ws_path,
+                            super::materialize_verify::MaterializeOp::FfAbsorbFastForward,
+                        );
+                    }
                     notes.push(if dirty {
                         format!(
                             "  {}: fast-forwarded to absorbed epoch (uncommitted edits preserved)",
@@ -3968,61 +4002,16 @@ fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBu
 
 /// Materialize one tree blob into the worktree **preserving its git mode**.
 ///
-/// FF-absorb previously materialized every path via `std::fs::write`, which
-/// always produces a `0644` regular file. That (a) drops the executable bit
-/// for `100755` entries and (b) turns a `120000` symlink entry into a
-/// regular file whose contents are the raw link target — the exact
-/// symlink-corruption class already fixed for `stash_apply`. `git checkout
-/// -- <path>` / `git reset --keep` (the commands this code replaced)
-/// materialize each path with its recorded mode, so we must too. The mode
-/// comes from [`maw_git::GixRepo::read_blob_at_path`].
-#[cfg(unix)]
+/// bn-3gba: the implementation now lives in
+/// [`super::materialize_verify::materialize_blob_with_mode`] so the FF-absorb
+/// materializer and the post-materialization repair share ONE mode-preserving
+/// writer (executable bit + symlink handling must never drift between them).
 fn ff_materialize_blob(
     full: &Path,
     mode: maw_git::EntryMode,
     content: &[u8],
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    match mode {
-        maw_git::EntryMode::Link => {
-            let target = std::str::from_utf8(content)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            // symlink(2) fails with EEXIST if anything is already there
-            // (regular file from the old buggy write, or a stale link).
-            if full.symlink_metadata().is_ok() {
-                std::fs::remove_file(full)?;
-            }
-            std::os::unix::fs::symlink(target, full)
-        }
-        maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable => {
-            // If the destination is currently a symlink, `fs::write` would
-            // follow it and clobber the link's target file. Replace it.
-            if full
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_symlink())
-            {
-                std::fs::remove_file(full)?;
-            }
-            std::fs::write(full, content)?;
-            let bits = if mode == maw_git::EntryMode::BlobExecutable {
-                0o755
-            } else {
-                0o644
-            };
-            std::fs::set_permissions(full, std::fs::Permissions::from_mode(bits))
-        }
-        // Not file paths in a name-status / FF-diff set; nothing to write.
-        maw_git::EntryMode::Tree | maw_git::EntryMode::Commit => Ok(()),
-    }
-}
-
-#[cfg(not(unix))]
-fn ff_materialize_blob(
-    full: &Path,
-    _mode: maw_git::EntryMode,
-    content: &[u8],
-) -> std::io::Result<()> {
-    std::fs::write(full, content)
+    super::materialize_verify::materialize_blob_with_mode(full, mode, content)
 }
 
 /// Materialize (or delete) one FF-absorbed path in `ws_path` from

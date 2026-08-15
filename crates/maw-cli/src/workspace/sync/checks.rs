@@ -412,6 +412,19 @@ fn sync_worktree_to_epoch_inner(
             )
         })?;
 
+    // bn-3gba: this is the fast-forward sync path — no local commits were
+    // replayed (the caller routes committed-ahead workspaces to
+    // `rebase_workspace`) and the dirty pre-check above proved the worktree was
+    // clean on entry. So the contract here is exactly "clean worktree at
+    // `epoch_oid`". Assert it; WARN + repair from HEAD if the checkout did not
+    // fully land (the bn-p3m9 class). Never fails the sync.
+    super::super::materialize_verify::verify_clean_materialization(
+        root,
+        ws_name,
+        &ws_path,
+        super::super::materialize_verify::MaterializeOp::SyncFastForward,
+    );
+
     // Update the per-workspace creation epoch ref to the new epoch.
     // After sync, the workspace is rebased onto the new epoch, so
     // the epoch ref should reflect the new base.

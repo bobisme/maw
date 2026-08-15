@@ -206,6 +206,24 @@ fn create_with_output(
             .with_context(|| format!("Failed to write template artifact for workspace '{name}'"))?;
     }
 
+    // FP_CREATE_AFTER_MATERIALIZE (bn-3gba): fires AFTER the worktree checkout
+    // and BEFORE the post-materialization verify below. Armed with
+    // `MAW_FP=FP_CREATE_AFTER_MATERIALIZE=corrupt:<abs-path>` it overwrites one
+    // file in the fresh workspace with marker bytes — the fault-injection
+    // model of the bn-p3m9 signature (HEAD/index correct, working tree stale).
+    // The verify must detect it, repair it, and record the event.
+    maw::fp!("FP_CREATE_AFTER_MATERIALIZE")?;
+
+    // bn-3gba: `ws create`'s contract is "clean worktree at the base epoch".
+    // Assert it. On divergence this WARNs, re-materializes the offending paths
+    // from HEAD, and records an oplog + artifact record. Never fails create.
+    super::materialize_verify::verify_clean_materialization(
+        &root,
+        name,
+        &info.path,
+        super::materialize_verify::MaterializeOp::Create,
+    );
+
     // Get short commit ID for display
     let short_oid = &epoch.as_str()[..12];
 

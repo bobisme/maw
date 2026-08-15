@@ -33,6 +33,12 @@ mod history;
 pub(crate) mod invariant_audit;
 pub(crate) mod lifecycle;
 mod list;
+// `pub` (not `pub(crate)`): the bn-3gba stat-cache regression test
+// (`crates/maw-cli/tests/materialize_verify_stat_cache_bn_3gba.rs`) calls
+// `verify_clean_materialization` directly so it can pin the detector against a
+// hand-built index-stat-cache mask without needing a `--features failpoints`
+// binary — i.e. so that regression runs in the DEFAULT `just check` lane.
+pub mod materialize_verify;
 mod merge;
 pub(crate) mod metadata;
 mod names;
