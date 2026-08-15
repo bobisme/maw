@@ -10,6 +10,7 @@ use gix::objs::TreeRefIter;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
+use crate::repo::GitRepo as _;
 use crate::types::{EntryMode, FileStatus, GitOid, TreeEdit};
 
 /// Convert a `GitOid` to a `gix::ObjectId`.
@@ -580,7 +581,14 @@ pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<Git
                     continue;
                 };
 
-                let blob_oid = crate::objects_impl::write_blob(repo, &data)?;
+                // Use the clean-filter-aware writer so the snapshot matches
+                // what `git stash create` (and maw's own merge/rebase
+                // writers, see merge.rs / build.rs) would store: LFS-tracked
+                // paths get pointer blobs, not full content. Falls back to a
+                // plain `write_blob` when the "lfs" feature is disabled (via
+                // the trait's default method) or when the path has no
+                // matching filter rule.
+                let blob_oid = repo.write_blob_with_path(&data, &entry.path)?;
                 edits.push(TreeEdit::Upsert {
                     path: entry.path.clone(),
                     mode,
@@ -750,5 +758,74 @@ mod tests {
         let content =
             std::fs::read_to_string(root.join("link.txt")).expect("test setup should succeed");
         assert_eq!(content, "regular content\n");
+    }
+
+    /// Regression test (bn-17o1): `worktree_state_commit` must go through the
+    /// clean-filter-aware writer, so an LFS-tracked file in the snapshot ends
+    /// up as a pointer blob — matching what `git stash create` / `git add`
+    /// would store — instead of the raw file content. Before the fix, this
+    /// used a raw `write_blob` and the materialized commit diverged from real
+    /// git for any repo using LFS (or other clean filters).
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn worktree_state_commit_writes_lfs_pointer_for_tracked_path() {
+        use std::io::Read as _;
+
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+
+        // Track *.bin as LFS and commit the .gitattributes so it's visible
+        // from HEAD (worktree_state_commit loads attrs from HEAD's tree).
+        std::fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .expect("test setup should succeed");
+        let _ = crate::test_support::commit_all(root, "add gitattributes");
+
+        // Dirty the worktree with an untracked LFS-tracked file, holding raw
+        // (non-pointer) content — the same shape a build artifact or
+        // freshly-downloaded asset would have before `git add` runs it
+        // through the LFS clean filter.
+        let real_content = b"this is real binary content, not a pointer\n";
+        std::fs::write(root.join("data.bin"), real_content).expect("test setup should succeed");
+
+        let commit_oid = worktree_state_commit(&repo, "snapshot")
+            .expect("worktree_state_commit should succeed")
+            .expect("snapshot should not be empty");
+
+        // Read data.bin back out of the resulting commit's tree.
+        let (_mode, _oid, stored) = repo
+            .read_blob_at_path(commit_oid, "data.bin")
+            .expect("read_blob_at_path should succeed")
+            .expect("data.bin should be present in the snapshot commit");
+
+        // It must be a pointer, not the real content.
+        assert!(
+            maw_lfs::looks_like_pointer(&stored),
+            "expected data.bin to be stored as an LFS pointer, got: {:?}",
+            String::from_utf8_lossy(&stored)
+        );
+        assert_ne!(
+            stored, real_content,
+            "data.bin should not store the raw content directly"
+        );
+        let pointer =
+            maw_lfs::Pointer::parse(&stored).expect("stored blob should be a valid LFS pointer");
+        assert_eq!(pointer.size, real_content.len() as u64);
+
+        // And the real content must have been pushed into the LFS object
+        // store, addressable by the pointer's sha256 oid.
+        let git_dir = repo.repo.git_dir();
+        let store = maw_lfs::Store::open(git_dir).expect("lfs store should open");
+        let mut reader = store
+            .open_object(&pointer.oid)
+            .expect("lfs store read should succeed")
+            .expect("lfs object should be present in the store");
+        let mut stored_bytes = Vec::new();
+        reader
+            .read_to_end(&mut stored_bytes)
+            .expect("reading lfs object should succeed");
+        assert_eq!(stored_bytes, real_content);
     }
 }
