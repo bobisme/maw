@@ -8,6 +8,10 @@ use maw_git::GitRepo as _;
 use maw_git::types::{FileStatus, StatusEntry};
 
 use crate::workspace::DEFAULT_WORKSPACE;
+use crate::workspace::materialize_verify::{
+    MaterializeOp, PreOverwriteGuard, format_divergent_pairs, preserve_divergence_before_overwrite,
+    verify_clean_materialization,
+};
 
 // Re-export the per-workspace rebase lock at crate scope so `maw ws clean`
 // (crate::workspace::clean) can take the SAME lock as sync/rebase without
@@ -399,6 +403,53 @@ fn sync_worktree_to_epoch_inner(
             .map_err(|e| anyhow::anyhow!("Failed to resolve epoch '{epoch_oid}': {e}"))?
     };
 
+    // bn-154g: the checkout below materializes EVERY entry of the target tree
+    // with `overwrite_existing = true` — it flattens the whole worktree, not
+    // just the epoch delta. The dirty pre-check above proved the worktree is
+    // clean *by status*, and status is exactly what the bn-p3m9 corruption
+    // class hides from (the index stat cache reports a stale file as
+    // unmodified). So a workspace can reach this line believing it is clean,
+    // carrying stale bytes that the next statement destroys.
+    //
+    // The post-checkout `verify_clean_materialization` below CANNOT see that:
+    // by the time it runs the divergence is gone and the tree compares clean —
+    // right outcome, destroyed evidence, no snapshot. Detect it HERE, before
+    // the overwrite, so the pre-overwrite bytes get pinned, warned about and
+    // recorded like every other Prime-Invariant site.
+    //
+    // Placed after the CAS and ancestor guards on purpose: those paths return
+    // WITHOUT touching the worktree, so there is nothing to preserve and no
+    // reason to pay the detector's cost.
+    match preserve_divergence_before_overwrite(
+        root,
+        ws_name,
+        &ws_path,
+        MaterializeOp::SyncFastForward,
+    ) {
+        // Clean (the overwhelmingly common case), or pinned + reported. Either
+        // way the checkout may proceed — for `Pinned` the checkout IS the repair.
+        PreOverwriteGuard::Proceed | PreOverwriteGuard::Pinned(_) => {}
+        // Prime Invariant, fail-safe: divergence found but NOT preservable.
+        // Refuse rather than overwrite unsnapshotted bytes. The worktree, HEAD
+        // and the epoch ref are all left exactly as they were.
+        PreOverwriteGuard::Blocked { paths, error } => {
+            bail!(
+                "Refusing to sync workspace '{ws_name}': its working tree silently disagrees \
+                 with HEAD on {} tracked path(s), and maw could NOT snapshot those bytes before \
+                 the sync checkout would overwrite them.\n\
+                 {}\n  \
+                 Snapshot failed: {error}\n  \
+                 `git status` reports this workspace clean because the index stat cache masks \
+                 the difference (the bn-p3m9 corruption class).\n  \
+                 maw never overwrites bytes it has not first made recoverable, so the sync was \
+                 aborted with the worktree untouched.\n  \
+                 Fix: copy the listed files aside, then re-run: maw ws sync {ws_name}",
+                paths.len(),
+                format_divergent_pairs(&paths),
+            );
+        }
+    }
+
     let ws_repo_for_checkout = maw_git::GixRepo::open(&ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to open repo for checkout in workspace '{ws_name}': {e}")
     })?;
@@ -418,12 +469,7 @@ fn sync_worktree_to_epoch_inner(
     // clean on entry. So the contract here is exactly "clean worktree at
     // `epoch_oid`". Assert it; WARN + repair from HEAD if the checkout did not
     // fully land (the bn-p3m9 class). Never fails the sync.
-    super::super::materialize_verify::verify_clean_materialization(
-        root,
-        ws_name,
-        &ws_path,
-        super::super::materialize_verify::MaterializeOp::SyncFastForward,
-    );
+    verify_clean_materialization(root, ws_name, &ws_path, MaterializeOp::SyncFastForward);
 
     // Update the per-workspace creation epoch ref to the new epoch.
     // After sync, the workspace is rebased onto the new epoch, so
@@ -959,5 +1005,396 @@ mod tests {
     #[test]
     fn format_dirty_paths_empty_for_no_entries() {
         assert_eq!(format_dirty_paths(&[]), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-154g: the sync fast-forward checkout rewrites the ENTIRE worktree, so
+    // hidden (index-stat-cache-masked) divergence must be pinned BEFORE it
+    // runs. The post-checkout verify cannot see the divergence — the checkout
+    // already destroyed it — which is exactly the gap black-box validation
+    // found at /tmp/maw-validate/t9: correct outcome, no WARNING, no artifact,
+    // no snapshot of the bytes maw overwrote.
+    // -----------------------------------------------------------------------
+
+    /// Tracked file the injection poisons.
+    const VICTIM: &str = "victim.txt";
+    /// Committed content.
+    const GOOD: &str = "pub fn answer() -> u32 { 42 }\n";
+    /// Stale bytes, SAME byte length as `GOOD` so even a size-only stat
+    /// comparison cannot separate them — the strongest form of the mask.
+    const STALE: &str = "pub fn answer() -> u32 { 17 }\n";
+
+    fn recovery_refs(root: &Path, ws: &str) -> Vec<String> {
+        git_test(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/manifold/recovery/{ws}"),
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .filter(|l| !l.is_empty())
+        .collect()
+    }
+
+    fn artifact_files(root: &Path, ws: &str) -> Vec<std::path::PathBuf> {
+        let dir = crate::workspace::materialize_verify::artifact_dir(root, ws);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Reproduce the bn-p3m9 / t9 injection: stale bytes on a tracked path that
+    /// every status-shaped query reports as clean.
+    ///
+    /// Recipe, in the order the real corrupter produces it:
+    ///
+    /// 1. back-date the victim so the index records an unambiguously old mtime
+    ///    (an entry whose mtime equals the index's own is "racily clean" and
+    ///    gets re-hashed, which would accidentally rescue a stat-based check);
+    /// 2. `set_head_detached` + `unstage_all` + `update-index --refresh`, so
+    ///    the index holds HEAD's CORRECT blob OID stamped with that stat data;
+    /// 3. overwrite the file with the same-length stale bytes and restore the
+    ///    back-dated mtime, so `(size, mtime)` still match the index entry.
+    ///
+    /// `core.checkStat = minimal` narrows git's comparison to size+mtime. It is
+    /// a real, documented setting (recommended on filesystems with unstable
+    /// ctime/ino) and the only part of the fingerprint that cannot be
+    /// reproduced portably — `ctime` cannot be set from userspace.
+    ///
+    /// `core.trustCTime = false` must be set ALONGSIDE it, and is load-bearing
+    /// for the workspace-dirty check specifically. gix compares `ctime.secs`
+    /// whenever `trust_ctime` is on, **independently of `check_stat`**
+    /// (`gix_index::entry::stat::Stat::matches`), where git's `minimal` drops
+    /// ctime entirely. Writing the stale bytes always bumps ctime, so without
+    /// this the mask survives only while the whole injection lands inside one
+    /// wall-clock second — a fixture that passes on an idle machine and flakes
+    /// under a loaded `just check`. With it, the mask is deterministic.
+    ///
+    /// Returns whether the mask actually took effect.
+    fn poison_with_stat_cache_mask(ws: &Path) -> bool {
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        git_test(ws, &["config", "core.checkStat", "minimal"]);
+        git_test(ws, &["config", "core.trustctime", "false"]);
+
+        let victim = ws.join(VICTIM);
+        let backdated = SystemTime::now() - Duration::from_mins(10);
+        let times = FileTimes::new()
+            .set_accessed(backdated)
+            .set_modified(backdated);
+        std::fs::File::options()
+            .write(true)
+            .open(&victim)
+            .expect("open victim")
+            .set_times(times)
+            .expect("back-date victim");
+
+        let repo = maw_git::GixRepo::open(ws).expect("open workspace repo");
+        let head = repo.rev_parse("HEAD").expect("rev-parse HEAD");
+        repo.set_head_detached(head).expect("set_head_detached");
+        repo.unstage_all().expect("unstage_all");
+        git_test(ws, &["update-index", "--refresh"]);
+
+        std::fs::write(&victim, STALE).expect("write stale bytes");
+        std::fs::File::options()
+            .write(true)
+            .open(&victim)
+            .expect("reopen victim")
+            .set_times(times)
+            .expect("restore back-dated mtime");
+
+        // Run the query twice: the first can legitimately make git write back a
+        // refreshed index, and it is the SECOND, settled answer that the
+        // production dirty check will see.
+        git_test(ws, &["status", "--porcelain"]).is_empty()
+            && git_test(ws, &["status", "--porcelain"]).is_empty()
+    }
+
+    /// Build a repo whose `feat` workspace is clean, stale (so `sync` takes the
+    /// fast-forward path) and holds the tracked victim file at its committed
+    /// content. Returns `(ws_path, target_epoch)`.
+    fn setup_stale_clean_workspace(root: &Path) -> (std::path::PathBuf, String) {
+        init_maw_repo(root);
+        // Commit the victim on trunk, then base `feat` on it.
+        let epoch1 = advance_epoch_test(root, VICTIM, GOOD);
+        let ws_path = create_ws_test(root, "feat", &epoch1);
+        // Advance trunk again so `feat` is stale → sync takes the FF path.
+        let new_epoch = advance_epoch_test(root, "other.txt", "advance\n");
+        (ws_path, new_epoch)
+    }
+
+    /// (a) The regression. A stat-cache-masked stale file must be PINNED,
+    /// WARNED about and RECORDED before the sync checkout flattens it — and
+    /// the sync must still land the correct content.
+    #[test]
+    fn sync_ff_pins_hidden_divergence_before_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (ws_path, new_epoch) = setup_stale_clean_workspace(root);
+
+        assert!(
+            recovery_refs(root, "feat").is_empty(),
+            "fixture must start with no recovery refs"
+        );
+
+        let masked = poison_with_stat_cache_mask(&ws_path);
+        assert!(
+            masked,
+            "the fixture failed to produce the mask: `git status --porcelain` already reports \
+             the divergence, so this run would NOT be testing what it claims. Fix the fixture \
+             (see poison_with_stat_cache_mask) rather than weakening the assertion — a \
+             status-based detector passing here would be a false green on the exact class this \
+             test exists to catch."
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read victim"),
+            STALE,
+            "the injection must leave the stale bytes on disk"
+        );
+
+        let outcome =
+            sync_worktree_to_epoch(root, "feat", &new_epoch, None).expect("clean fast-forward");
+        assert_eq!(outcome, SyncOutcome::Synced);
+
+        // The sync outcome is still correct: HEAD at the new epoch, worktree
+        // materialized from it.
+        assert_eq!(git_test(&ws_path, &["rev-parse", "HEAD"]), new_epoch);
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read repaired victim"),
+            GOOD,
+            "the FF checkout must still land the committed content"
+        );
+        assert!(
+            ws_path.join("other.txt").exists(),
+            "the epoch delta must be materialized too"
+        );
+
+        // ...and this time the pre-overwrite bytes were preserved.
+        let refs = recovery_refs(root, "feat");
+        assert_eq!(
+            refs.len(),
+            1,
+            "the pre-overwrite bytes must be pinned to exactly one recovery ref, got: {refs:?}"
+        );
+        let pinned = &refs[0];
+        assert!(
+            pinned.contains("/materialize-"),
+            "pin must land in the materialize namespace: {pinned}"
+        );
+        assert_eq!(
+            git_test(root, &["show", &format!("{pinned}:{VICTIM}")]),
+            STALE.trim_end(),
+            "the pin must hold the PRE-overwrite (stale) bytes verbatim"
+        );
+
+        // ...and recorded as a JSON artifact naming the path and the mode.
+        let artifacts = artifact_files(root, "feat");
+        assert_eq!(
+            artifacts.len(),
+            1,
+            "expected one artifact, got {artifacts:?}"
+        );
+        let json = std::fs::read_to_string(&artifacts[0]).expect("read artifact");
+        let record: crate::workspace::materialize_verify::MaterializeRepairRecord =
+            serde_json::from_str(&json).expect("artifact must deserialize");
+        assert_eq!(
+            record.repair_mode,
+            crate::workspace::materialize_verify::RepairMode::PreservedBeforeOverwrite,
+            "the sync-FF record must say the bytes were pinned BEFORE the overwrite"
+        );
+        assert_eq!(
+            record.operation,
+            crate::workspace::materialize_verify::MaterializeOp::SyncFastForward
+        );
+        assert_eq!(record.paths.len(), 1, "{:?}", record.paths);
+        assert_eq!(record.paths[0].path, VICTIM);
+        assert_eq!(record.paths[0].status, "M");
+        assert_eq!(record.preserved_ref.as_deref(), Some(pinned.as_str()));
+    }
+
+    /// (b) The negative control: a genuinely clean fast-forward sync must
+    /// produce no warning artifact and no recovery ref. Without this, "pin
+    /// everything" would trivially satisfy the test above — and every sync in
+    /// the fleet would litter refs.
+    #[test]
+    fn sync_ff_clean_workspace_pins_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (ws_path, new_epoch) = setup_stale_clean_workspace(root);
+
+        // Same index rewrite the corrupter performs, WITHOUT the stale bytes —
+        // so a detector keyed on "the index was rewritten" would false-positive
+        // here.
+        let repo = maw_git::GixRepo::open(&ws_path).expect("open workspace repo");
+        let head = repo.rev_parse("HEAD").expect("rev-parse HEAD");
+        repo.set_head_detached(head).expect("set_head_detached");
+        repo.unstage_all().expect("unstage_all");
+
+        let outcome =
+            sync_worktree_to_epoch(root, "feat", &new_epoch, None).expect("clean fast-forward");
+        assert_eq!(outcome, SyncOutcome::Synced);
+
+        assert!(
+            recovery_refs(root, "feat").is_empty(),
+            "a clean sync must pin nothing: {:?}",
+            recovery_refs(root, "feat")
+        );
+        assert!(
+            artifact_files(root, "feat").is_empty(),
+            "a clean sync must write no artifact: {:?}",
+            artifact_files(root, "feat")
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read victim"),
+            GOOD,
+            "the sync must still land the committed content"
+        );
+    }
+
+    /// (c) A legitimately dirty workspace must still be REFUSED with its paths
+    /// named — the pre-overwrite guard runs after that refusal and must not
+    /// change it. If the guard ever moved ahead of the dirty check it would
+    /// pin every uncommitted edit on every refused sync.
+    #[test]
+    fn sync_ff_dirty_workspace_still_refuses_and_pins_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (ws_path, new_epoch) = setup_stale_clean_workspace(root);
+
+        std::fs::write(ws_path.join(VICTIM), "REAL uncommitted agent work\n")
+            .expect("dirty the victim");
+        std::fs::write(ws_path.join("scratch.txt"), "untracked\n").expect("write scratch");
+
+        let msg = sync_worktree_to_epoch(root, "feat", &new_epoch, None)
+            .expect_err("sync must refuse on a dirty workspace")
+            .to_string();
+        assert!(
+            msg.contains("Workspace 'feat' has uncommitted changes that would be lost by sync."),
+            "the dirty refusal must be unchanged, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("M {VICTIM}")),
+            "expected the modified path named, got: {msg}"
+        );
+        assert!(
+            msg.contains("A scratch.txt"),
+            "expected the untracked path named, got: {msg}"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read victim"),
+            "REAL uncommitted agent work\n",
+            "a refused sync must not touch the worktree"
+        );
+        assert!(
+            recovery_refs(root, "feat").is_empty(),
+            "a refused sync must not pin anything: {:?}",
+            recovery_refs(root, "feat")
+        );
+        assert!(
+            artifact_files(root, "feat").is_empty(),
+            "a refused sync must write no artifact"
+        );
+    }
+
+    /// The fail-safe. If hidden divergence is found but the snapshot cannot be
+    /// taken, the sync must REFUSE rather than let the checkout flatten bytes
+    /// that were never made recoverable. The Prime Invariant is unconditional —
+    /// it applies even to bytes maw believes are wrong.
+    ///
+    /// The capture is made to fail with a git-native directory/file ref
+    /// conflict: occupying `refs/manifold/recovery/feat` with a ref of its own
+    /// makes the nested `refs/manifold/recovery/feat/materialize-<ts>` write
+    /// impossible. That is deterministic AND process-local, unlike the
+    /// `FP_CLEAN_CAPTURE_BEFORE_PIN` failpoint, whose registry is global and
+    /// would leak into the tests running beside this one.
+    #[test]
+    fn sync_ff_refuses_when_hidden_divergence_cannot_be_pinned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (ws_path, new_epoch) = setup_stale_clean_workspace(root);
+        let stale_head = git_test(&ws_path, &["rev-parse", "HEAD"]);
+
+        assert!(poison_with_stat_cache_mask(&ws_path), "mask must take");
+
+        git_test(
+            root,
+            &["update-ref", "refs/manifold/recovery/feat", &stale_head],
+        );
+
+        let result = sync_worktree_to_epoch(root, "feat", &new_epoch, None);
+
+        let msg = result
+            .expect_err("an unpreservable divergence must abort the sync")
+            .to_string();
+        assert!(
+            msg.contains("Refusing to sync workspace 'feat'"),
+            "expected a refusal, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("M {VICTIM}")),
+            "the refusal must name the divergent path, got: {msg}"
+        );
+        assert!(
+            msg.contains("could NOT snapshot"),
+            "the refusal must say why it aborted, got: {msg}"
+        );
+
+        // Nothing was touched: not the bytes, not HEAD.
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read victim"),
+            STALE,
+            "the unpreservable bytes must survive the refusal"
+        );
+        assert_eq!(
+            git_test(&ws_path, &["rev-parse", "HEAD"]),
+            stale_head,
+            "a refused sync must not move HEAD"
+        );
+    }
+
+    /// The guard must not fire on the paths that return WITHOUT touching the
+    /// worktree: a CAS skip leaves the workspace exactly as it was, so there is
+    /// nothing to preserve and no reason to pay the detector's cost.
+    #[test]
+    fn sync_ff_cas_skip_pins_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (ws_path, new_epoch) = setup_stale_clean_workspace(root);
+        let stale_head = git_test(&ws_path, &["rev-parse", "HEAD"]);
+
+        assert!(poison_with_stat_cache_mask(&ws_path), "mask must take");
+
+        // Expected HEAD that does not match → CAS skip before the checkout.
+        let bogus = "0".repeat(40);
+        let outcome = sync_worktree_to_epoch(root, "feat", &new_epoch, Some(&bogus))
+            .expect("CAS skip returns Ok");
+        assert_eq!(outcome, SyncOutcome::SkippedHeadMoved);
+
+        assert_eq!(
+            git_test(&ws_path, &["rev-parse", "HEAD"]),
+            stale_head,
+            "a CAS skip must not move HEAD"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join(VICTIM)).expect("read victim"),
+            STALE,
+            "a CAS skip must not touch the worktree"
+        );
+        assert!(
+            recovery_refs(root, "feat").is_empty(),
+            "no overwrite happened, so nothing should be pinned: {:?}",
+            recovery_refs(root, "feat")
+        );
     }
 }

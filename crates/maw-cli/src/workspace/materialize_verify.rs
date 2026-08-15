@@ -48,6 +48,27 @@
 //!    `.maw/manifold/artifacts/ws/<name>/materialize-repair/<ts>.json`, so a
 //!    future field report carries the evidence instead of a guess.
 //!
+//! # Two directions: verify-after vs. preserve-before (bn-154g)
+//!
+//! [`verify_clean_materialization`] runs **after** an operation and repairs what
+//! it finds. That is the right shape when the operation was *supposed* to leave
+//! the worktree correct and did not.
+//!
+//! It is the WRONG shape for an operation that overwrites the whole worktree on
+//! its way to the new commit — the `ws sync` fast-forward `checkout_detach`.
+//! There the checkout has already destroyed the divergent bytes by the time the
+//! verifier looks, so the verifier reports a clean tree and maw has silently
+//! overwritten content it never snapshotted (found by black-box validation at
+//! `/tmp/maw-validate/t9`: outcome correct, no WARNING, no artifact, no pin).
+//!
+//! [`preserve_divergence_before_overwrite`] is the other direction, and is
+//! called **immediately before** such an overwrite: same tree-based detector,
+//! same pin, same WARNING/artifact/oplog record — but no repair, because the
+//! caller's own checkout *is* the repair. If the pin fails, it returns
+//! [`PreOverwriteGuard::Blocked`] and the caller MUST abort: the Prime Invariant
+//! is unconditional, so an un-snapshottable divergence stops the overwrite
+//! rather than being destroyed by it.
+//!
 //! # Where it is (and is NOT) called
 //!
 //! Called from the four sites whose contract is clean-at-commit:
@@ -55,7 +76,7 @@
 //! | Site | Call |
 //! |------|------|
 //! | `maw ws create` | `create::create_with_output` after `backend.create` |
-//! | `maw ws sync` fast-forward | `sync::checks::sync_worktree_to_epoch_inner` after `checkout_detach` |
+//! | `maw ws sync` fast-forward | `sync::checks::sync_worktree_to_epoch_inner` after `checkout_detach` (and, via `preserve_divergence_before_overwrite`, **before** it — bn-154g) |
 //! | FF-absorb sibling FF/replay | `merge::reconcile_epoch_with_branch` (clean siblings only) |
 //! | post-merge sibling auto-rebase | `sync::auto_rebase::rebase_one_sibling` on `RebasedClean` |
 //!
@@ -162,6 +183,27 @@ impl MaterializeOp {
     }
 }
 
+/// Whether this module repaired the divergence itself, or only pinned it ahead
+/// of a caller that was about to overwrite the whole worktree (bn-154g).
+///
+/// Serialized into the artifact so a field report can tell "maw found stale
+/// bytes and rewrote them from HEAD" apart from "maw found stale bytes on its
+/// way into a checkout that was going to flatten them anyway".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepairMode {
+    /// Divergence found **after** the operation; this module re-materialized
+    /// each path from HEAD. `repaired_count` / `residual_paths` describe the
+    /// outcome. This is the default so pre-bn-154g artifacts still deserialize.
+    #[default]
+    RepairedFromHead,
+    /// Divergence found **before** an operation that overwrites the entire
+    /// worktree (the `ws sync` fast-forward checkout). The bytes were pinned
+    /// here; the caller's checkout performs the repair, so `repaired_count` is
+    /// 0 and `residual_paths` is empty by construction.
+    PreservedBeforeOverwrite,
+}
+
 /// One divergent path and what the repair managed to do with it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DivergentPath {
@@ -188,6 +230,11 @@ pub struct MaterializeRepairRecord {
     pub operation: MaterializeOp,
     /// Human label of `operation` (so the artifact reads without a decoder).
     pub operation_label: String,
+    /// Whether this module repaired the paths or only pinned them ahead of the
+    /// caller's overwrite (bn-154g). `#[serde(default)]` keeps pre-bn-154g
+    /// artifacts readable.
+    #[serde(default)]
+    pub repair_mode: RepairMode,
     /// HEAD OID the worktree was verified against.
     pub head: String,
     /// ISO-8601 UTC timestamp of the verification.
@@ -351,18 +398,111 @@ fn divergent_paths_by_tree(ws_path: &Path) -> Result<Vec<(String, &'static str)>
 /// Render the WARNING body (path list, capped). Pure — unit-tested.
 #[must_use]
 pub fn format_divergent_paths(paths: &[DivergentPath]) -> String {
-    if paths.is_empty() {
+    format_paths_capped(
+        paths.iter().map(|p| format!("  {} {}", p.status, p.path)),
+        paths.len(),
+    )
+}
+
+/// Render `(status, path)` pairs the same way, for callers that hold the raw
+/// detector output rather than [`DivergentPath`]s (the sync refusal message).
+#[must_use]
+pub fn format_divergent_pairs(paths: &[(String, String)]) -> String {
+    format_paths_capped(
+        paths
+            .iter()
+            .map(|(path, status)| format!("  {status} {path}")),
+        paths.len(),
+    )
+}
+
+/// Shared capped-list renderer: up to [`MAX_PATHS_SHOWN`] pre-rendered lines
+/// followed by an `...and N more` summary. Empty input renders to the empty
+/// string so callers can splice it in without a stray blank line.
+fn format_paths_capped(lines: impl Iterator<Item = String>, total: usize) -> String {
+    if total == 0 {
         return String::new();
     }
-    let mut lines: Vec<String> = paths
-        .iter()
-        .take(MAX_PATHS_SHOWN)
-        .map(|p| format!("  {} {}", p.status, p.path))
-        .collect();
-    if paths.len() > MAX_PATHS_SHOWN {
-        lines.push(format!("  ...and {} more", paths.len() - MAX_PATHS_SHOWN));
+    let mut out: Vec<String> = lines.take(MAX_PATHS_SHOWN).collect();
+    if total > MAX_PATHS_SHOWN {
+        out.push(format!("  ...and {} more", total - MAX_PATHS_SHOWN));
     }
-    lines.join("\n")
+    out.join("\n")
+}
+
+/// Run the authoritative tree-based divergence detector, degrading to the
+/// (stat-cache-fallible) status query only if the git plumbing itself fails.
+///
+/// Returns `None` when BOTH detectors failed — the caller then has no
+/// information and must not act. Shared by [`verify_clean_materialization`] and
+/// [`preserve_divergence_before_overwrite`] so the two directions can never
+/// drift apart on *what counts as divergence* (bn-154g).
+fn detect_divergence(
+    repo: &maw_git::GixRepo,
+    ws_name: &str,
+    ws_path: &Path,
+) -> Option<Vec<(String, &'static str)>> {
+    match divergent_paths_by_tree(ws_path) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "materialization divergence check: tree comparison failed; \
+                 falling back to the (stat-cache-fallible) status query"
+            );
+            match repo.status_head_to_worktree() {
+                Ok(entries) => Some(divergent_entries(&entries)),
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %ws_name,
+                        error = %e,
+                        "materialization divergence check: status fallback also failed"
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Outcome of the pre-overwrite snapshot: `(ref, oid, error)`. At most one of
+/// `(ref, oid)` and `error` is populated.
+type PinOutcome = (Option<String>, Option<String>, Option<String>);
+
+/// Pin the current bytes at `rel_paths` to a `materialize-<ts>` recovery ref.
+///
+/// Shared by both directions so the Prime-Invariant snapshot is byte-identical
+/// in shape whether the repair happens here or in the caller's checkout.
+fn pin_divergent_bytes(ws_path: &Path, ws_name: &str, rel_paths: &[String]) -> PinOutcome {
+    match super::capture::capture_before_materialize_repair(ws_path, ws_name, rel_paths) {
+        Ok(Some(c)) => (
+            Some(c.pinned_ref.clone()),
+            Some(c.commit_oid.as_str().to_owned()),
+            None,
+        ),
+        // `rel_paths` is non-empty at every call site, so `Ok(None)` is
+        // unreachable in practice; treat it like a failed capture rather than
+        // assuming it away.
+        Ok(None) => (None, None, Some("capture produced no snapshot".to_owned())),
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "materialization divergence check: pre-overwrite capture failed"
+            );
+            (None, None, Some(e.to_string()))
+        }
+    }
+}
+
+/// Persist and announce a finished record: JSON artifact, oplog annotation,
+/// loud stderr WARNING — in that order, so the evidence exists on disk before
+/// the operator is told where to look.
+fn emit_record(root: &Path, ws_name: &str, record: &MaterializeRepairRecord) {
+    let artifact = write_artifact(root, ws_name, record);
+    record_oplog_annotation(root, ws_name, record, artifact.as_deref());
+    print_warning(record, artifact.as_deref());
 }
 
 /// Verify that `ws_path`'s worktree matches its HEAD tree, and repair it if
@@ -376,10 +516,12 @@ pub fn format_divergent_paths(paths: &[DivergentPath]) -> String {
 /// failure is logged via `tracing` and the operation continues.
 ///
 /// `root` is the repo root; `ws_name` the workspace; `ws_path` its worktree.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one ordered, fail-safe sequence: status -> preserve -> repair -> re-verify -> record; splitting it hides the ordering the Prime Invariant depends on"
-)]
+//
+// This body is one ordered, fail-safe sequence — detect → preserve → repair →
+// re-verify → record — and the ordering is what the Prime Invariant depends on.
+// Do not split it further; the shared steps (`detect_divergence`,
+// `pin_divergent_bytes`, `emit_record`) are already factored out so
+// `preserve_divergence_before_overwrite` reuses them verbatim (bn-154g).
 pub fn verify_clean_materialization(
     root: &Path,
     ws_name: &str,
@@ -409,28 +551,7 @@ pub fn verify_clean_materialization(
     // fails do we fall back to the status query (bn-pfh7: HEAD→worktree, never
     // the plain index→worktree `status()`), so a broken `git` degrades the
     // detector instead of disabling it.
-    let divergent = match divergent_paths_by_tree(ws_path) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(
-                workspace = %ws_name,
-                error = %e,
-                "post-materialization verify: tree comparison failed; \
-                 falling back to the (stat-cache-fallible) status query"
-            );
-            match repo.status_head_to_worktree() {
-                Ok(entries) => divergent_entries(&entries),
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %ws_name,
-                        error = %e,
-                        "post-materialization verify: status fallback also failed"
-                    );
-                    return None;
-                }
-            }
-        }
-    };
+    let divergent = detect_divergence(&repo, ws_name, ws_path)?;
     if divergent.is_empty() {
         // The overwhelmingly common path: no output, no artifact, no oplog
         // entry, no recovery ref.
@@ -455,24 +576,7 @@ pub fn verify_clean_materialization(
     // reporting it loudly is strictly safer than destroying unpreserved content.
     let rel_paths: Vec<String> = divergent.iter().map(|(p, _)| p.clone()).collect();
     let (preserved_ref, preserved_oid, preserve_error) =
-        match super::capture::capture_before_materialize_repair(ws_path, ws_name, &rel_paths) {
-            Ok(Some(c)) => (
-                Some(c.pinned_ref.clone()),
-                Some(c.commit_oid.as_str().to_owned()),
-                None,
-            ),
-            // `paths` is non-empty here, so `Ok(None)` is unreachable in
-            // practice; treat it like a failed capture rather than assuming.
-            Ok(None) => (None, None, Some("capture produced no snapshot".to_owned())),
-            Err(e) => {
-                tracing::warn!(
-                    workspace = %ws_name,
-                    error = %e,
-                    "post-materialization verify: pre-repair capture failed; skipping repair"
-                );
-                (None, None, Some(e.to_string()))
-            }
-        };
+        pin_divergent_bytes(ws_path, ws_name, &rel_paths);
 
     // ---- Repair: re-materialize every divergent path from HEAD. ----
     let mut paths: Vec<DivergentPath> = Vec::with_capacity(divergent.len());
@@ -527,6 +631,7 @@ pub fn verify_clean_materialization(
         workspace: ws_name.to_owned(),
         operation: op,
         operation_label: op.label().to_owned(),
+        repair_mode: RepairMode::RepairedFromHead,
         head: head_oid.to_string(),
         timestamp: super::now_timestamp_iso8601_precise(),
         paths,
@@ -537,11 +642,153 @@ pub fn verify_clean_materialization(
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    let artifact = write_artifact(root, ws_name, &record);
-    record_oplog_annotation(root, ws_name, &record, artifact.as_deref());
-    print_warning(&record, artifact.as_deref());
+    emit_record(root, ws_name, &record);
 
     Some(record)
+}
+
+/// What the caller of [`preserve_divergence_before_overwrite`] must do next.
+#[derive(Clone, Debug)]
+pub enum PreOverwriteGuard {
+    /// No hidden divergence — or the detector itself could not run. Proceed
+    /// with the overwrite. This is the fast path and says nothing.
+    Proceed,
+    /// Hidden divergence was found and **successfully pinned**. Proceed with
+    /// the overwrite: it is the repair. The WARNING, artifact and oplog entry
+    /// have already been emitted.
+    Pinned(Box<MaterializeRepairRecord>),
+    /// Hidden divergence was found but could **not** be pinned. The caller MUST
+    /// NOT overwrite: maw never destroys bytes it has not first made
+    /// recoverable, even bytes it believes are wrong.
+    Blocked {
+        /// `(path, status letter)` pairs, sorted — for the refusal message.
+        paths: Vec<(String, String)>,
+        /// Why the snapshot failed.
+        error: String,
+    },
+}
+
+/// Detect and PIN hidden worktree divergence **immediately before** an
+/// operation that overwrites the whole worktree (bn-154g).
+///
+/// # Why this cannot be the post-hoc verifier
+///
+/// The `ws sync` fast-forward runs `checkout_detach`, which materializes every
+/// entry of the target tree with `overwrite_existing = true`. By the time
+/// [`verify_clean_materialization`] looks, the divergent bytes are gone and the
+/// tree compares clean — so the sync repaired the corruption *correctly* while
+/// reporting nothing and pinning nothing. Black-box validation (`t9`) caught
+/// exactly that: right outcome, destroyed evidence, no snapshot.
+///
+/// # Contract
+///
+/// Callers MUST only use this where the worktree is already known clean by
+/// status (the sync path refuses dirty workspaces before reaching here). On a
+/// legitimately dirty worktree every uncommitted edit would be reported as
+/// divergence — which is *true* but useless, and the caller's own dirty-refusal
+/// is the right response.
+///
+/// Never panics, never blocks on a detector failure: if the tree compare AND
+/// the status fallback both fail, this returns [`PreOverwriteGuard::Proceed`] —
+/// a guard that can break `ws sync` is worse than the bug it guards.
+///
+/// The overwhelmingly common (clean) path costs one content hash of the
+/// worktree — see [`divergent_paths_by_tree`] for the measured cost and why
+/// nothing cheaper can see through the index stat-cache mask.
+pub fn preserve_divergence_before_overwrite(
+    root: &Path,
+    ws_name: &str,
+    ws_path: &Path,
+    op: MaterializeOp,
+) -> PreOverwriteGuard {
+    if !ws_path.exists() {
+        return PreOverwriteGuard::Proceed;
+    }
+
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "pre-overwrite divergence check: failed to open workspace repo"
+            );
+            return PreOverwriteGuard::Proceed;
+        }
+    };
+
+    let Some(divergent) = detect_divergence(&repo, ws_name, ws_path) else {
+        return PreOverwriteGuard::Proceed;
+    };
+    if divergent.is_empty() {
+        // The fast path: no output, no artifact, no oplog entry, no ref.
+        return PreOverwriteGuard::Proceed;
+    }
+
+    let Ok(Some(head_oid)) = repo.rev_parse_opt("HEAD") else {
+        // Only reachable via the status fallback (the tree compare resolves
+        // HEAD itself). Without HEAD there is no record to write; degrade
+        // rather than block the operation.
+        tracing::warn!(
+            workspace = %ws_name,
+            "pre-overwrite divergence check: divergence detected but HEAD is unreadable"
+        );
+        return PreOverwriteGuard::Proceed;
+    };
+
+    let rel_paths: Vec<String> = divergent.iter().map(|(p, _)| p.clone()).collect();
+    let (preserved_ref, preserved_oid, preserve_error) =
+        pin_divergent_bytes(ws_path, ws_name, &rel_paths);
+
+    if let Some(error) = preserve_error {
+        // Prime Invariant, fail-safe: the caller is about to flatten these
+        // bytes and we could not preserve them. Stop the caller.
+        return PreOverwriteGuard::Blocked {
+            paths: divergent
+                .into_iter()
+                .map(|(p, letter)| (p, letter.to_owned()))
+                .collect(),
+            error,
+        };
+    }
+
+    let paths: Vec<DivergentPath> = divergent
+        .iter()
+        .map(|(rel, letter)| DivergentPath {
+            path: rel.clone(),
+            status: (*letter).to_string(),
+            repaired: false,
+            detail: Some(
+                "pinned before the caller's checkout; the checkout re-materializes this path \
+                 from the target commit"
+                    .to_owned(),
+            ),
+        })
+        .collect();
+
+    let record = MaterializeRepairRecord {
+        schema_version: 1,
+        workspace: ws_name.to_owned(),
+        operation: op,
+        operation_label: op.label().to_owned(),
+        repair_mode: RepairMode::PreservedBeforeOverwrite,
+        head: head_oid.to_string(),
+        timestamp: super::now_timestamp_iso8601_precise(),
+        paths,
+        preserved_ref,
+        preserved_oid,
+        // The repair is the caller's checkout, which has not run yet — so
+        // nothing is claimed as repaired and nothing as residual. The
+        // post-operation `verify_clean_materialization` at the same call site
+        // is what reports whether the checkout actually landed.
+        repaired_count: 0,
+        residual_paths: Vec::new(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+
+    emit_record(root, ws_name, &record);
+
+    PreOverwriteGuard::Pinned(Box::new(record))
 }
 
 /// Re-materialize one path from `head_oid` into the worktree, preserving the
@@ -704,7 +951,22 @@ fn record_oplog_annotation(
     };
 
     let mut data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    data.insert("bone".to_owned(), "bn-3gba".into());
+    data.insert(
+        "bone".to_owned(),
+        match record.repair_mode {
+            RepairMode::RepairedFromHead => "bn-3gba",
+            RepairMode::PreservedBeforeOverwrite => "bn-154g",
+        }
+        .into(),
+    );
+    data.insert(
+        "repair_mode".to_owned(),
+        match record.repair_mode {
+            RepairMode::RepairedFromHead => "repaired-from-head",
+            RepairMode::PreservedBeforeOverwrite => "preserved-before-overwrite",
+        }
+        .into(),
+    );
     data.insert(
         "operation".to_owned(),
         record.operation_label.clone().into(),
@@ -770,19 +1032,43 @@ fn record_oplog_annotation(
 fn print_warning(record: &MaterializeRepairRecord, artifact: Option<&Path>) {
     let ws = &record.workspace;
     let n = record.paths.len();
-    eprintln!(
-        "WARNING: workspace '{ws}' did not materialize cleanly after {} — \
-         {n} tracked path(s) differed from HEAD ({}).",
-        record.operation_label,
-        &record.head[..12.min(record.head.len())],
-    );
-    eprintln!(
-        "  This is the bn-p3m9 corruption class: HEAD/index correct, working tree stale. \
-         maw repaired it from HEAD; no committed work was at risk."
-    );
+    let head = &record.head[..12.min(record.head.len())];
+
+    match record.repair_mode {
+        RepairMode::RepairedFromHead => {
+            eprintln!(
+                "WARNING: workspace '{ws}' did not materialize cleanly after {} — \
+                 {n} tracked path(s) differed from HEAD ({head}).",
+                record.operation_label,
+            );
+            eprintln!(
+                "  This is the bn-p3m9 corruption class: HEAD/index correct, working tree stale. \
+                 maw repaired it from HEAD; no committed work was at risk."
+            );
+        }
+        RepairMode::PreservedBeforeOverwrite => {
+            eprintln!(
+                "WARNING: workspace '{ws}' had hidden working-tree divergence going into {} — \
+                 {n} tracked path(s) differed from HEAD ({head}) while `git status` reported \
+                 clean.",
+                record.operation_label,
+            );
+            eprintln!(
+                "  This is the bn-p3m9 corruption class: HEAD/index correct, working tree stale, \
+                 masked by the index stat cache. The checkout that follows overwrites these \
+                 paths from the target commit — so they were pinned FIRST (bn-154g)."
+            );
+        }
+    }
+
     eprintln!("{}", format_divergent_paths(&record.paths));
     if let Some(pinned) = record.preserved_ref.as_deref() {
-        eprintln!("  Pre-repair bytes pinned at: {pinned}");
+        match record.repair_mode {
+            RepairMode::RepairedFromHead => eprintln!("  Pre-repair bytes pinned at: {pinned}"),
+            RepairMode::PreservedBeforeOverwrite => {
+                eprintln!("  Pre-overwrite bytes pinned at: {pinned}");
+            }
+        }
         eprintln!("  Inspect them with: git show {pinned}:<path>");
     } else {
         eprintln!(
@@ -790,20 +1076,33 @@ fn print_warning(record: &MaterializeRepairRecord, artifact: Option<&Path>) {
              never overwrites bytes it has not first preserved)."
         );
     }
-    eprintln!(
-        "  Repaired {} of {n} path(s) from HEAD.",
-        record.repaired_count
-    );
-    if record.residual_paths.is_empty() {
-        eprintln!("  Workspace now matches HEAD.");
-    } else {
-        eprintln!(
-            "  STILL DIVERGENT after repair ({}): {}",
-            record.residual_paths.len(),
-            record.residual_paths.join(", ")
-        );
-        eprintln!("  To fix by hand: {}", record.operation.manual_hint());
+
+    match record.repair_mode {
+        RepairMode::RepairedFromHead => {
+            eprintln!(
+                "  Repaired {} of {n} path(s) from HEAD.",
+                record.repaired_count
+            );
+            if record.residual_paths.is_empty() {
+                eprintln!("  Workspace now matches HEAD.");
+            } else {
+                eprintln!(
+                    "  STILL DIVERGENT after repair ({}): {}",
+                    record.residual_paths.len(),
+                    record.residual_paths.join(", ")
+                );
+                eprintln!("  To fix by hand: {}", record.operation.manual_hint());
+            }
+        }
+        RepairMode::PreservedBeforeOverwrite => {
+            eprintln!(
+                "  Continuing: the {} checkout re-materializes every path from the target \
+                 commit, and the post-operation verify re-checks the result.",
+                record.operation_label,
+            );
+        }
     }
+
     if let Some(path) = artifact {
         eprintln!("  Evidence: {}", path.display());
     }
@@ -924,6 +1223,7 @@ mod tests {
             workspace: "bn-3huh7".to_owned(),
             operation: MaterializeOp::Create,
             operation_label: MaterializeOp::Create.label().to_owned(),
+            repair_mode: RepairMode::RepairedFromHead,
             head: "ea85bf6ea85bf6ea85bf6ea85bf6ea85bf6ea85b".to_owned(),
             timestamp: "2026-08-11T20:23:19.000000000Z".to_owned(),
             paths: vec![DivergentPath {
@@ -961,6 +1261,7 @@ mod tests {
             workspace: "ws".to_owned(),
             operation: MaterializeOp::SyncFastForward,
             operation_label: MaterializeOp::SyncFastForward.label().to_owned(),
+            repair_mode: RepairMode::RepairedFromHead,
             head: "0".repeat(40),
             timestamp: "2026-08-12T00:00:00.000000000Z".to_owned(),
             paths: vec![DivergentPath {
@@ -979,6 +1280,83 @@ mod tests {
         assert!(!json.contains("preserved_ref"), "{json}");
         let back: MaterializeRepairRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
+    }
+
+    /// bn-154g: a pre-bn-154g artifact has no `repair_mode` key. It must still
+    /// deserialize, and must read as the repair-from-HEAD shape it recorded.
+    #[test]
+    fn artifact_without_repair_mode_defaults_to_repaired_from_head() {
+        let json = r#"{
+            "schema_version": 1,
+            "workspace": "ws",
+            "operation": "create",
+            "operation_label": "ws create",
+            "head": "0000000000000000000000000000000000000000",
+            "timestamp": "2026-08-12T00:00:00.000000000Z",
+            "paths": [],
+            "repaired_count": 0,
+            "residual_paths": [],
+            "tool_version": "old"
+        }"#;
+        let back: MaterializeRepairRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(back.repair_mode, RepairMode::RepairedFromHead);
+    }
+
+    /// bn-154g: the pre-overwrite shape serializes with a distinguishable
+    /// `repair_mode` — a field report must be able to tell the two apart.
+    #[test]
+    fn preserved_before_overwrite_mode_round_trips() {
+        let record = MaterializeRepairRecord {
+            schema_version: 1,
+            workspace: "ws".to_owned(),
+            operation: MaterializeOp::SyncFastForward,
+            operation_label: MaterializeOp::SyncFastForward.label().to_owned(),
+            repair_mode: RepairMode::PreservedBeforeOverwrite,
+            head: "0".repeat(40),
+            timestamp: "2026-08-15T00:00:00.000000000Z".to_owned(),
+            paths: vec![DivergentPath {
+                path: "src/a.rs".to_owned(),
+                status: "M".to_owned(),
+                repaired: false,
+                detail: Some("pinned before the caller's checkout".to_owned()),
+            }],
+            preserved_ref: Some("refs/manifold/recovery/ws/materialize-x".to_owned()),
+            preserved_oid: Some("1".repeat(40)),
+            repaired_count: 0,
+            residual_paths: Vec::new(),
+            tool_version: "test".to_owned(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            json.contains("\"repair_mode\":\"preserved-before-overwrite\""),
+            "{json}"
+        );
+        let back: MaterializeRepairRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, record);
+    }
+
+    /// `format_divergent_pairs` renders the raw detector output exactly like
+    /// `format_divergent_paths` renders the classified form — the sync refusal
+    /// message and the WARNING must not drift apart.
+    #[test]
+    fn pair_and_path_formatters_agree() {
+        let pairs: Vec<(String, String)> = (0..MAX_PATHS_SHOWN + 2)
+            .map(|i| (format!("f{i}.txt"), "M".to_owned()))
+            .collect();
+        let paths: Vec<DivergentPath> = pairs
+            .iter()
+            .map(|(path, status)| DivergentPath {
+                path: path.clone(),
+                status: status.clone(),
+                repaired: false,
+                detail: None,
+            })
+            .collect();
+        assert_eq!(
+            format_divergent_pairs(&pairs),
+            format_divergent_paths(&paths)
+        );
+        assert_eq!(format_divergent_pairs(&[]), "");
     }
 
     #[test]
