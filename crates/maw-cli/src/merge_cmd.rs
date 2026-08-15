@@ -546,7 +546,12 @@ fn last_conflict_cmd(format: Option<OutputFormat>) -> Result<()> {
         return Ok(());
     }
 
-    println!("Last conflict (recorded {} ms UTC):", snapshot.ts_unix_ms);
+    println!(
+        "Last conflict (recorded {}):",
+        crate::workspace::format_timestamp_millis_iso8601(
+            u64::try_from(snapshot.ts_unix_ms).unwrap_or(0)
+        )
+    );
     println!("  Sources: {}", snapshot.sources.join(", "));
     println!("  Into:    {}", snapshot.into);
     println!("  {} conflict(s):", snapshot.conflicts.len());

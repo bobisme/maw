@@ -3344,20 +3344,35 @@ fn assert_append_only_preserved(
             .collect());
     }
 
+    bail!(append_only_refusal_message(root, &violations));
+}
+
+/// Build the `bail!` message for an unforced append-only refusal.
+///
+/// bn-34wr: names the *actual* resolved config path for this repo's layout
+/// instead of hardcoding the V2 (`.manifold/config.toml`) path — the
+/// consolidated layout keeps it at `.maw/manifold/config.toml`. Split out
+/// from [`assert_append_only_preserved`] so the message shape is unit
+/// testable without a real git repo or `BuildPhaseOutput`.
+fn append_only_refusal_message(root: &Path, violations: &[(PathBuf, &'static str)]) -> String {
     let file_list = violations
         .iter()
         .map(|(path, reason)| format!("  - {} ({reason})", path.display()))
         .collect::<Vec<_>>()
         .join("\n");
-    bail!(
+    let config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join("config.toml");
+    format!(
         "Merge refused: {} append-only path(s) would lose content:\n{file_list}\n  \
-         These paths are configured as append-only ([merge] append_only in .manifold/config.toml); \
+         These paths are configured as append-only ([merge] append_only in {}); \
          the merge result must keep the epoch's content as an exact byte prefix.\n  \
          Verify the source workspace change is intentional, then either fix the workspace content \
          or override:\n  \
          To force merge anyway (bypasses this check, prints a warning): maw ws merge <workspace> --into <target> --force",
-        violations.len()
-    );
+        violations.len(),
+        config_path.display(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -5201,10 +5216,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     }
                 }
                 abort_merge(&manifold_dir, "validation failed (policy: block)");
+                let merge_id = &build_output.candidate.as_str()[..12];
                 bail!(
                     "Merge validation failed. Fix issues and retry.\n  \
-                     Diagnostics: .manifold/artifacts/merge/{}/validation.json",
-                    &build_output.candidate.as_str()[..12]
+                     Diagnostics: {}",
+                    manifold_dir
+                        .join("artifacts")
+                        .join("merge")
+                        .join(merge_id)
+                        .join("validation.json")
+                        .display()
                 );
             }
             ValidateOutcome::Quarantine(r) | ValidateOutcome::BlockedAndQuarantine(r) => {
@@ -5258,17 +5279,28 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         bail!(
                             "Merge validation failed (policy: {policy_name}).\n  \
                              Quarantine workspace: {}\n  \
-                             Diagnostics: .manifold/quarantine/{merge_id}/validation.json\n  \
+                             Diagnostics: {}\n  \
                              To promote: maw merge promote {merge_id}\n  \
                              To abandon: maw merge abandon {merge_id}",
-                            qws_path.display()
+                            qws_path.display(),
+                            manifold_dir
+                                .join("quarantine")
+                                .join(merge_id)
+                                .join("validation.json")
+                                .display()
                         );
                     }
                     Err(e) => {
                         eprintln!("  WARNING: Failed to create quarantine workspace: {e}");
                         bail!(
                             "Merge validation failed (policy: {policy_name}) and quarantine creation failed: {e}\n  \
-                             Diagnostics: .manifold/artifacts/merge/{merge_id}/validation.json"
+                             Diagnostics: {}",
+                            manifold_dir
+                                .join("artifacts")
+                                .join("merge")
+                                .join(merge_id)
+                                .join("validation.json")
+                                .display()
                         );
                     }
                 }
@@ -6285,7 +6317,8 @@ pub fn abort_in_progress_merge(root: &Path, fmt: OutputFormat) -> Result<()> {
                  To inspect what was committed: maw ws recover\n  \
                  Check epoch/branch state: maw status && maw doctor\n  \
                  If you have confirmed the refs did NOT advance, remove \
-                 .manifold/merge-state.json manually as a last resort."
+                 {} manually as a last resort.",
+                state_path.display()
             )
         }
     }
@@ -8629,6 +8662,44 @@ mod tests {
                 Some(&pointer_bytes),
             ),
             "a genuine content edit must still be reported as a mismatch"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-34wr: append-only refusal message names the real config path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_only_refusal_names_consolidated_config_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".maw").join("manifold")).expect("mkdir");
+
+        let violations = vec![(PathBuf::from("CHANGELOG.md"), "deleted")];
+        let msg = append_only_refusal_message(root, &violations);
+
+        assert!(
+            msg.contains(".maw/manifold/config.toml"),
+            "consolidated layout must name .maw/manifold/config.toml, got: {msg}"
+        );
+        assert!(
+            !msg.contains("] append_only in .manifold/config.toml"),
+            "must not fall back to the hardcoded V2 path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn append_only_refusal_names_v2_config_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // No `.maw/manifold/` marker => LayoutFlavor::detect defaults to V2.
+
+        let violations = vec![(PathBuf::from("CHANGELOG.md"), "deleted")];
+        let msg = append_only_refusal_message(root, &violations);
+
+        assert!(
+            msg.contains(".manifold/config.toml"),
+            "V2 layout must name .manifold/config.toml, got: {msg}"
         );
     }
 

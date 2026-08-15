@@ -517,9 +517,9 @@ fn emit_migration_notice_if_needed() {
         return;
     }
 
-    tracing::warn!("Detected legacy jj repo (.jj/ present, .manifold/ missing)");
+    tracing::warn!("Detected legacy jj repo (.jj/ present, manifold metadata missing)");
     eprintln!("IMPORTANT: maw now uses git worktrees instead of jj workspaces.");
-    eprintln!("Next: run `maw init` to bootstrap .manifold/ metadata in this repo.");
+    eprintln!("Next: run `maw init` to bootstrap maw metadata in this repo.");
     eprintln!("If migrating from v1 (.workspaces/), run `maw upgrade` first.");
     eprintln!("Your repository history is preserved.");
 }

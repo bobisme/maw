@@ -21,7 +21,17 @@ pub fn run_cli(root: &Path, dry_run: bool) -> Result<()> {
     let report = gc_unreferenced_epochs(root, dry_run)?;
 
     if report.scanned == 0 {
-        println!("No epoch snapshots found in .manifold/epochs.");
+        // bn-34wr: name the actual resolved epochs dir — hardcoding
+        // ".manifold/epochs" reads wrong under the consolidated layout,
+        // where it lives at ".maw/manifold/epochs".
+        let epochs_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .manifold_dir(root)
+            .join("epochs");
+        let display = epochs_dir
+            .strip_prefix(root)
+            .unwrap_or(&epochs_dir)
+            .display();
+        println!("No epoch snapshots found in {display}.");
         return Ok(());
     }
 

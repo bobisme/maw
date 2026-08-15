@@ -82,7 +82,7 @@ impl fmt::Display for InitError {
                 }
                 Ok(())
             }
-            Self::Layout(e) => write!(f, "failed to create .manifold/ directory: {e}"),
+            Self::Layout(e) => write!(f, "failed to create manifold metadata directory: {e}"),
             Self::RefSet { ref_name, message } => {
                 write!(f, "failed to set ref {ref_name}: {message}")
             }
@@ -1096,7 +1096,7 @@ impl fmt::Display for BrownfieldInitError {
                 }
                 Ok(())
             }
-            Self::Layout(e) => write!(f, "failed to create .manifold/ directory: {e}"),
+            Self::Layout(e) => write!(f, "failed to create manifold metadata directory: {e}"),
             Self::RefSet { ref_name, message } => {
                 write!(f, "failed to set ref {ref_name}: {message}")
             }

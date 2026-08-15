@@ -275,8 +275,19 @@ fn exit_code(outcomes: &[InvariantOutcome]) -> i32 {
     }
 }
 
+/// Count violations at warn/error severity toward the reported total.
+///
+/// Info-severity findings (e.g. stale-but-safe lockfiles) are harmless notes
+/// — they're still listed per-invariant above, but must not inflate the "N
+/// violation(s)" summary or make a clean (exit 0) run read as red (bn-34wr).
+/// This mirrors [`exit_code`], which already excludes `Severity::Info` from
+/// the worst-severity computation.
 fn total_violations(outcomes: &[InvariantOutcome]) -> usize {
-    outcomes.iter().map(|o| o.violations.len()).sum()
+    outcomes
+        .iter()
+        .filter(|o| o.severity != Severity::Info)
+        .map(|o| o.violations.len())
+        .sum()
 }
 
 fn repairable_violations(outcomes: &[InvariantOutcome]) -> usize {
@@ -389,7 +400,7 @@ fn print_text(outcomes: &[InvariantOutcome], repair: bool, dry_run: bool) {
     println!(
         "fsck: {checked} invariants checked, {violations} violation(s) ({repairable} repairable)"
     );
-    if violations > 0 && !repair && repairable > 0 {
+    if !repair && repairable > 0 {
         println!("Run `maw fsck --repair` to apply the {repairable} safe repair(s).");
     }
 }
@@ -562,6 +573,39 @@ mod tests {
             repairs: vec![],
         }];
         assert_eq!(exit_code(&info), EXIT_CLEAN);
+    }
+
+    #[test]
+    fn total_violations_excludes_info_severity() {
+        // bn-34wr: an info-only finding (e.g. stale-locks) must not inflate
+        // the "N violation(s)" summary — it's harmless and exits clean.
+        let info_only = vec![InvariantOutcome {
+            id: "stale-locks",
+            severity: Severity::Info,
+            description: "d",
+            violations: vec![Violation::new("stale lock", None)],
+            repairs: vec![],
+        }];
+        assert_eq!(total_violations(&info_only), 0);
+        assert_eq!(exit_code(&info_only), EXIT_CLEAN);
+
+        let mixed = vec![
+            InvariantOutcome {
+                id: "stale-locks",
+                severity: Severity::Info,
+                description: "d",
+                violations: vec![Violation::new("stale lock", None)],
+                repairs: vec![],
+            },
+            InvariantOutcome {
+                id: "y",
+                severity: Severity::Warn,
+                description: "d",
+                violations: vec![Violation::new("bad", None)],
+                repairs: vec![],
+            },
+        ];
+        assert_eq!(total_violations(&mixed), 1);
     }
 
     #[test]

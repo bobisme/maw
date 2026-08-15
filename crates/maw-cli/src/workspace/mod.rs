@@ -2371,12 +2371,14 @@ fn check_stale_workspaces() -> Result<Vec<String>> {
     Ok(stale)
 }
 
-pub(crate) fn now_timestamp_iso8601() -> String {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-
-    let total_millis = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX);
+/// Format a Unix timestamp in milliseconds as ISO-8601 UTC, millisecond
+/// precision (e.g. `2026-08-15T12:34:56.789Z`).
+///
+/// Shared by [`now_timestamp_iso8601`] (the current time) and any caller
+/// rendering an already-recorded millisecond timestamp — e.g. `maw merge
+/// last-conflict`, which used to print the raw `ts_unix_ms` integer
+/// (bn-34wr). Reuse this instead of adding another ad hoc formatter.
+pub(crate) fn format_timestamp_millis_iso8601(total_millis: u64) -> String {
     let millis = total_millis % 1000;
     let secs = total_millis / 1000;
 
@@ -2387,6 +2389,15 @@ pub(crate) fn now_timestamp_iso8601() -> String {
 
     let (year, month, day) = days_to_ymd(days);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
+}
+
+pub(crate) fn now_timestamp_iso8601() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let total_millis = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX);
+    format_timestamp_millis_iso8601(total_millis)
 }
 
 /// Nanosecond-precision variant of `now_timestamp_iso8601`.
@@ -2482,11 +2493,33 @@ fn edit_merge_message(workspaces: &[String]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{metadata, path_is_within, resolve_merge_target};
+    use super::{format_timestamp_millis_iso8601, metadata, path_is_within, resolve_merge_target};
     use crate::changes::store::{
         ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
     };
     use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // bn-34wr: format_timestamp_millis_iso8601 (shared by last-conflict, etc.)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_timestamp_millis_iso8601_epoch_zero() {
+        assert_eq!(
+            format_timestamp_millis_iso8601(0),
+            "1970-01-01T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn format_timestamp_millis_iso8601_known_instant() {
+        // 1786825008840 ms — the exact raw value bn-34wr's field report saw
+        // printed unformatted by `maw merge last-conflict`.
+        assert_eq!(
+            format_timestamp_millis_iso8601(1_786_825_008_840),
+            "2026-08-15T20:16:48.840Z"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // bn-1aey: path_is_within (destroy-cwd-warning containment helper)

@@ -59,7 +59,7 @@ pub enum ReflinkBackendError {
     /// Workspace not found.
     NotFound { name: String },
     /// The epoch snapshot directory does not exist.
-    EpochSnapshotMissing { epoch: String },
+    EpochSnapshotMissing { epoch: String, path: PathBuf },
     /// The workspace is missing the `.maw-epoch` metadata file.
     MissingEpochFile { workspace: String },
     /// The epoch ID stored in `.maw-epoch` is malformed.
@@ -85,11 +85,12 @@ impl fmt::Display for ReflinkBackendError {
                 Ok(())
             }
             Self::NotFound { name } => write!(f, "workspace '{name}' not found"),
-            Self::EpochSnapshotMissing { epoch } => {
+            Self::EpochSnapshotMissing { epoch: _, path } => {
                 write!(
                     f,
-                    "epoch snapshot .manifold/epochs/e-{epoch}/ not found; \
-                     run `maw epoch snapshot` to create it"
+                    "epoch snapshot {} not found; \
+                     run `maw epoch snapshot` to create it",
+                    path.display()
                 )
             }
             Self::MissingEpochFile { workspace } => {
@@ -324,6 +325,7 @@ impl WorkspaceBackend for RefLinkBackend {
         if !snapshot_path.exists() {
             return Err(ReflinkBackendError::EpochSnapshotMissing {
                 epoch: epoch.as_str().to_owned(),
+                path: snapshot_path,
             });
         }
 

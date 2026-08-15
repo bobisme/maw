@@ -104,6 +104,22 @@ fn print_check(check: &DoctorCheck) {
     }
 }
 
+/// Build the final summary line for `maw doctor` text output.
+///
+/// A run with only [WARN] checks (no [FAIL]) still exits 0, but printing the
+/// same "Some checks failed." message as a real failure made green-ish runs
+/// read as red (bn-34wr). Distinguish the three cases explicitly.
+fn summary_line(checks: &[DoctorCheck], all_ok: bool) -> String {
+    if all_ok {
+        return "All checks passed!".to_string();
+    }
+    if checks.iter().any(|c| c.status == "fail") {
+        return "Some checks failed. See above for details.".to_string();
+    }
+    let warnings = checks.iter().filter(|c| c.status == "warn").count();
+    format!("{warnings} warning(s), no failures.")
+}
+
 #[allow(clippy::unnecessary_wraps)]
 /// # Errors
 ///
@@ -191,11 +207,7 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
             }
 
             println!();
-            if all_ok {
-                println!("All checks passed!");
-            } else {
-                println!("Some checks failed. See above for details.");
-            }
+            println!("{}", summary_line(&checks, all_ok));
         }
     }
 
@@ -1008,6 +1020,44 @@ fn scan_for_stubs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check(status: &str) -> DoctorCheck {
+        DoctorCheck {
+            name: "x".to_string(),
+            status: status.to_string(),
+            message: "x: message".to_string(),
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn summary_line_all_ok() {
+        let checks = vec![check("ok"), check("ok")];
+        assert_eq!(summary_line(&checks, true), "All checks passed!");
+    }
+
+    #[test]
+    fn summary_line_warnings_only_does_not_say_failed() {
+        // bn-34wr: a run with only [WARN] lines (no [FAIL]) must not print
+        // "Some checks failed." — it exits 0 and shouldn't read as red.
+        let checks = vec![check("ok"), check("warn"), check("warn")];
+        assert_eq!(summary_line(&checks, false), "2 warning(s), no failures.");
+    }
+
+    #[test]
+    fn summary_line_single_warning_is_not_pluralized_specially() {
+        let checks = vec![check("warn")];
+        assert_eq!(summary_line(&checks, false), "1 warning(s), no failures.");
+    }
+
+    #[test]
+    fn summary_line_failure_present_keeps_current_message() {
+        let checks = vec![check("ok"), check("warn"), check("fail")];
+        assert_eq!(
+            summary_line(&checks, false),
+            "Some checks failed. See above for details."
+        );
+    }
 
     #[test]
     fn stray_root_entries_flags_project_dotfiles() {
