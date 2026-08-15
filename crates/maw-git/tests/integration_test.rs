@@ -207,18 +207,58 @@ fn atomic_ref_update_success() {
 }
 
 #[test]
-#[ignore = "gix loose ref CAS errors currently map to BackendError instead of RefConflict"]
 fn atomic_ref_update_conflict() {
-    let (_dir, repo, commit_oid, _) = setup_repo_with_commit();
+    let (_dir, repo, commit_oid, tree_oid) = setup_repo_with_commit();
     let refname = RefName::new("refs/heads/conflict-test").expect("test setup should succeed");
     repo.write_ref(&refname, commit_oid, "setup")
         .expect("test setup should succeed");
 
-    // Expect ZERO (i.e., ref must not exist) — but it does exist.
+    // A second, distinct commit — simulates a racing "create" that wants to
+    // point the ref somewhere other than what's already there. Using the
+    // *same* oid the ref already holds would make gix treat the "create" as
+    // an idempotent no-op success rather than a MustNotExist conflict, so
+    // the two values here must differ (bn-36id).
+    let other_commit_oid = repo
+        .create_commit(tree_oid, &[commit_oid], "second commit", None)
+        .expect("test setup should succeed");
+
+    // Expect ZERO (i.e., ref must not exist) — but it does exist, and this
+    // edit would give it a different value than it already has.
     let edits = vec![RefEdit {
         name: refname,
-        new_oid: commit_oid,
+        new_oid: other_commit_oid,
         expected_old_oid: GitOid::ZERO,
+    }];
+    let result = repo.atomic_ref_update(&edits);
+    assert!(result.is_err());
+    match result.expect_err("operation should fail") {
+        GitError::RefConflict { .. } => {} // expected
+        other => panic!("expected RefConflict, got: {other:?}"),
+    }
+}
+
+/// Same CAS-conflict class as `atomic_ref_update_conflict`, but for the
+/// "expected old value mismatch" shape (`ReferenceOutOfDate` in gix) rather
+/// than the "must not exist" shape (`MustNotExist`) — bn-36id.
+#[test]
+fn atomic_ref_update_conflict_value_mismatch() {
+    let (_dir, repo, commit_oid, tree_oid) = setup_repo_with_commit();
+    let refname = RefName::new("refs/heads/mismatch-test").expect("test setup should succeed");
+    repo.write_ref(&refname, commit_oid, "setup")
+        .expect("test setup should succeed");
+
+    // A second commit, distinct from what the ref actually points at.
+    let other_commit_oid = repo
+        .create_commit(tree_oid, &[commit_oid], "second commit", None)
+        .expect("test setup should succeed");
+
+    // Expect `other_commit_oid` as the old value — but the ref is actually
+    // at `commit_oid`. This is a value mismatch on an *existing* ref, not a
+    // create-only conflict.
+    let edits = vec![RefEdit {
+        name: refname,
+        new_oid: other_commit_oid,
+        expected_old_oid: other_commit_oid,
     }];
     let result = repo.atomic_ref_update(&edits);
     assert!(result.is_err());

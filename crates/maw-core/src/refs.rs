@@ -189,11 +189,22 @@ fn map_git_error(name: &str, err: &maw_git::GitError) -> RefError {
             ref_name: name.to_owned(),
             raw_value: format!("{value}: {reason}"),
         },
-        // gix may report CAS mismatches as BackendError with "should have content"
+        // bn-36id: as of maw-git's `classify_edit_error`, `GixRepo::atomic_ref_update`
+        // already maps every gix CAS-precondition failure (MustNotExist,
+        // ReferenceOutOfDate, MustExist) to the typed `GitError::RefConflict`
+        // above, so this arm should be unreachable for that code path today.
+        // It stays as a defensive rescue for any `GitError::BackendError`
+        // whose message still looks like a CAS failure — e.g. a future
+        // `GitRepo` implementation (or a `git`-CLI stderr string) that
+        // reports the conflict as an opaque backend error instead of the
+        // typed variant. Kept broad on purpose; narrow it only if it starts
+        // misclassifying real backend errors.
         maw_git::GitError::BackendError { message }
             if message.contains("should have content")
                 || message.contains("cannot lock ref")
-                || message.contains("but expected") =>
+                || message.contains("but expected")
+                || message.contains("was not supposed to exist")
+                || message.contains("was supposed to exist") =>
         {
             RefError::CasMismatch {
                 ref_name: name.to_owned(),

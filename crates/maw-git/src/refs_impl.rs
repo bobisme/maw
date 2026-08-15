@@ -92,6 +92,47 @@ pub fn delete_ref(repo: &GixRepo, name: &RefName) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Classify a `gix::Repository::edit_references` failure as a CAS conflict
+/// or an opaque backend error, by matching the *typed* gix error variant
+/// rather than substring-matching its `Display` text (bn-36id).
+///
+/// `edit_references` returns [`gix::reference::edit::Error`], whose
+/// `FileTransactionPrepare` variant wraps
+/// [`gix::refs::file::transaction::prepare::Error`] — the type that reports
+/// compare-and-swap precondition failures for loose refs:
+///
+/// - `MustNotExist` — the edit required the ref to not exist yet (create
+///   only, `PreviousValue::MustNotExist`), but it already does.
+/// - `ReferenceOutOfDate` — the edit required the ref's current value to
+///   match an expected old value (`PreviousValue::MustExistAndMatch` /
+///   `ExistingMustMatch`), but it held something else.
+/// - `MustExist` — the edit required the ref to already exist
+///   (`PreviousValue::MustExist`), but it was missing.
+///
+/// All three are optimistic-concurrency precondition failures: the ref was
+/// not in the state the caller's compare-and-swap assumed. They all map to
+/// [`GitError::RefConflict`]. Every other prepare/commit error (lock
+/// contention, I/O, malformed packed-refs, ...) stays [`GitError::BackendError`].
+fn classify_edit_error(err: &gix::reference::edit::Error) -> GitError {
+    use gix::refs::file::transaction::prepare::Error as PrepareError;
+
+    let message = err.to_string();
+
+    let cas_ref_name = match err {
+        gix::reference::edit::Error::FileTransactionPrepare(
+            PrepareError::MustNotExist { full_name, .. }
+            | PrepareError::ReferenceOutOfDate { full_name, .. }
+            | PrepareError::MustExist { full_name, .. },
+        ) => Some(full_name.to_string()),
+        _ => None,
+    };
+
+    match cas_ref_name {
+        Some(ref_name) => GitError::RefConflict { ref_name, message },
+        None => GitError::BackendError { message },
+    }
+}
+
 pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitError> {
     let gix_edits: Vec<gix::refs::transaction::RefEdit> = edits
         .iter()
@@ -125,28 +166,9 @@ pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitErr
         })
         .collect::<Result<Vec<_>, GitError>>()?;
 
-    repo.repo.edit_references(gix_edits).map_err(|e| {
-        let msg = e.to_string();
-        // Detect CAS failures from the error message
-        if msg.contains("existing object id")
-            || msg.contains("MustExistAndMatch")
-            || msg.contains("did not match")
-            || msg.contains("mustNotExist")
-            || msg.contains("MustNotExist")
-        {
-            // Try to extract the ref name from the edits for a better error
-            let ref_name = edits
-                .first()
-                .map(|e| e.name.as_str().to_string())
-                .unwrap_or_default();
-            GitError::RefConflict {
-                ref_name,
-                message: msg,
-            }
-        } else {
-            GitError::BackendError { message: msg }
-        }
-    })?;
+    repo.repo
+        .edit_references(gix_edits)
+        .map_err(|e| classify_edit_error(&e))?;
     let git_dir = repo.repo.git_dir();
     for edit in edits {
         ensure_ref_newline(git_dir, edit.name.as_str());
