@@ -578,10 +578,11 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
         && let Some(ref recovery) = default_entry.recovery_ref
     {
         println!("[INFO] ws/default had uncommitted edits, pinned at: {recovery}");
-        // Use the `--ref` form: `maw ws recover <name> --to` only consults
-        // destroy records, not migration recovery refs, so it would fail with
-        // "No destroy records found" (bn-2ksp). The `--ref` form restores the
-        // pinned snapshot directly.
+        // Use the `--ref` form: it names THIS snapshot exactly, with no
+        // dependence on which pin happens to be newest. (`maw ws recover
+        // <name> --to` also reaches pinned refs now — bn-sdv4 for --to,
+        // bn-2nhl for --show/--restore-file — but it always picks the latest
+        // pin for the workspace, which may not be this one.)
         println!("       Recover with: maw ws recover --ref {recovery} --to default-prev");
     }
 

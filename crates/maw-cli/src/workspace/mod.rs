@@ -613,11 +613,16 @@ pub enum WorkspaceCommands {
     /// `.maw/manifold/artifacts/ws/<workspace>/destroy/`.
     ///
     /// This command supports:
-    /// - listing destroyed workspaces (destroy records)
-    /// - inspecting destroy history for a workspace
+    /// - listing recoverable workspaces (destroy records + pinned recovery refs)
+    /// - inspecting destroy history / pinned refs for a workspace
     /// - searching across pinned recovery snapshots by content (agents)
     /// - showing a file from a specific recovery ref
-    /// - restoring a pinned snapshot into a new workspace
+    /// - restoring one file into the default workspace, or a whole snapshot
+    ///   into a new workspace
+    ///
+    /// <name> reads the workspace's latest snapshot whether it came from a
+    /// destroy record or from a pinned recovery ref (e.g. the snapshot a
+    /// dirty-trunk merge pins for `default`).
     ///
     /// Examples:
     ///   maw ws recover                             # list destroyed workspaces
@@ -2162,6 +2167,29 @@ pub fn git_cwd() -> Result<PathBuf> {
             }
         }
     }
+}
+
+/// Absolute path to the DEFAULT workspace's worktree.
+///
+/// In the consolidated `.maw/` layout the default workspace **is the repo
+/// root** — there is no `.maw/workspaces/default/` directory. Only the v2
+/// layout materializes it at `ws/<default>/`.
+///
+/// Any command that writes into "the default workspace" must resolve it
+/// through here (or [`LayoutFlavor::default_target_path`]) and never through
+/// `workspace_path(DEFAULT_WORKSPACE)`, which unconditionally returns
+/// `<workspaces-dir>/default` and therefore points at a non-existent directory
+/// in the consolidated layout (bn-2nhl: this broke `maw ws recover
+/// --restore-file`, the recovery command maw itself prints).
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be discovered.
+pub fn default_workspace_path() -> Result<PathBuf> {
+    let root = repo_root()?;
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    let config = MawConfig::load(&root).unwrap_or_default();
+    Ok(flavor.default_target_path(&root, config.default_workspace()))
 }
 
 /// Detect the layout flavor for the current repo.

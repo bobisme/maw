@@ -6,14 +6,24 @@
 //!
 //! # Modes
 //!
-//! - `maw ws recover` — list destroyed workspaces with snapshots (destroy records)
-//! - `maw ws recover <name>` — show destroy history for a workspace
+//! - `maw ws recover` — list recoverable workspaces (destroy records + pinned refs)
+//! - `maw ws recover <name>` — show destroy history / pinned refs for a workspace
 //! - `maw ws recover --search <pattern>` — content search across pinned recovery snapshots
 //! - `maw ws recover <name> --search <pattern>` — search snapshots for one workspace
 //! - `maw ws recover --ref <recovery-ref> --show <path>` — show a file from a specific snapshot
-//! - `maw ws recover <name> --show <path>` — show a file from latest destroy snapshot
+//! - `maw ws recover <name> --show <path>` — show a file from the latest snapshot
 //! - `maw ws recover --ref <recovery-ref> --to <new-name>` — restore a specific snapshot
-//! - `maw ws recover <name> --to <new-name>` — restore latest destroy snapshot
+//! - `maw ws recover <name> --to <new-name>` — restore the latest snapshot
+//!
+//! The `<name>` forms resolve the workspace's latest snapshot from a destroy
+//! record when there is one, and otherwise from the newest pinned recovery ref
+//! — so a `SOURCE=pinned` row in the listing (a dirty-trunk merge preserve, a
+//! `maw migrate --allow-dirty` capture) supports exactly the commands the
+//! listing advertises for it (bn-2nhl).
+//!
+//! `--restore-file` writes into the DEFAULT workspace, which in the
+//! consolidated layout is the repo root itself — see
+//! [`default_workspace_worktree`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -102,13 +112,67 @@ fn pinned_only_summaries(
             destroyed_at: r.timestamp.clone(),
             capture_mode: "pinned".to_string(),
             snapshot_oid: Some(r.oid[..r.oid.len().min(12)].to_string()),
-            dirty_file_count: 0,
+            dirty_file_count: pinned_snapshot_dirty_count(git_cwd, &r.oid),
             source: RecoverySource::PinnedRef,
             recovery_ref: Some(r.ref_name),
         })
         .collect();
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(summaries)
+}
+
+/// How many files a **pinned** snapshot commit actually preserves (bn-2nhl).
+///
+/// A pinned row has no destroy record to read `dirty_files` from, so the count
+/// has to come from the commit itself. Every snapshot maw pins records the
+/// preserved work as the delta from its FIRST parent — the commit the workspace
+/// was sitting on when the snapshot was taken:
+///
+/// - `git stash create` snapshots (destroy capture, `ws clean`, the bn-1xmk
+///   trunk preserve) are merge commits: parent 0 is HEAD, and the tree holds
+///   the staged+worktree state.
+/// - The bn-1xmk in-memory fallback commit has the anchor epoch as its single
+///   parent and the user's dirty blobs applied on top.
+///
+/// A plain pinned commit (a head-only pin: a real branch commit that was ahead
+/// of its epoch) carries **no** dirty files — its delta from its parent is
+/// committed work, not preserved dirt — so it reports 0, matching the
+/// `capture_mode = head_only` destroy-record semantics.
+///
+/// Best-effort: any read failure reports 0 rather than failing the listing.
+fn pinned_snapshot_dirty_count(git_cwd: &Path, oid: &str) -> usize {
+    let Ok(repo) = open_repo(git_cwd) else {
+        return 0;
+    };
+    let Ok(commit_oid) = parse_oid(oid) else {
+        return 0;
+    };
+    let Ok(commit) = repo.read_commit(commit_oid) else {
+        return 0;
+    };
+    let Some(parent) = commit.parents.first().copied() else {
+        return 0;
+    };
+    if !is_snapshot_commit(&commit) {
+        return 0;
+    }
+    let Ok(parent_commit) = repo.read_commit(parent) else {
+        return 0;
+    };
+    repo.diff_trees(Some(parent_commit.tree_oid), commit.tree_oid)
+        .map_or(0, |entries| entries.len())
+}
+
+/// Is this pinned commit one of maw's dirty-state snapshots (as opposed to a
+/// head-only pin of an ordinary commit)? See [`pinned_snapshot_dirty_count`].
+fn is_snapshot_commit(commit: &maw_git::CommitInfo) -> bool {
+    // `git stash create` always builds a merge commit (HEAD + index [+
+    // untracked]); an ordinary workspace commit that got head-only-pinned has
+    // exactly one parent.
+    commit.parents.len() >= 2
+        || commit
+            .message
+            .starts_with(super::merge::PRE_MERGE_SNAPSHOT_MESSAGE)
 }
 
 #[derive(Serialize)]
@@ -242,13 +306,17 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
 
     for s in summaries {
         let snapshot_display = snapshot_display_for(s);
-        let dirty_suffix = if s.dirty_file_count > 0 {
+        let dirty_count = if s.dirty_file_count > 0 {
             format!(" ({} dirty files)", s.dirty_file_count)
-        } else if s.source == RecoverySource::PinnedRef {
-            " [pinned recovery ref]".to_string()
         } else {
             String::new()
         };
+        let pinned_marker = if s.source == RecoverySource::PinnedRef {
+            " [pinned recovery ref]"
+        } else {
+            ""
+        };
+        let dirty_suffix = format!("{dirty_count}{pinned_marker}");
 
         if use_color {
             println!(
@@ -307,19 +375,26 @@ fn print_list_footer(summaries: &[DestroyedWorkspaceSummary], use_color: bool) {
         .any(|s| s.source == RecoverySource::PinnedRef)
     {
         println!();
-        let note = "\"pinned\" rows are recovery refs (e.g. from `maw migrate --allow-dirty`):";
-        let inspect =
-            "  maw ws recover <name>                       # show its pinned recovery ref(s)";
-        let restore =
-            "  maw ws recover <name> --to <new-workspace>  # restore the latest pinned snapshot";
+        let note = "\"pinned\" rows are recovery refs (e.g. a preserved dirty trunk merge, or `maw migrate --allow-dirty`).";
+        let same = "They support the same commands as destroy rows:";
+        let lines = [
+            "  maw ws recover <name>                        # show its pinned recovery ref(s)",
+            "  maw ws recover <name> --show <path>          # show a file from the latest pinned snapshot",
+            "  maw ws recover <name> --restore-file <path>  # restore a file into the default workspace",
+            "  maw ws recover <name> --to <new-workspace>   # restore the latest pinned snapshot",
+        ];
         if use_color {
             println!("\x1b[90m{note}\x1b[0m");
-            println!("\x1b[90m{inspect}\x1b[0m");
-            println!("\x1b[90m{restore}\x1b[0m");
+            println!("\x1b[90m{same}\x1b[0m");
+            for line in lines {
+                println!("\x1b[90m{line}\x1b[0m");
+            }
         } else {
             println!("{note}");
-            println!("{inspect}");
-            println!("{restore}");
+            println!("{same}");
+            for line in lines {
+                println!("{line}");
+            }
         }
     }
 }
@@ -976,7 +1051,10 @@ fn show_pinned_refs(name: &str, refs: &[RecoveryRef], format: OutputFormat) -> R
             workspace: name.to_string(),
             pinned_refs: pinned,
             advice: vec![
-                "Show file: maw ws recover --ref <ref> --show <path>".to_string(),
+                format!("Show file: maw ws recover {name} --show <path>"),
+                format!("Restore file: maw ws recover {name} --restore-file <path>"),
+                "Show file from a specific snapshot: maw ws recover --ref <ref> --show <path>"
+                    .to_string(),
                 format!("Restore latest: maw ws recover {name} --to <new-name>"),
                 "Restore specific: maw ws recover --ref <ref> --to <new-name>".to_string(),
             ],
@@ -1007,7 +1085,13 @@ fn show_pinned_refs(name: &str, refs: &[RecoveryRef], format: OutputFormat) -> R
         }
         println!();
         println!(
-            "Next: maw ws recover {name} --to <new-name>          # restore the latest pinned snapshot"
+            "Next: maw ws recover {name} --show <path>            # show a file from the latest pinned snapshot"
+        );
+        println!(
+            "      maw ws recover {name} --restore-file <path>    # restore a file into the default workspace"
+        );
+        println!(
+            "      maw ws recover {name} --to <new-name>          # restore the latest pinned snapshot"
         );
         println!("      maw ws recover --ref <ref> --to <new-name>     # restore a specific one");
         println!(
@@ -1156,20 +1240,15 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
     validate_show_path(path)?;
     let root = repo_root()?;
 
-    let record = destroy_record::read_latest_record(&root, name)?
-        .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
+    // Destroy record first, pinned recovery ref second (bn-2nhl).
+    let snapshot = resolve_latest_snapshot(&root, name)?;
+    let oid = snapshot.oid;
 
     // Log the show using the snapshot ref if available, otherwise the workspace name.
-    let ref_for_audit = record
-        .snapshot_ref
-        .clone()
-        .unwrap_or_else(|| format!("(workspace:{name})"));
     audit::log_audit(&AuditEvent::Show {
-        ref_name: ref_for_audit,
+        ref_name: snapshot.audit_ref,
         path: path.to_string(),
     });
-
-    let oid = resolve_recoverable_oid(&record)?;
 
     // Resolve <oid>:<path> via gix tree traversal.
     // Run from the git common dir (repo root) so the ref resolves.
@@ -1394,31 +1473,42 @@ pub fn restore_file_by_ref(recovery_ref: &str, path: &str, force: bool) -> Resul
     validate_show_path(path)?;
 
     let git_cwd = super::git_cwd()?;
-    let default_ws = workspace_path(super::DEFAULT_WORKSPACE)?;
-    if !default_ws.exists() {
-        bail!(
-            "Default workspace not found at {}.\n  \
-             --restore-file writes into the default workspace's worktree.",
-            default_ws.display()
-        );
-    }
+    let default_ws = default_workspace_worktree()?;
     let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
     restore_file_at_oid(&git_cwd, &default_ws, &oid, path, force, recovery_ref)
 }
 
-/// `maw ws recover <name> --restore-file <path>` (latest destroy snapshot).
+/// `maw ws recover <name> --restore-file <path>` (latest destroy snapshot, or
+/// the latest pinned recovery ref when there is no destroy record).
 pub fn restore_file(name: &str, path: &str, force: bool) -> Result<()> {
     validate_workspace_name(name)?;
     validate_show_path(path)?;
     let root = repo_root()?;
 
-    let record = destroy_record::read_latest_record(&root, name)?
-        .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
-
-    let oid = resolve_recoverable_oid(&record)?;
+    let snapshot = resolve_latest_snapshot(&root, name)?;
 
     let git_cwd = super::git_cwd()?;
-    let default_ws = workspace_path(super::DEFAULT_WORKSPACE)?;
+    let default_ws = default_workspace_worktree()?;
+
+    restore_file_at_oid(
+        &git_cwd,
+        &default_ws,
+        &snapshot.oid,
+        path,
+        force,
+        &snapshot.audit_ref,
+    )
+}
+
+/// Worktree `--restore-file` writes into: the DEFAULT workspace.
+///
+/// Layout-aware — in the consolidated layout the default workspace IS the repo
+/// root. Resolving it as `<workspaces-dir>/default` (as this did before
+/// bn-2nhl) made every `maw ws recover ... --restore-file` fail with "Default
+/// workspace not found at <root>/.maw/workspaces/default", including the exact
+/// command the bn-1xmk dirty-trunk warning prints.
+fn default_workspace_worktree() -> Result<std::path::PathBuf> {
+    let default_ws = super::default_workspace_path()?;
     if !default_ws.exists() {
         bail!(
             "Default workspace not found at {}.\n  \
@@ -1426,12 +1516,60 @@ pub fn restore_file(name: &str, path: &str, force: bool) -> Result<()> {
             default_ws.display()
         );
     }
+    Ok(default_ws)
+}
 
-    let audit_ref = record
-        .snapshot_ref
-        .unwrap_or_else(|| format!("(workspace:{name})"));
+/// The snapshot `maw ws recover <name> ...` should read from, resolved from
+/// either a destroy record or a pinned recovery ref.
+struct ResolvedSnapshot {
+    /// Commit OID holding the recoverable tree.
+    oid: String,
+    /// Ref name (or `(workspace:<name>)` placeholder) recorded in the audit log.
+    audit_ref: String,
+    /// How many files the snapshot preserves, for the human-facing summary.
+    dirty_count: usize,
+}
 
-    restore_file_at_oid(&git_cwd, &default_ws, &oid, path, force, &audit_ref)
+/// Resolve the latest snapshot for workspace `name`, preferring a destroy
+/// record (richer metadata) and falling back to the newest pinned recovery ref.
+///
+/// The fallback is what makes the `SOURCE=pinned` rows in `maw ws recover`
+/// actionable: those workspaces (a dirty-trunk merge preserve, `maw migrate
+/// --allow-dirty`, an explicit pin) have snapshots but no destroy record, so a
+/// record-only lookup rejected them with "No destroy records found for
+/// workspace '<name>'" even though the listing had just advertised
+/// `--show`/`--restore-file`/`--to` for that very row (bn-2nhl).
+fn resolve_latest_snapshot(root: &Path, name: &str) -> Result<ResolvedSnapshot> {
+    if let Some(record) = destroy_record::read_latest_record(root, name)? {
+        let dirty_count = record.dirty_files.len();
+        let audit_ref = record
+            .snapshot_ref
+            .clone()
+            .unwrap_or_else(|| format!("(workspace:{name})"));
+        return Ok(ResolvedSnapshot {
+            oid: resolve_recoverable_oid(&record)?,
+            audit_ref,
+            dirty_count,
+        });
+    }
+
+    let git_cwd = super::git_cwd()?;
+    let mut refs = list_recovery_refs(&git_cwd)?;
+    refs.retain(|r| r.workspace == name);
+    refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    let Some(latest) = refs.pop() else {
+        bail!(
+            "No destroy records or recovery refs found for workspace '{name}'.\n  \
+             List recoverable snapshots: maw ws recover"
+        );
+    };
+
+    let dirty_count = pinned_snapshot_dirty_count(&git_cwd, &latest.oid);
+    Ok(ResolvedSnapshot {
+        oid: latest.oid,
+        audit_ref: latest.ref_name,
+        dirty_count,
+    })
 }
 
 /// Resolve the OID to use for file retrieval from a destroy record.
@@ -1523,23 +1661,9 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     // to the latest pinned recovery ref for this workspace — that's how
     // `maw migrate --allow-dirty` snapshots are reachable via the friendly
     // path (bn-sdv4) rather than the undocumented `--ref` form.
-    let (oid, dirty_count) = if let Some(record) = destroy_record::read_latest_record(&root, name)?
-    {
-        let oid = resolve_recoverable_oid(&record)?;
-        (oid, record.dirty_files.len())
-    } else {
-        let git_cwd = super::git_cwd()?;
-        let mut refs = list_recovery_refs(&git_cwd)?;
-        refs.retain(|r| r.workspace == name);
-        refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        let Some(latest) = refs.pop() else {
-            bail!(
-                "No destroy records or recovery refs found for workspace '{name}'.\n  \
-                     List recoverable snapshots: maw ws recover"
-            );
-        };
-        (latest.oid, 0)
-    };
+    let ResolvedSnapshot {
+        oid, dirty_count, ..
+    } = resolve_latest_snapshot(&root, name)?;
 
     // Step 1: Create the new workspace via the standard create path
     println!("Creating workspace '{new_name}' from snapshot of '{name}'...");

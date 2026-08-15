@@ -6967,6 +6967,15 @@ fn pin_recovery_ref_from_oid(repo_root: &Path, ws_name: &str, oid: &str) -> Opti
     }
 }
 
+/// Commit message of the bn-1xmk in-memory pre-merge snapshot built by
+/// [`pin_pre_merge_recovery_ref`].
+///
+/// Shared with `recover.rs`, which uses it to recognize a pinned commit as a
+/// dirty-state snapshot (single parent, unlike a `git stash create` merge
+/// commit) when counting the files a pinned row preserves (bn-2nhl).
+pub(super) const PRE_MERGE_SNAPSHOT_MESSAGE: &str =
+    "bn-1xmk: pre-merge trunk snapshot (in-memory recovery)";
+
 /// Pin a durable recovery ref built from in-memory pre-merge content, for the
 /// case where `snapshot_working_copy` could not produce a stash commit (item a).
 /// Applies the user's dirty blobs onto the anchor-epoch tree and commits it, so
@@ -7010,12 +7019,7 @@ fn pin_pre_merge_recovery_ref(
     let tree = repo.edit_tree(base_tree, &edits).ok()?;
     let anchor_oid = repo.rev_parse(anchor_epoch).ok()?;
     let commit = repo
-        .create_commit(
-            tree,
-            &[anchor_oid],
-            "bn-1xmk: pre-merge trunk snapshot (in-memory recovery)",
-            None,
-        )
+        .create_commit(tree, &[anchor_oid], PRE_MERGE_SNAPSHOT_MESSAGE, None)
         .ok()?;
     pin_recovery_ref_from_oid(repo_root, ws_name, &commit.to_string())
 }
@@ -7091,6 +7095,14 @@ fn verify_trunk_replay_fidelity(
                     "  Restore:  maw ws recover --ref {r} --restore-file {}",
                     path.display()
                 );
+                if repaired {
+                    // The repair already put the user's bytes back, so the
+                    // destination is dirty at this path and `--restore-file`
+                    // will (correctly) refuse without `--force`.
+                    eprintln!(
+                        "            (your version is already on disk — add --force to overwrite it from the snapshot)"
+                    );
+                }
             }
             None => {
                 eprintln!("  Inspect recovery snapshots: maw ws recover {ws_name}");
