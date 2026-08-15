@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
-use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
+use maw::merge::build_phase::{BuildPhaseOutput, RewindWarning, run_build_phase};
 use maw::merge::collect::collect_snapshots;
 use maw::merge::commit::{
     CommitRecovery, CommitResult, recover_partial_commit_with_branch_base,
@@ -3259,6 +3259,108 @@ fn assert_sources_clean_for_merge(
 }
 
 // ---------------------------------------------------------------------------
+// bn-39zu: append-only path protection
+// ---------------------------------------------------------------------------
+
+/// Refuse a merge that would violate a configured `[merge] append_only`
+/// glob: a path matching one of those globs whose merged result does not
+/// keep the epoch tip's bytes as an exact prefix (lines removed or
+/// rewritten), or that the merge deletes outright.
+///
+/// A brand-new file (no version at the epoch tip) never violates — there is
+/// nothing to have preserved. Runs against the BUILD phase's final
+/// candidate tree, after any `--resolve` conflict patching, so it sees
+/// exactly what would be committed.
+///
+/// Returns the list of paths that violated the rule (empty when clean or
+/// when no globs are configured). When `force` is `true` and violations
+/// exist, does not error — instead returns bypass-warning message strings
+/// for the caller to fold into the merge's `warnings[]` / NOTE output.
+/// When `force` is `false` and violations exist, refuses with a `bail!`
+/// naming every violating path and how to override.
+fn assert_append_only_preserved(
+    root: &Path,
+    append_only_globs: &[String],
+    epoch: &EpochId,
+    build_output: &BuildPhaseOutput,
+    force: bool,
+) -> Result<Vec<String>> {
+    if append_only_globs.is_empty() || build_output.resolved_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let patterns: Vec<glob::Pattern> = append_only_globs
+        .iter()
+        .filter_map(|g| glob::Pattern::new(g).ok())
+        .collect();
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = maw_git::GixRepo::open(root).context("failed to open repo for append-only check")?;
+
+    // (path, epoch content, violation reason)
+    let mut violations: Vec<(PathBuf, &'static str)> = Vec::new();
+    for path in &build_output.resolved_paths {
+        if !patterns.iter().any(|p| p.matches_path(path)) {
+            continue;
+        }
+
+        // No version at the epoch tip: a brand-new file can never violate
+        // append-only (there is nothing to have preserved).
+        let Some(old_content) = repo
+            .read_file_at_commit(epoch.as_str(), path)
+            .with_context(|| format!("append-only check: read {} at epoch", path.display()))?
+        else {
+            continue;
+        };
+
+        let new_content = repo
+            .read_file_at_commit(build_output.candidate.as_str(), path)
+            .with_context(|| format!("append-only check: read {} at candidate", path.display()))?;
+
+        match new_content {
+            None => violations.push((path.clone(), "deleted")),
+            Some(new_content) if !new_content.starts_with(&old_content) => {
+                violations.push((path.clone(), "rewritten (not a pure append)"));
+            }
+            Some(_) => {}
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if force {
+        return Ok(violations
+            .iter()
+            .map(|(path, reason)| {
+                format!(
+                    "--force bypassed append-only violation on {} ({reason})",
+                    path.display()
+                )
+            })
+            .collect());
+    }
+
+    let file_list = violations
+        .iter()
+        .map(|(path, reason)| format!("  - {} ({reason})", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "Merge refused: {} append-only path(s) would lose content:\n{file_list}\n  \
+         These paths are configured as append-only ([merge] append_only in .manifold/config.toml); \
+         the merge result must keep the epoch's content as an exact byte prefix.\n  \
+         Verify the source workspace change is intentional, then either fix the workspace content \
+         or override:\n  \
+         To force merge anyway (bypasses this check, prints a warning): maw ws merge <workspace> --into <target> --force",
+        violations.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // bn-1etl: Gate 2 message classification
 // ---------------------------------------------------------------------------
 
@@ -4871,6 +4973,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     conflicts: vec![],
                     resolved_paths: build_output.resolved_paths.clone(),
                     driver_rewrites: build_output.driver_rewrites.clone(),
+                    rewind_warnings: build_output.rewind_warnings.clone(),
                 };
             } else {
                 // Some conflicts remain unresolved — report them with IDs
@@ -5031,6 +5134,27 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let validation_config = &manifold_config.merge.validation;
+
+    // bn-39zu: refuse (or, with --force, warn and bypass) a merge that would
+    // violate a configured `[merge] append_only` glob. Runs against the
+    // final candidate (post any --resolve conflict patching above), before
+    // VALIDATE/COMMIT actually land it.
+    let append_only_bypass_warnings = match assert_append_only_preserved(
+        &root,
+        &manifold_config.merge.append_only,
+        &merge_base_epoch,
+        &build_output,
+        opts.force,
+    ) {
+        Ok(warnings) => warnings,
+        Err(e) => {
+            abort_merge(&manifold_dir, &format!("append-only check failed: {e}"));
+            return Err(e);
+        }
+    };
+    for warning in &append_only_bypass_warnings {
+        eprintln!("WARNING: {warning}");
+    }
 
     textln!();
     if validation_config.has_commands() {
@@ -5619,7 +5743,21 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     }
 
+    // bn-39zu: pure-rewind detections — a source's "new" content for a path
+    // is byte-identical to an already-superseded older blob. These get the
+    // louder `WARNING:` prefix in text mode (not folded into the generic
+    // NOTE loop below) but still land in `warnings[]` for JSON so an
+    // orchestrator scraping either mode sees them.
+    let rewind_warning_lines: Vec<String> = build_output
+        .rewind_warnings
+        .iter()
+        .map(RewindWarning::message)
+        .collect();
+
     if format == OutputFormat::Json {
+        let mut json_warnings = warnings.clone();
+        json_warnings.extend(rewind_warning_lines.iter().cloned());
+        json_warnings.extend(append_only_bypass_warnings.iter().cloned());
         let candidate = build_output.candidate.as_str().to_string();
         let success = MergeSuccessOutput {
             status: "success".to_string(),
@@ -5645,7 +5783,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             sources: ws_to_merge.clone(),
             destroyed: destroy_outcome.destroyed.clone(),
             siblings: sibling_json,
-            warnings,
+            warnings: json_warnings,
             cwd_destroyed: destroy_outcome.cwd_destroyed_ws.is_some(),
             recovery: MergeRecoveryJson {
                 pinned_refs: destroy_outcome.pinned_refs.clone(),
@@ -5665,6 +5803,12 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         // conflicts, failed post-sync hooks).
         for warning in &warnings {
             textln!("NOTE: {warning}");
+        }
+        // bn-39zu: pure-rewind detections get the loud WARNING prefix — this
+        // class of merge outcome (a path silently reverted to older,
+        // already-superseded content) deserves more visibility than a NOTE.
+        for warning in &rewind_warning_lines {
+            textln!("  WARNING: {warning}");
         }
         textln!();
         if let Some(change_id) = target_change_id {

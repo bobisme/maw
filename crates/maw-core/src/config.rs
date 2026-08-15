@@ -182,6 +182,20 @@ pub struct MergeConfig {
     /// triplication pattern (~2.83×).
     #[serde(default = "default_post_rebase_size_ratio_max")]
     pub post_rebase_size_ratio_max: f64,
+
+    /// Glob patterns (matched against repo-relative paths) for files that
+    /// must only ever grow by appending — e.g. append-only event logs.
+    ///
+    /// When a matched path is touched by a merge, the merge REFUSES unless
+    /// the merged result's bytes start with the epoch tip's bytes at that
+    /// path as an exact prefix (i.e. only new content was appended). A
+    /// deletion of a matched path is always a violation. A brand-new file
+    /// (no epoch version) is always fine. `--force` bypasses the refusal
+    /// with a warning (bn-39zu).
+    ///
+    /// Empty by default (opt-in — no paths are protected unless configured).
+    #[serde(default)]
+    pub append_only: Vec<String>,
 }
 
 impl Default for MergeConfig {
@@ -194,6 +208,7 @@ impl Default for MergeConfig {
             auto_rebase_siblings: default_auto_rebase_siblings(),
             strict_post_rebase_check: default_strict_post_rebase_check(),
             post_rebase_size_ratio_max: default_post_rebase_size_ratio_max(),
+            append_only: Vec::new(),
         }
     }
 }
@@ -744,6 +759,28 @@ kind = "theirs"
         assert_eq!(cfg.merge.drivers[1].match_glob, "generated/**");
         assert_eq!(cfg.merge.drivers[1].kind, MergeDriverKind::Theirs);
         assert!(cfg.merge.drivers[1].command.is_none());
+    }
+
+    #[test]
+    fn append_only_defaults_empty() {
+        let cfg = ManifoldConfig::default();
+        assert!(cfg.merge.append_only.is_empty());
+    }
+
+    #[test]
+    fn parse_append_only_globs() {
+        let toml = r#"
+[merge]
+append_only = [".bones/events/*.events", "CHANGELOG.md"]
+"#;
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
+        assert_eq!(
+            cfg.merge.append_only,
+            vec![
+                ".bones/events/*.events".to_owned(),
+                "CHANGELOG.md".to_owned(),
+            ]
+        );
     }
 
     #[test]

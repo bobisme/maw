@@ -99,6 +99,10 @@ pub struct BuildPhaseOutput {
     /// Driver rewrites discard the textually merged content, so they are
     /// always reported rather than applied silently.
     pub driver_rewrites: Vec<DriverRewrite>,
+    /// bn-39zu: pure-rewind detections — source changes that restore a path
+    /// to a byte-identical older blob from the epoch's own first-parent
+    /// history. Warn-only: never blocks the merge (see [`RewindWarning`]).
+    pub rewind_warnings: Vec<RewindWarning>,
 }
 
 /// One path whose merged content a deterministic merge driver replaced.
@@ -173,6 +177,60 @@ impl DriverRewriteReason {
 impl fmt::Display for DriverRewriteReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RewindWarning (bn-39zu)
+// ---------------------------------------------------------------------------
+
+/// A detected **pure rewind**: a source workspace's new content for `path`
+/// is byte-identical to an older blob the same path already had.
+///
+/// The match comes from some earlier commit in the merge base's first-parent
+/// history, even though the path's content at the merge base itself is
+/// different.
+///
+/// This is the hardening called for by continuum field report bn-39zu: an
+/// agent inside a workspace accidentally rewrote an append-only file back to
+/// a stale copy and committed it; `maw ws merge` faithfully replayed the
+/// rewind into trunk, silently deleting the appends made since. maw did
+/// nothing wrong mechanically, but a merge that restores a path to
+/// already-superseded content is almost always an accident, and the merge
+/// engine is the last chokepoint that can catch it before it lands in trunk.
+///
+/// Warn-only: this never blocks a merge. It surfaces as a loud `WARNING:`
+/// line in text output and as an entry in `MergeSuccessOutput.warnings[]` in
+/// JSON output, so an orchestrator scraping either mode sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewindWarning {
+    /// The source workspace whose change is the rewind.
+    pub workspace: WorkspaceId,
+    /// The path being rewound.
+    pub path: PathBuf,
+    /// Hex OID of the ancestor commit whose blob for `path` matches the
+    /// workspace's new content.
+    pub ancestor_oid: String,
+    /// How many first-parent commits behind the merge base `ancestor_oid`
+    /// is. `1` means "the immediately preceding commit" — i.e. the source
+    /// change reverts the *last* edit to this path, which is still flagged
+    /// (a legitimate revert looks identical to an accidental one from here).
+    pub commits_behind: usize,
+}
+
+impl RewindWarning {
+    /// Render the loud, human-readable warning message (no `WARNING:`
+    /// prefix — callers add whatever prefix suits their output mode).
+    #[must_use]
+    pub fn message(&self) -> String {
+        let short = &self.ancestor_oid[..self.ancestor_oid.len().min(12)];
+        let plural = if self.commits_behind == 1 { "" } else { "s" };
+        format!(
+            "{} rewinds {} to its content at {short} ({} commit{plural} behind the epoch). If this is unintentional, the workspace holds a stale copy.",
+            self.workspace,
+            self.path.display(),
+            self.commits_behind,
+        )
     }
 }
 
@@ -370,6 +428,10 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     // 1. Collect snapshots (enriched with FileId + blob OID)
     let patch_sets = collect_snapshots(repo_root, backend, sources)?;
 
+    // bn-39zu: pure-rewind detection, before any synthetic patch sets exist
+    // and using the true source workspaces for attribution.
+    let rewind_warnings = detect_rewind_warnings(repo_root, epoch, &patch_sets);
+
     // 2. Partition
     let partition = partition_by_path(&patch_sets);
     let unique_count = partition.unique_count();
@@ -414,6 +476,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
         shared_count,
         resolved_paths,
         driver_rewrites,
+        rewind_warnings,
     })
 }
 
@@ -738,6 +801,13 @@ fn run_pipeline<B: WorkspaceBackend>(
     // Collect snapshots from all source workspaces (enriched with FileId + blob OID)
     let mut patch_sets = collect_snapshots(repo_root, backend, &state.sources)?;
 
+    // bn-39zu: pure-rewind detection. Runs against the real source
+    // PatchSets only — before the synthetic epoch-delta PatchSet (below) is
+    // injected, so attribution always names a real workspace, and before
+    // partition/resolve so it sees each source's own claimed content
+    // independent of how conflicts get resolved.
+    let rewind_warnings = detect_rewind_warnings(repo_root, &state.epoch_before, &patch_sets);
+
     // Inject a synthetic epoch-delta PatchSet for stale workspaces.
     // If any workspace's base epoch differs from the current epoch, files that
     // changed in the epoch delta AND overlap with workspace changes must go
@@ -800,6 +870,7 @@ fn run_pipeline<B: WorkspaceBackend>(
         shared_count,
         resolved_paths,
         driver_rewrites,
+        rewind_warnings,
     })
 }
 
@@ -1543,6 +1614,142 @@ fn read_file_at_epoch(
             path.display()
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: pure-rewind detection (bn-39zu)
+// ---------------------------------------------------------------------------
+
+/// The most first-parent commits behind the merge base the ancestor scan
+/// will look. Bounds the cost of a merge that touches many long-unmodified
+/// paths; a rewind past this depth is not flagged.
+const REWIND_MAX_ANCESTOR_WALK: usize = 100;
+
+/// One path whose new blob still needs to be checked against the ancestor
+/// walk (see [`detect_rewind_warnings`]).
+struct RewindCandidate<'a> {
+    workspace: &'a WorkspaceId,
+    path: &'a Path,
+    blob: maw_git::GitOid,
+}
+
+/// Detect pure-rewind changes across a set of source `PatchSet`s (bn-39zu).
+///
+/// For every non-deletion change whose new blob (S) differs from the blob
+/// that path has at `epoch_before` (B) — i.e. a real change, `S != B` —
+/// walks `epoch_before`'s first-parent history (capped at
+/// [`REWIND_MAX_ANCESTOR_WALK`] commits) looking for the closest ancestor
+/// commit whose blob for that path is `S`. A match means the workspace's
+/// "new" content is actually old content the path already held before it
+/// was changed away from — almost always a stale in-workspace copy, not
+/// intentional new work.
+///
+/// Paths that don't exist at `epoch_before` (genuinely new files) and
+/// deletions are skipped — there is no `B` to compare against, and a
+/// deletion is not a rewind (per the bone's spec: only exact-match to an
+/// older blob counts). Changes whose blob OID was not captured at collect
+/// time (`change.blob.is_none()`, e.g. a git-object-store failure) are also
+/// skipped — this guard is advisory and best-effort, never worth blocking
+/// or content-hashing to recover.
+///
+/// Never fails the merge: any git-read error degrades to "no warning" for
+/// that path rather than propagating, since this guard is advisory.
+///
+/// # Performance
+///
+/// Detection is OID-only throughout — every comparison is a 20-byte blob
+/// OID equality check via [`GitRepo::blob_oid_at_commit`], which resolves
+/// only tree objects and never reads blob content. No file bytes are ever
+/// loaded, so cost is independent of file size (the previous approach,
+/// which compared bytes via `read_file_at_commit`, would re-read a large
+/// append-only log's full content at every ancestor commit it scanned).
+///
+/// The scan only runs for paths a source actually changed (never the whole
+/// tree). The first-parent ancestor chain is walked once and shared across
+/// every candidate path (walking commit-major, not path-major): at each
+/// ancestor commit, every path still without a match is checked once, and
+/// matched paths drop out of the candidate set immediately, so the walk
+/// also stops the moment nothing is left to check — an ordinary merge with
+/// no rewinds costs at most `REWIND_MAX_ANCESTOR_WALK` commit steps, each
+/// doing one cheap tree lookup per still-unresolved path.
+fn detect_rewind_warnings(
+    repo_root: &Path,
+    epoch_before: &EpochId,
+    patch_sets: &[PatchSet],
+) -> Vec<RewindWarning> {
+    let Ok(repo) = maw_git::GixRepo::open(repo_root) else {
+        return Vec::new();
+    };
+    let Ok(epoch_oid) = epoch_before.as_str().parse::<maw_git::GitOid>() else {
+        return Vec::new();
+    };
+
+    // Build the candidate set: one entry per non-deletion change whose new
+    // blob OID differs from the path's blob OID at the merge base. Every
+    // comparison here is OID-only (bn-39zu spec: "cheap OID comparisons
+    // only — no content diffing for detection").
+    let mut remaining: Vec<RewindCandidate<'_>> = Vec::new();
+    for ps in patch_sets {
+        for change in &ps.changes {
+            if matches!(change.kind, ChangeKind::Deleted) {
+                continue;
+            }
+            let Some(new_blob) = change.blob.as_ref().and_then(|b| b.as_str().parse().ok()) else {
+                // No blob OID captured at collect time — skip (best-effort).
+                continue;
+            };
+            let epoch_blob = repo
+                .blob_oid_at_commit(epoch_oid, &change.path)
+                .ok()
+                .flatten();
+            if epoch_blob == Some(new_blob) {
+                // Identical to the epoch tip already — not a change at all.
+                continue;
+            }
+            remaining.push(RewindCandidate {
+                workspace: &ps.workspace_id,
+                path: &change.path,
+                blob: new_blob,
+            });
+        }
+    }
+
+    if remaining.is_empty() {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    let mut current = epoch_oid;
+    for commits_behind in 1..=REWIND_MAX_ANCESTOR_WALK {
+        if remaining.is_empty() {
+            break;
+        }
+        let Ok(info) = repo.read_commit(current) else {
+            break;
+        };
+        let Some(parent) = info.parents.first().copied() else {
+            break;
+        };
+
+        let mut still_remaining = Vec::with_capacity(remaining.len());
+        for cand in remaining {
+            match repo.blob_oid_at_commit(parent, cand.path) {
+                Ok(Some(blob)) if blob == cand.blob => {
+                    warnings.push(RewindWarning {
+                        workspace: cand.workspace.clone(),
+                        path: cand.path.to_path_buf(),
+                        ancestor_oid: parent.to_string(),
+                        commits_behind,
+                    });
+                }
+                _ => still_remaining.push(cand),
+            }
+        }
+        remaining = still_remaining;
+        current = parent;
+    }
+
+    warnings
 }
 
 // ---------------------------------------------------------------------------

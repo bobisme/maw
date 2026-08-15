@@ -552,6 +552,42 @@ pub fn read_file_at_commit(
     Ok(Some(blob.data.clone()))
 }
 
+/// Look up the blob OID at `rel_path` within `commit`'s tree, without
+/// reading the blob's content. See [`crate::GitRepo::blob_oid_at_commit`].
+///
+/// bn-39zu: used by the merge-time "pure rewind" detector, which walks a
+/// bounded window of ancestor commits (e.g. 200) looking for a byte-identical
+/// blob at the same path. Reading full blob content for every (commit, path)
+/// pair in that walk would be wasteful; this only touches tree objects.
+pub fn blob_oid_at_commit(
+    repo: &GixRepo,
+    commit: GitOid,
+    rel_path: &std::path::Path,
+) -> Result<Option<GitOid>, GitError> {
+    let gix_oid = to_gix_oid(commit);
+
+    let Ok(commit) = repo.repo.find_commit(gix_oid) else {
+        return Ok(None);
+    };
+
+    let Ok(tree) = commit.tree() else {
+        return Ok(None);
+    };
+
+    let Ok(Some(entry)) = tree.lookup_entry_by_path(rel_path) else {
+        return Ok(None);
+    };
+
+    match entry.mode().kind() {
+        gix::objs::tree::EntryKind::Blob
+        | gix::objs::tree::EntryKind::BlobExecutable
+        | gix::objs::tree::EntryKind::Link => {}
+        _ => return Ok(None),
+    }
+
+    Ok(Some(from_gix_oid(entry.oid().into())))
+}
+
 #[cfg(test)]
 mod tests_bn_pfh7 {
     //! Regression: `find_entry_at_path` must normalize `.` path

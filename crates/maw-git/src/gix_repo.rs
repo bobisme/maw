@@ -370,6 +370,14 @@ impl GitRepo for GixRepo {
         crate::objects_impl::read_file_at_commit(self, commit_spec, rel_path)
     }
 
+    fn blob_oid_at_commit(
+        &self,
+        commit: GitOid,
+        rel_path: &Path,
+    ) -> Result<Option<GitOid>, GitError> {
+        crate::objects_impl::blob_oid_at_commit(self, commit, rel_path)
+    }
+
     // === Diff ===
     fn diff_trees(&self, old: Option<GitOid>, new: GitOid) -> Result<Vec<DiffEntry>, GitError> {
         crate::diff_impl::diff_trees(self, old, new)

@@ -365,6 +365,28 @@ pub trait GitRepo {
         rel_path: &Path,
     ) -> Result<Option<Vec<u8>>, GitError>;
 
+    /// Look up the blob OID at `rel_path` within `commit`'s tree, without
+    /// reading the blob's content.
+    ///
+    /// Returns `Ok(None)` if the commit cannot be resolved, the path does
+    /// not exist at that commit, or the path resolves to a non-blob entry
+    /// (tree/submodule). Mirrors [`read_file_at_commit`](Self::read_file_at_commit)
+    /// semantics but is far cheaper for OID-only comparisons since no blob
+    /// content is loaded — used by the merge-time "pure rewind" detector
+    /// (bn-39zu), which performs a bounded walk over many ancestor commits
+    /// and only needs OID equality, not bytes.
+    ///
+    /// Replaces: `git rev-parse <commit>:<path>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails for reasons other
+    /// than the path or commit being missing.
+    fn blob_oid_at_commit(
+        &self,
+        commit: GitOid,
+        rel_path: &Path,
+    ) -> Result<Option<GitOid>, GitError>;
+
     // -----------------------------------------------------------------------
     // Diff (~20 call sites)
     //
