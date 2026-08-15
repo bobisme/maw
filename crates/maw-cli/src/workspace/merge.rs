@@ -3649,7 +3649,8 @@ fn reconcile_epoch_with_branch(
                             "failed to advance workspace epoch ref after FF absorb"
                         );
                     }
-                    sync_ff_paths_in_worktree(&c.ws_path, &c.name, branch_oid, &ff_paths);
+                    let ff_sync =
+                        sync_ff_paths_in_worktree(&c.ws_path, &c.name, branch_oid, &ff_paths);
                     notes.push(if dirty {
                         format!(
                             "  {}: fast-forwarded to absorbed epoch (uncommitted edits preserved)",
@@ -3658,6 +3659,35 @@ fn reconcile_epoch_with_branch(
                     } else {
                         format!("  {}: fast-forwarded to absorbed epoch", c.name)
                     });
+                    // bn-p3m9: this workspace was more than one epoch behind
+                    // the branch tip, so the absorbed range alone would have
+                    // left stale blobs behind a HEAD that claims otherwise.
+                    // Say so — a silent extra refresh is how the original bug
+                    // stayed invisible for a whole session.
+                    if ff_sync.extra_refreshed > 0 {
+                        notes.push(format!(
+                            "  {}: refreshed {} path(s) from earlier epoch(s) \
+                             (workspace was more than one epoch behind)",
+                            c.name, ff_sync.extra_refreshed
+                        ));
+                    }
+                    if !ff_sync.extra_skipped_dirty.is_empty() {
+                        notes.push(format!(
+                            "  {}: WARNING: {} locally-edited path(s) are stale against the \
+                             absorbed epoch and were NOT refreshed: {} \u{2014} \
+                             commit or stash them, then run: maw ws sync {}",
+                            c.name,
+                            ff_sync.extra_skipped_dirty.len(),
+                            ff_sync
+                                .extra_skipped_dirty
+                                .iter()
+                                .take(5)
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            c.name
+                        ));
+                    }
                 }
             }
 
@@ -3880,20 +3910,48 @@ fn ff_apply_one_path(
 /// commit so the workspace tracks the absorbed tip. Failures are logged but
 /// non-fatal: the merge can still proceed because the merge engine
 /// re-snapshots the target before BUILD.
+/// What [`sync_ff_paths_in_worktree`] actually did, so the caller can report
+/// the parts that are not implied by "fast-forwarded to absorbed epoch".
+#[derive(Debug, Default)]
+struct FfWorktreeSync {
+    /// Paths outside the absorbed range that were stale in this worktree and
+    /// had to be refreshed (bn-p3m9). Non-zero means the workspace was more
+    /// than one epoch behind the branch tip.
+    extra_refreshed: usize,
+    /// Stale-but-locally-edited paths outside the absorbed range. These are
+    /// NOT touched — the local edit wins — but the workspace is left with a
+    /// worktree that does not match its new HEAD, so the caller must say so.
+    extra_skipped_dirty: Vec<PathBuf>,
+}
+
 /// Update a non-target workspace's worktree to reflect an absorbed FF range.
 ///
 /// Two coordinated updates happen:
 ///
-/// 1. `git checkout <oid> -- <ff_paths>` materialises the absorbed content
-///    for every path in the FF range. The safety predicate guarantees the
-///    workspace has not edited any of these paths, so the checkout is
-///    non-destructive.
+/// 1. Every path whose blob differs between the workspace's own `HEAD` tree
+///    and `target_oid`'s tree is materialised from the target tree.
 /// 2. The worktree's `HEAD` is rewritten to point at `target_oid`, leaving
 ///    the index reset to match. Without this step, downstream merge
 ///    helpers that compare workspace `HEAD` to the (now-advanced) epoch
 ///    would treat the workspace as having committed work — and read blobs
 ///    from `HEAD:<path>` rather than the working copy, dropping
 ///    uncommitted edits.
+///
+/// bn-p3m9: step 1 used to materialise only `ff_paths` — the delta of the
+/// GLOBAL pre-absorb epoch against the branch tip. That is correct only when
+/// the sibling's own baseline equals the global pre-absorb epoch. A sibling
+/// that is more than one epoch behind (e.g. the epoch was advanced by `maw
+/// epoch sync` after a direct trunk commit, which does not touch live
+/// workspaces) never got the paths in `ws_HEAD..pre_absorb_epoch` written,
+/// yet step 2 still moved its HEAD and index to the tip. Those paths then sat
+/// in the worktree holding the OLD blobs, and `git status` showed them as a
+/// local revert of the skipped commit — silent working-tree corruption. The
+/// path set is now derived from this workspace's own HEAD, exactly like
+/// [`sync_target_worktree_to_epoch`] already does for the merge target.
+///
+/// The FF-absorb safety predicate only proved that dirty paths are disjoint
+/// from `ff_paths`, so paths outside that range may carry genuine local
+/// edits. Those are skipped (never clobbered) and reported back to the caller.
 ///
 /// Failures are logged but non-fatal; the merge re-snapshots before BUILD
 /// and any drift will surface as a normal merge artefact rather than data
@@ -3903,9 +3961,10 @@ fn sync_ff_paths_in_worktree(
     ws_name: &str,
     target_oid: &GitOid,
     ff_paths: &std::collections::BTreeSet<PathBuf>,
-) {
+) -> FfWorktreeSync {
+    let mut report = FfWorktreeSync::default();
     if !ws_path.exists() {
-        return;
+        return report;
     }
     let oid = target_oid.as_str();
 
@@ -3918,7 +3977,7 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "failed to open workspace repo during FF absorb"
             );
-            return;
+            return report;
         }
     };
 
@@ -3932,15 +3991,39 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "invalid target OID during FF absorb"
             );
-            return;
+            return report;
         }
     };
 
-    if !ff_paths.is_empty() {
-        // Materialize each FF-absorbed path from the target tree. The
-        // pre-FF safety predicate proved these paths are not user-edited,
-        // so overwriting them is non-destructive.
-        for rel in ff_paths {
+    // bn-p3m9: the authoritative path set is this workspace's own
+    // HEAD-tree → target-tree diff. `ff_paths` is kept as the floor (and as
+    // the fallback when HEAD or the diff is unreadable) so a read failure can
+    // only ever under-report, never regress the pre-fix behaviour.
+    let own_paths = ff_own_stale_paths(&ws_repo, ws_name, target_git);
+    let mut to_apply: std::collections::BTreeSet<PathBuf> = ff_paths.clone();
+    if let Some(own) = own_paths {
+        let dirty = dirty_paths_in_workspace(ws_path);
+        for rel in own {
+            if ff_paths.contains(&rel) {
+                continue;
+            }
+            if dirty.contains(&rel) {
+                // A local edit outside the absorbed range. Never clobber it;
+                // the caller warns so the operator can run a real sync.
+                report.extra_skipped_dirty.push(rel);
+                continue;
+            }
+            report.extra_refreshed += 1;
+            to_apply.insert(rel);
+        }
+    }
+
+    if !to_apply.is_empty() {
+        // Materialize each stale path from the target tree. Paths inside the
+        // absorbed range were proven un-edited by the pre-FF safety
+        // predicate; paths outside it were filtered against the dirty set
+        // above. Either way this cannot clobber a local edit.
+        for rel in &to_apply {
             ff_apply_one_path(&ws_repo, ws_name, ws_path, target_git, rel);
         }
     }
@@ -3956,7 +4039,7 @@ fn sync_ff_paths_in_worktree(
             error = %e,
             "failed to detach worktree HEAD during FF absorb"
         );
-        return;
+        return report;
     }
 
     // Re-open after HEAD rewrite so unstage_all() sees the new HEAD.
@@ -3968,10 +4051,70 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "failed to re-open workspace repo after FF HEAD rewrite"
             );
-            return;
+            return report;
         }
     };
     let _ = ws_repo_post.unstage_all();
+    report
+}
+
+/// bn-p3m9: paths whose blob differs between the workspace's own `HEAD` tree
+/// and `target_git`'s tree — the set that actually has to be materialised to
+/// make the worktree match the HEAD this absorb is about to install.
+///
+/// Returns `None` (rather than an empty set) when HEAD or the diff cannot be
+/// read, so the caller can fall back to the global FF path set instead of
+/// silently materialising nothing.
+fn ff_own_stale_paths(
+    ws_repo: &maw_git::GixRepo,
+    ws_name: &str,
+    target_git: maw_git::GitOid,
+) -> Option<Vec<PathBuf>> {
+    let head = match ws_repo.rev_parse_opt("HEAD") {
+        Ok(Some(h)) => h,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "FF absorb: rev-parse HEAD failed; falling back to global FF path set"
+            );
+            return None;
+        }
+    };
+    let head_tree = match ws_repo.read_commit(head) {
+        Ok(c) => c.tree_oid,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "FF absorb: read HEAD commit failed; falling back to global FF path set"
+            );
+            return None;
+        }
+    };
+    let target_tree = match ws_repo.read_commit(target_git) {
+        Ok(c) => c.tree_oid,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "FF absorb: read target commit failed; falling back to global FF path set"
+            );
+            return None;
+        }
+    };
+    match ws_repo.diff_trees(Some(head_tree), target_tree) {
+        Ok(diff) => Some(diff.into_iter().map(|e| PathBuf::from(e.path)).collect()),
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "FF absorb: diff_trees failed; falling back to global FF path set"
+            );
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
