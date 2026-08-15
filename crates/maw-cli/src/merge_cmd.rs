@@ -451,6 +451,7 @@ fn print_event_line(ev: &MergeEvent) {
             }
         }
         MergeEventKind::ConflictDetected { .. } => "conflict_detected",
+        MergeEventKind::MergeDriversApplied { .. } => "merge_drivers_applied",
         MergeEventKind::IntegrationCompleted { .. } => "integration_completed",
         MergeEventKind::IntegrationAborted { .. } => "integration_aborted",
     };
@@ -469,6 +470,19 @@ fn print_event_line(ev: &MergeEvent) {
             sources.join(","),
             into,
             conflict_ids.join(",")
+        ),
+        MergeEventKind::MergeDriversApplied {
+            sources,
+            into,
+            paths,
+            kinds,
+            ..
+        } => format!(
+            "sources=[{}] into={} rewrote=[{}] kinds=[{}]",
+            sources.join(","),
+            into,
+            paths.join(","),
+            kinds.join(",")
         ),
         MergeEventKind::IntegrationCompleted {
             sources,

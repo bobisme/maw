@@ -23,6 +23,23 @@
 //! 3. **Resolve** — auto-merge shared paths via hash equality / diff3.
 //! 4. **Drivers** — apply deterministic merge drivers (`regenerate`, `ours`,
 //!    `theirs`) for configured path globs.
+//!
+//!    Drivers are conflict-resolution strategies, not rewrite hooks
+//!    (bn-1du0):
+//!    - **no driver fires on a unique path** — one workspace touched it, so
+//!      there is nothing to arbitrate and its content is taken verbatim;
+//!    - **`regenerate` additionally never fires on a shared path that
+//!      diff3/AST merged cleanly** — it runs only as the resolution of a real
+//!      textual conflict;
+//!    - `ours` / `theirs` still override cleanly merged *shared* paths: they
+//!      are explicit "do not merge this file, pick a side" declarations.
+//!
+//!    Regeneration is lossy: `cargo generate-lockfile` re-resolves every
+//!    dependency to the newest compatible version, so firing it on a path
+//!    that both sides already agreed on silently discards deliberate pins.
+//!
+//!    Every path a driver actually rewrote is reported: a `NOTE:` line on
+//!    stderr and a [`DriverRewrite`] entry in [`BuildPhaseOutput`].
 //! 5. **Build** — apply resolved changes to the epoch tree, produce a new
 //!    git tree + commit.
 
@@ -47,7 +64,7 @@ use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
 #[cfg(not(feature = "ast-merge"))]
 use crate::merge::resolve::resolve_partition;
 #[cfg(feature = "ast-merge")]
-use crate::merge::resolve::{ConflictRecord, ResolveError, ResolveResult};
+use crate::merge::resolve::{ConflictReason, ConflictRecord, ResolveError, ResolveResult};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
@@ -76,6 +93,87 @@ pub struct BuildPhaseOutput {
     /// uncommitted edits in the target workspace, preventing silent data
     /// loss during stash replay (see bn-43bc / bn-23zf).
     pub resolved_paths: Vec<PathBuf>,
+    /// bn-1du0: paths whose merged content a deterministic merge driver
+    /// replaced, in path order. Empty when no driver changed the outcome.
+    ///
+    /// Driver rewrites discard the textually merged content, so they are
+    /// always reported rather than applied silently.
+    pub driver_rewrites: Vec<DriverRewrite>,
+}
+
+/// One path whose merged content a deterministic merge driver replaced.
+///
+/// Recorded only when the driver actually changed the merge outcome — a
+/// driver whose output matches the textual resolution produces no entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriverRewrite {
+    /// Path (relative to repo root) the driver rewrote.
+    pub path: PathBuf,
+    /// Driver kind that fired (`regenerate`, `ours`, `theirs`).
+    pub kind: MergeDriverKind,
+    /// Command that produced the content (`regenerate` drivers only).
+    pub command: Option<String>,
+    /// Why the driver fired.
+    pub reason: DriverRewriteReason,
+}
+
+impl DriverRewrite {
+    /// Label shown to the user: the command for `regenerate` drivers, the
+    /// driver kind otherwise.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.command
+            .clone()
+            .unwrap_or_else(|| self.kind.to_string())
+    }
+
+    /// Verb describing what the driver did to the path.
+    #[must_use]
+    pub const fn verb(&self) -> &'static str {
+        match self.kind {
+            MergeDriverKind::Regenerate => "regenerated",
+            MergeDriverKind::Ours | MergeDriverKind::Theirs => "rewrote",
+        }
+    }
+
+    /// Human-readable one-line `NOTE:` describing this rewrite.
+    #[must_use]
+    pub fn note_line(&self) -> String {
+        format!(
+            "NOTE: merge driver '{}' {} {} ({})",
+            self.label(),
+            self.verb(),
+            self.path.display(),
+            self.reason.as_str()
+        )
+    }
+}
+
+/// Why a merge driver replaced the textually merged content for a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverRewriteReason {
+    /// Textual resolution (diff3/AST) could not merge the path.
+    TextualConflict,
+    /// The path merged cleanly; the driver overrode it by configuration
+    /// (`ours` / `theirs`).
+    DriverOverride,
+}
+
+impl DriverRewriteReason {
+    /// Short human-readable form used in `NOTE:` lines and JSON.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TextualConflict => "textual conflict",
+            Self::DriverOverride => "driver override",
+        }
+    }
+}
+
+impl fmt::Display for DriverRewriteReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +389,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
         resolve_partition_for_build(&partition, &base_contents, &merge_config, Some(&attrs))?;
 
     // 5. Apply deterministic merge drivers
-    let (resolved, conflicts) = apply_merge_drivers(
+    let (resolved, conflicts, driver_rewrites) = apply_merge_drivers(
         repo_root,
         epoch,
         sources,
@@ -315,6 +413,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
         unique_count,
         shared_count,
         resolved_paths,
+        driver_rewrites,
     })
 }
 
@@ -669,7 +768,7 @@ fn run_pipeline<B: WorkspaceBackend>(
         resolve_partition_for_build(&partition, &base_contents, merge_config, Some(&attrs))?;
 
     // Apply deterministic merge drivers
-    let (resolved, conflicts) = apply_merge_drivers(
+    let (resolved, conflicts, driver_rewrites) = apply_merge_drivers(
         repo_root,
         &state.epoch_before,
         &state.sources,
@@ -700,6 +799,7 @@ fn run_pipeline<B: WorkspaceBackend>(
         unique_count,
         shared_count,
         resolved_paths,
+        driver_rewrites,
     })
 }
 
@@ -758,6 +858,47 @@ struct CompiledDriver {
     driver: MergeDriver,
 }
 
+/// Result of the merge-driver pass: resolved changes, remaining conflicts,
+/// and the paths a driver rewrote.
+type DriverOutcome = (Vec<ResolvedChange>, Vec<ConflictRecord>, Vec<DriverRewrite>);
+
+/// What a merge driver is allowed to do for one path (bn-1du0).
+///
+/// A merge driver is a *conflict-resolution strategy*, not a rewrite hook.
+/// The scope encodes how much the textual resolution already achieved, which
+/// decides how destructive a driver is allowed to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DriverScope {
+    /// Exactly one workspace touched the path. There is nothing to arbitrate,
+    /// so no driver fires and the sole side's content is taken verbatim.
+    Unique,
+    /// Several workspaces touched the path and diff3/AST merged them cleanly.
+    /// `ours` / `theirs` still apply (they are explicit "do not merge this
+    /// file, pick a side" declarations); `regenerate` does not — the merged
+    /// content is already correct and regenerating would discard it.
+    SharedResolved,
+    /// Several workspaces touched the path and textual resolution failed.
+    /// Every driver kind may fire, as the conflict resolution.
+    SharedConflict,
+}
+
+/// Apply deterministic merge drivers on top of the textual resolution.
+///
+/// bn-1du0: drivers fire only where there is something to arbitrate.
+///
+/// - **Unique paths never run a driver.** One workspace touched the path;
+///   its content is taken verbatim. Previously `ours` replaced it with the
+///   epoch version and `regenerate` rebuilt it from scratch — both silently
+///   discarded the only side's work.
+/// - **Cleanly merged shared paths never `regenerate`.** Regeneration is
+///   lossy: `cargo generate-lockfile` re-resolves every dependency to the
+///   newest compatible version, so firing it on a lockfile both sides already
+///   agreed on silently drops deliberate pins.
+/// - **Conflicting shared paths run the driver as the resolution.** This is
+///   the case merge drivers exist for.
+///
+/// D/F clash paths (`ConflictReason::FileDirectory`) are excluded entirely:
+/// resolving one with a driver would drop the directory side's files.
 fn apply_merge_drivers(
     repo_root: &Path,
     epoch: &EpochId,
@@ -766,10 +907,14 @@ fn apply_merge_drivers(
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
     resolve_result: ResolveResult,
     merge_config: &MergeConfig,
-) -> Result<(Vec<ResolvedChange>, Vec<ConflictRecord>), BuildPhaseError> {
+) -> Result<DriverOutcome, BuildPhaseError> {
     let effective_drivers = merge_config.effective_drivers();
     if effective_drivers.is_empty() {
-        return Ok((resolve_result.resolved, resolve_result.conflicts));
+        return Ok((
+            resolve_result.resolved,
+            resolve_result.conflicts,
+            Vec::new(),
+        ));
     }
 
     let mut compiled = Vec::with_capacity(effective_drivers.len());
@@ -791,113 +936,302 @@ fn apply_merge_drivers(
     for change in resolve_result.resolved {
         resolved_by_path.insert(change.path().clone(), change);
     }
-    let mut conflicts = resolve_result.conflicts;
-    let mut regenerate_by_driver: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
+    let conflicts = resolve_result.conflicts;
 
+    // Paths the textual resolution could NOT merge. This is the gate that lets
+    // a destructive `regenerate` driver fire at all (bn-1du0).
+    //
+    // D/F clashes are excluded: their "conflict" is structural (a file on one
+    // side, a directory on the other), and letting a driver resolve it would
+    // publish the file side while silently dropping the directory side.
+    let df_clash_paths = partition.df_clash_paths();
+    let conflicted_paths: BTreeSet<PathBuf> = conflicts
+        .iter()
+        .filter(|c| !matches!(c.reason, ConflictReason::FileDirectory { .. }))
+        .map(|c| c.path.clone())
+        .collect();
+
+    let mut ctx = DriverPass {
+        resolved_by_path,
+        conflicts,
+        regenerate_by_driver: BTreeMap::new(),
+        regenerate_conflicts: BTreeMap::new(),
+        rewrites: BTreeMap::new(),
+    };
+
+    // Unique paths: exactly one workspace touched them, so there is nothing to
+    // arbitrate. No driver fires — the sole side's content is taken verbatim.
     for (path, entry) in &partition.unique {
+        if df_clash_paths.contains(path) {
+            continue;
+        }
         maybe_apply_driver(
             path,
             std::slice::from_ref(entry),
             base_contents,
             &compiled,
-            &mut resolved_by_path,
-            &mut conflicts,
-            &mut regenerate_by_driver,
+            DriverScope::Unique,
+            &mut ctx,
         )?;
     }
 
+    // Shared paths: `ours`/`theirs` always apply, `regenerate` only where
+    // diff3/AST actually conflicted.
     for (path, entries) in &partition.shared {
-        maybe_apply_driver(
-            path,
-            entries,
-            base_contents,
-            &compiled,
-            &mut resolved_by_path,
-            &mut conflicts,
-            &mut regenerate_by_driver,
-        )?;
-    }
-
-    if !regenerate_by_driver.is_empty() {
-        let provisional_resolved: Vec<ResolvedChange> =
-            resolved_by_path.values().cloned().collect();
-        let mut repo = open_gix_repo(repo_root)?;
-        set_pending_attrs_from_resolved(&mut repo, &provisional_resolved);
-        let provisional_modes = modes_from_partition(partition);
-        let provisional_candidate = build_merge_commit(
-            &repo,
-            epoch,
-            sources,
-            &provisional_resolved,
-            &provisional_modes,
-            None,
-        )?;
-
-        let regenerated = run_regenerate_drivers(
-            repo_root,
-            &provisional_candidate,
-            &compiled,
-            &regenerate_by_driver,
-        )?;
-
-        for change in regenerated {
-            resolved_by_path.insert(change.path().clone(), change);
+        if df_clash_paths.contains(path) {
+            continue;
         }
+        let scope = if conflicted_paths.contains(path) {
+            DriverScope::SharedConflict
+        } else {
+            DriverScope::SharedResolved
+        };
+        maybe_apply_driver(path, entries, base_contents, &compiled, scope, &mut ctx)?;
     }
+
+    run_pending_regenerations(repo_root, epoch, sources, partition, &compiled, &mut ctx)?;
+
+    let DriverPass {
+        resolved_by_path,
+        mut conflicts,
+        rewrites,
+        ..
+    } = ctx;
 
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok((resolved_by_path.into_values().collect(), conflicts))
+    let rewrites: Vec<DriverRewrite> = rewrites.into_values().collect();
+    report_driver_rewrites(&rewrites);
+
+    Ok((
+        resolved_by_path.into_values().collect(),
+        conflicts,
+        rewrites,
+    ))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Run the `regenerate` commands queued by the per-path driver pass.
+///
+/// Builds a provisional candidate commit, checks it out into a temp worktree,
+/// runs each driver command there, and folds the results back into `ctx`.
+///
+/// A driver whose command failed with `required = false` falls back to the
+/// normal merge: the conflict record it displaced is restored, so the merge
+/// reports the conflict instead of quietly publishing the base content.
+fn run_pending_regenerations(
+    repo_root: &Path,
+    epoch: &EpochId,
+    sources: &[WorkspaceId],
+    partition: &PartitionResult,
+    compiled: &[CompiledDriver],
+    ctx: &mut DriverPass,
+) -> Result<(), BuildPhaseError> {
+    if ctx.regenerate_by_driver.is_empty() {
+        return Ok(());
+    }
+
+    let provisional_resolved: Vec<ResolvedChange> =
+        ctx.resolved_by_path.values().cloned().collect();
+    let mut repo = open_gix_repo(repo_root)?;
+    set_pending_attrs_from_resolved(&mut repo, &provisional_resolved);
+    let provisional_modes = modes_from_partition(partition);
+    let provisional_candidate = build_merge_commit(
+        &repo,
+        epoch,
+        sources,
+        &provisional_resolved,
+        &provisional_modes,
+        None,
+    )?;
+
+    let regenerated = run_regenerate_drivers(
+        repo_root,
+        &provisional_candidate,
+        compiled,
+        &ctx.regenerate_by_driver,
+    )?;
+
+    let regenerated_paths: BTreeSet<PathBuf> =
+        regenerated.iter().map(|c| c.path().clone()).collect();
+
+    for change in regenerated {
+        let path = change.path().clone();
+        let command = compiled
+            .iter()
+            .find(|d| {
+                ctx.regenerate_by_driver
+                    .get(&d.index)
+                    .is_some_and(|paths| paths.contains(&path))
+            })
+            .and_then(|d| d.driver.command.clone());
+        let previous = ctx.resolved_by_path.insert(path.clone(), change.clone());
+        if previous.as_ref() != Some(&change) {
+            ctx.rewrites.insert(
+                path.clone(),
+                DriverRewrite {
+                    path,
+                    kind: MergeDriverKind::Regenerate,
+                    command,
+                    reason: DriverRewriteReason::TextualConflict,
+                },
+            );
+        }
+    }
+
+    // A non-required regenerate driver that failed falls back to normal merge.
+    // Restore the conflict record it displaced — dropping it would publish the
+    // base content and silently lose both sides (bn-1du0).
+    let requested: Vec<PathBuf> = ctx
+        .regenerate_by_driver
+        .values()
+        .flat_map(|paths| paths.iter().cloned())
+        .collect();
+    for path in requested {
+        if regenerated_paths.contains(&path) {
+            continue;
+        }
+        if let Some(record) = ctx.regenerate_conflicts.remove(&path) {
+            ctx.conflicts.push(record);
+        }
+    }
+
+    Ok(())
+}
+
+/// Mutable state threaded through the per-path driver pass.
+struct DriverPass {
+    resolved_by_path: BTreeMap<PathBuf, ResolvedChange>,
+    conflicts: Vec<ConflictRecord>,
+    regenerate_by_driver: BTreeMap<usize, BTreeSet<PathBuf>>,
+    /// Conflict records displaced by a pending regenerate driver, keyed by
+    /// path. Restored when the driver fails and `required = false`.
+    regenerate_conflicts: BTreeMap<PathBuf, ConflictRecord>,
+    /// Paths a driver actually changed, keyed by path for stable ordering.
+    rewrites: BTreeMap<PathBuf, DriverRewrite>,
+}
+
+/// Print one `NOTE:` line per path a merge driver rewrote.
+///
+/// Driver rewrites discard textually merged content, so they are never
+/// silent. Goes to stderr so `--format json` output stays parseable.
+fn report_driver_rewrites(rewrites: &[DriverRewrite]) {
+    for rewrite in rewrites {
+        eprintln!("  {}", rewrite.note_line());
+    }
+}
+
 fn maybe_apply_driver(
     path: &Path,
     entries: &[PathEntry],
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
     compiled: &[CompiledDriver],
-    resolved_by_path: &mut BTreeMap<PathBuf, ResolvedChange>,
-    conflicts: &mut Vec<ConflictRecord>,
-    regenerate_by_driver: &mut BTreeMap<usize, BTreeSet<PathBuf>>,
+    scope: DriverScope,
+    ctx: &mut DriverPass,
 ) -> Result<(), BuildPhaseError> {
     let Some(driver) = select_driver(path, compiled) else {
         return Ok(());
     };
 
+    // A misconfigured driver is an error even for paths it will not touch, so
+    // validation runs before the scope gate.
+    if driver.driver.kind == MergeDriverKind::Regenerate {
+        let has_command = driver
+            .driver
+            .command
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|cmd| !cmd.is_empty());
+        if !has_command {
+            return Err(BuildPhaseError::Driver(format!(
+                "regenerate driver for '{}' must set a non-empty command",
+                path.display()
+            )));
+        }
+    }
+
+    // bn-1du0: only one workspace touched this path, so there is nothing for a
+    // driver to arbitrate. Applying one here would discard the only side's
+    // work (`ours` reverts to the epoch version, `regenerate` rebuilds from
+    // scratch) — exactly the silent data loss this gate exists to prevent.
+    if scope == DriverScope::Unique {
+        return Ok(());
+    }
+
+    let had_conflict = ctx.conflicts.iter().any(|c| c.path.as_path() == path);
+    let reason = if had_conflict {
+        DriverRewriteReason::TextualConflict
+    } else {
+        DriverRewriteReason::DriverOverride
+    };
+
     match driver.driver.kind {
         MergeDriverKind::Ours => {
             let change = ours_change(path, base_contents.get(path));
-            resolved_by_path.insert(path.to_path_buf(), change);
-            remove_conflict_path(conflicts, path);
+            apply_direct_driver(
+                path,
+                change,
+                MergeDriverKind::Ours,
+                reason,
+                had_conflict,
+                ctx,
+            );
         }
         MergeDriverKind::Theirs => {
             let change = theirs_change(path, entries)?;
-            resolved_by_path.insert(path.to_path_buf(), change);
-            remove_conflict_path(conflicts, path);
+            apply_direct_driver(
+                path,
+                change,
+                MergeDriverKind::Theirs,
+                reason,
+                had_conflict,
+                ctx,
+            );
         }
         MergeDriverKind::Regenerate => {
-            let has_command = driver
-                .driver
-                .command
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|cmd| !cmd.is_empty());
-            if !has_command {
-                return Err(BuildPhaseError::Driver(format!(
-                    "regenerate driver for '{}' must set a non-empty command",
-                    path.display()
-                )));
+            // bn-1du0: regeneration is lossy — it rebuilds the file from
+            // scratch and drops whatever both sides agreed on. Only a real
+            // textual conflict justifies throwing the merged content away.
+            if scope != DriverScope::SharedConflict {
+                return Ok(());
             }
 
-            regenerate_by_driver
+            ctx.regenerate_by_driver
                 .entry(driver.index)
                 .or_default()
                 .insert(path.to_path_buf());
-            remove_conflict_path(conflicts, path);
+            if let Some(record) = take_conflict_path(&mut ctx.conflicts, path) {
+                ctx.regenerate_conflicts.insert(path.to_path_buf(), record);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Apply an `ours` / `theirs` driver result and record it if it changed the
+/// merge outcome.
+fn apply_direct_driver(
+    path: &Path,
+    change: ResolvedChange,
+    kind: MergeDriverKind,
+    reason: DriverRewriteReason,
+    had_conflict: bool,
+    ctx: &mut DriverPass,
+) {
+    let previous = ctx.resolved_by_path.insert(path.to_path_buf(), change);
+    let changed = had_conflict || previous.as_ref() != ctx.resolved_by_path.get(path);
+    if changed {
+        ctx.rewrites.insert(
+            path.to_path_buf(),
+            DriverRewrite {
+                path: path.to_path_buf(),
+                kind,
+                command: None,
+                reason,
+            },
+        );
+    }
+    remove_conflict_path(&mut ctx.conflicts, path);
 }
 
 fn select_driver<'a>(path: &Path, compiled: &'a [CompiledDriver]) -> Option<&'a CompiledDriver> {
@@ -908,6 +1242,15 @@ fn select_driver<'a>(path: &Path, compiled: &'a [CompiledDriver]) -> Option<&'a 
 
 fn remove_conflict_path(conflicts: &mut Vec<ConflictRecord>, path: &Path) {
     conflicts.retain(|conflict| conflict.path.as_path() != path);
+}
+
+/// Remove the conflict record for `path` and return it, so a driver that
+/// fails can put it back instead of publishing base content silently.
+fn take_conflict_path(conflicts: &mut Vec<ConflictRecord>, path: &Path) -> Option<ConflictRecord> {
+    let index = conflicts
+        .iter()
+        .position(|conflict| conflict.path.as_path() == path)?;
+    Some(conflicts.remove(index))
 }
 
 fn ours_change(path: &Path, base: Option<&Vec<u8>>) -> ResolvedChange {
@@ -2248,6 +2591,62 @@ kind = "theirs"
 
     #[test]
     fn build_phase_regenerate_failure_reported_as_validation_failure() {
+        // bn-1du0: the driver now only fires on a real textual conflict, so
+        // this test needs two workspaces editing the same line. Previously a
+        // single workspace (unique path) was enough.
+        let (dir, _epoch0) = setup_epoch_repo();
+        let epoch = commit_epoch_file(
+            dir.path(),
+            "Cargo.lock",
+            "# base lock\n",
+            "epoch: add Cargo.lock",
+        );
+
+        let manifold_dir = dir.path().join(".manifold");
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
+
+        write_merge_config(
+            &manifold_dir,
+            r#"[[merge.drivers]]
+match = "Cargo.lock"
+kind = "regenerate"
+command = "exit 19"
+"#,
+        );
+
+        let (path_a, snap_a) =
+            make_workspace_with_modified_file(dir.path(), "ws-a", "Cargo.lock", b"from ws-a\n");
+        let (path_b, snap_b) =
+            make_workspace_with_modified_file(dir.path(), "ws-b", "Cargo.lock", b"from ws-b\n");
+
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
+
+        let err = run_build_phase(dir.path(), &manifold_dir, &backend)
+            .expect_err("operation should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("regenerate command failed"),
+            "expected regenerate failure error, got: {msg}"
+        );
+        assert!(
+            msg.contains("required = false"),
+            "expected hint about required = false, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1du0: regenerate drivers are last-resort only
+    // -----------------------------------------------------------------------
+
+    /// A `regenerate` driver must NOT fire for a path only one workspace
+    /// touched. There is no conflict to resolve, so regenerating would throw
+    /// the workspace's content away (the continuum Cargo.lock field report).
+    #[test]
+    fn build_phase_regenerate_driver_skips_unique_path() {
         let (dir, _epoch0) = setup_epoch_repo();
         let epoch = commit_epoch_file(
             dir.path(),
@@ -2265,27 +2664,207 @@ kind = "theirs"
             r#"[[merge.drivers]]
 match = "Cargo.lock"
 kind = "regenerate"
-command = "exit 19"
+command = "printf 'REGENERATED\n' > Cargo.lock"
 "#,
         );
 
-        let (ws_path, snapshot) =
-            make_workspace_with_modified_file(dir.path(), "ws-1", "Cargo.lock", b"changed\n");
+        let (ws_path, snapshot) = make_workspace_with_modified_file(
+            dir.path(),
+            "ws-1",
+            "Cargo.lock",
+            b"pinned = \"1.8.5\"\n",
+        );
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
-        let err = run_build_phase(dir.path(), &manifold_dir, &backend)
-            .expect_err("operation should fail");
-        let msg = format!("{err}");
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
+        assert!(output.conflicts.is_empty());
         assert!(
-            msg.contains("regenerate command failed"),
-            "expected regenerate failure error, got: {msg}"
+            output.driver_rewrites.is_empty(),
+            "no driver should have rewritten anything: {:?}",
+            output.driver_rewrites
         );
+
+        let lock = run_git(
+            dir.path(),
+            &["show", &format!("{}:Cargo.lock", output.candidate.as_str())],
+        );
+        assert_eq!(
+            lock, "pinned = \"1.8.5\"",
+            "unique-path content must survive verbatim"
+        );
+    }
+
+    /// A `regenerate` driver must NOT fire when two workspaces edit disjoint
+    /// regions and diff3 merges them cleanly.
+    #[test]
+    fn build_phase_regenerate_driver_skips_clean_shared_merge() {
+        let (dir, _epoch0) = setup_epoch_repo();
+        let epoch = commit_epoch_file(
+            dir.path(),
+            "Cargo.lock",
+            "top\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nbottom\n",
+            "epoch: add Cargo.lock",
+        );
+
+        let manifold_dir = dir.path().join(".manifold");
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
+
+        write_merge_config(
+            &manifold_dir,
+            r#"[[merge.drivers]]
+match = "Cargo.lock"
+kind = "regenerate"
+command = "printf 'REGENERATED\n' > Cargo.lock"
+"#,
+        );
+
+        let (path_a, snap_a) = make_workspace_with_modified_file(
+            dir.path(),
+            "ws-a",
+            "Cargo.lock",
+            b"TOP-A\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nbottom\n",
+        );
+        let (path_b, snap_b) = make_workspace_with_modified_file(
+            dir.path(),
+            "ws-b",
+            "Cargo.lock",
+            b"top\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nBOTTOM-B\n",
+        );
+
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
+
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
+        assert!(output.conflicts.is_empty());
         assert!(
-            msg.contains("required = false"),
-            "expected hint about required = false, got: {msg}"
+            output.driver_rewrites.is_empty(),
+            "clean diff3 must not trigger regeneration: {:?}",
+            output.driver_rewrites
         );
+
+        let lock = run_git(
+            dir.path(),
+            &["show", &format!("{}:Cargo.lock", output.candidate.as_str())],
+        );
+        assert!(lock.contains("TOP-A"), "lost ws-a's edit: {lock}");
+        assert!(lock.contains("BOTTOM-B"), "lost ws-b's edit: {lock}");
+        assert!(!lock.contains("REGENERATED"), "driver fired: {lock}");
+    }
+
+    /// On a real textual conflict the driver DOES fire and the rewrite is
+    /// reported in `driver_rewrites`.
+    #[test]
+    fn build_phase_regenerate_driver_reports_rewrite_on_conflict() {
+        let (dir, _epoch0) = setup_epoch_repo();
+        let epoch = commit_epoch_file(
+            dir.path(),
+            "Cargo.lock",
+            "# base lock\n",
+            "epoch: add Cargo.lock",
+        );
+
+        let manifold_dir = dir.path().join(".manifold");
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
+
+        write_merge_config(
+            &manifold_dir,
+            r#"[[merge.drivers]]
+match = "Cargo.lock"
+kind = "regenerate"
+command = "printf 'REGENERATED\n' > Cargo.lock"
+"#,
+        );
+
+        let (path_a, snap_a) =
+            make_workspace_with_modified_file(dir.path(), "ws-a", "Cargo.lock", b"from ws-a\n");
+        let (path_b, snap_b) =
+            make_workspace_with_modified_file(dir.path(), "ws-b", "Cargo.lock", b"from ws-b\n");
+
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
+
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
+        assert!(output.conflicts.is_empty());
+
+        let lock = run_git(
+            dir.path(),
+            &["show", &format!("{}:Cargo.lock", output.candidate.as_str())],
+        );
+        assert_eq!(lock, "REGENERATED");
+
+        assert_eq!(
+            output.driver_rewrites.len(),
+            1,
+            "{:?}",
+            output.driver_rewrites
+        );
+        let rewrite = &output.driver_rewrites[0];
+        assert_eq!(rewrite.path, PathBuf::from("Cargo.lock"));
+        assert_eq!(rewrite.kind, MergeDriverKind::Regenerate);
+        assert_eq!(rewrite.reason, DriverRewriteReason::TextualConflict);
+        let note = rewrite.note_line();
+        assert!(note.starts_with("NOTE: merge driver "), "{note}");
+        assert!(note.contains("regenerated Cargo.lock"), "{note}");
+        assert!(note.contains("textual conflict"), "{note}");
+    }
+
+    /// A failed non-required regenerate driver must restore the conflict it
+    /// displaced instead of silently publishing the base content.
+    #[test]
+    fn build_phase_regenerate_failure_restores_conflict_when_not_required() {
+        let (dir, _epoch0) = setup_epoch_repo();
+        let epoch = commit_epoch_file(
+            dir.path(),
+            "Cargo.lock",
+            "# base lock\n",
+            "epoch: add Cargo.lock",
+        );
+
+        let manifold_dir = dir.path().join(".manifold");
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
+
+        write_merge_config(
+            &manifold_dir,
+            r#"[[merge.drivers]]
+match = "Cargo.lock"
+kind = "regenerate"
+command = "exit 19"
+required = false
+"#,
+        );
+
+        let (path_a, snap_a) =
+            make_workspace_with_modified_file(dir.path(), "ws-a", "Cargo.lock", b"from ws-a\n");
+        let (path_b, snap_b) =
+            make_workspace_with_modified_file(dir.path(), "ws-b", "Cargo.lock", b"from ws-b\n");
+
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
+
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
+        assert_eq!(
+            output.conflicts.len(),
+            1,
+            "failed non-required driver must leave the conflict standing: {:?}",
+            output.conflicts
+        );
+        assert_eq!(output.conflicts[0].path, PathBuf::from("Cargo.lock"));
+        assert!(output.driver_rewrites.is_empty());
     }
 
     // -----------------------------------------------------------------------

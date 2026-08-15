@@ -107,6 +107,27 @@ pub enum MergeEventKind {
         /// Conflicting paths (relative to repo root), parallel to `conflict_ids`.
         paths: Vec<String>,
     },
+    /// bn-1du0: one or more deterministic merge drivers replaced the
+    /// textually merged content of a path.
+    ///
+    /// A driver rewrite discards what diff3/AST produced, so it is recorded
+    /// next to the conflicts rather than left implicit. Agents read this to
+    /// answer "why does the merged lockfile match neither side?" without
+    /// re-running the merge.
+    MergeDriversApplied {
+        /// Source workspace names (same order as `IntegrationStarted.sources`).
+        sources: Vec<String>,
+        /// Destination as in `IntegrationStarted.into`.
+        into: String,
+        /// Rewritten paths (relative to repo root), in path order.
+        paths: Vec<String>,
+        /// Driver kind per path (`regenerate` / `ours` / `theirs`), parallel
+        /// to `paths`.
+        kinds: Vec<String>,
+        /// Why each driver fired (`textual conflict` / `driver override`),
+        /// parallel to `paths`.
+        reasons: Vec<String>,
+    },
     /// The merge completed and advanced state. Carries the resulting merge
     /// commit OID so the agent can verify out-of-band.
     IntegrationCompleted {

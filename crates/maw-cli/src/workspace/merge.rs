@@ -238,6 +238,37 @@ pub struct MergeSuccessOutput {
     pub cwd_destroyed: bool,
     /// bn-20fp: recovery refs pinned during this merge (e.g. destroy snapshots).
     pub recovery: MergeRecoveryJson,
+    /// bn-1du0: paths whose merged content a deterministic merge driver
+    /// replaced (`regenerate` / `ours` / `theirs`). Empty when no driver
+    /// changed the outcome. The text path prints the same information as
+    /// `NOTE: merge driver ...` lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub driver_rewrites: Vec<DriverRewriteJson>,
+}
+
+/// bn-1du0: one path a deterministic merge driver rewrote during a merge.
+#[derive(Debug, Clone, Serialize)]
+pub struct DriverRewriteJson {
+    /// Path (relative to repo root) the driver rewrote.
+    pub path: PathBuf,
+    /// Driver kind that fired: `regenerate`, `ours`, or `theirs`.
+    pub kind: String,
+    /// Command that produced the content (`regenerate` drivers only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Why the driver fired: `textual conflict` or `driver override`.
+    pub reason: String,
+}
+
+impl From<&maw::merge::build_phase::DriverRewrite> for DriverRewriteJson {
+    fn from(rewrite: &maw::merge::build_phase::DriverRewrite) -> Self {
+        Self {
+            path: rewrite.path.clone(),
+            kind: rewrite.kind.to_string(),
+            command: rewrite.command.clone(),
+            reason: rewrite.reason.as_str().to_owned(),
+        }
+    }
 }
 
 /// bn-20fp: one sibling's full auto-rebase outcome in `maw ws merge --format
@@ -1158,6 +1189,43 @@ fn emit_integration_started(manifold_dir: &Path, sources: &[String], into: &str,
             sources: sources.to_vec(),
             into: into.to_string(),
             check_only,
+        },
+    ) {
+        tracing::warn!("merge event log write failed: {e}");
+    }
+}
+
+/// bn-1du0: best-effort emit of a `MergeDriversApplied` event.
+///
+/// A driver rewrite throws away the textually merged content, so it belongs in
+/// the same recall surface as conflicts: an agent that reads the event log can
+/// see why the merged file matches neither side. No-op when no driver fired.
+fn emit_merge_drivers_applied(
+    manifold_dir: &Path,
+    sources: &[String],
+    into: &str,
+    rewrites: &[maw::merge::build_phase::DriverRewrite],
+) {
+    if rewrites.is_empty() {
+        return;
+    }
+    let paths: Vec<String> = rewrites
+        .iter()
+        .map(|r| r.path.display().to_string())
+        .collect();
+    let kinds: Vec<String> = rewrites.iter().map(|r| r.kind.to_string()).collect();
+    let reasons: Vec<String> = rewrites
+        .iter()
+        .map(|r| r.reason.as_str().to_owned())
+        .collect();
+    if let Err(e) = merge_events::append_event(
+        manifold_dir,
+        MergeEventKind::MergeDriversApplied {
+            sources: sources.to_vec(),
+            into: into.to_string(),
+            paths,
+            kinds,
+            reasons,
         },
     ) {
         tracing::warn!("merge event log write failed: {e}");
@@ -2145,7 +2213,12 @@ pub fn plan_merge(
     };
 
     let merge_id = compute_merge_id(&merge_base_epoch, &sources, &frozen.heads);
-    let driver_infos = build_driver_infos(&touched_paths, &manifold_config);
+    let conflict_paths: BTreeSet<PathBuf> = build_output
+        .conflicts
+        .iter()
+        .map(|c| c.path.clone())
+        .collect();
+    let driver_infos = build_driver_infos(&overlaps, &conflict_paths, &manifold_config);
     let predicted_conflicts = build_predicted_conflicts(&build_output);
     let validation_info = build_validation_info(&manifold_config);
 
@@ -2251,26 +2324,48 @@ fn paths_from_partition(
     (touched, overlaps)
 }
 
-/// Build `DriverInfo` entries for each touched path that has a matching driver.
-fn build_driver_infos(touched_paths: &[PathBuf], config: &ManifoldConfig) -> Vec<DriverInfo> {
+/// Build `DriverInfo` entries for the paths where a merge driver will actually
+/// fire.
+///
+/// bn-1du0: drivers are conflict-resolution strategies, not rewrite hooks, so
+/// the plan must only list paths the driver really touches:
+///
+/// - unique paths (not in `overlaps`) never run a driver — the sole side's
+///   content is taken verbatim;
+/// - `regenerate` runs only where textual resolution failed, so it is listed
+///   only for paths in `conflict_paths`;
+/// - `ours` / `theirs` run on every overlapping path (they are explicit
+///   side-picking declarations).
+///
+/// Listing a driver for a path it will not touch is what made the old plan
+/// output misleading: it implied `cargo generate-lockfile` would run on every
+/// merge that mentioned `Cargo.lock`.
+fn build_driver_infos(
+    overlaps: &[PathBuf],
+    conflict_paths: &BTreeSet<PathBuf>,
+    config: &ManifoldConfig,
+) -> Vec<DriverInfo> {
     let effective_drivers = config.merge.effective_drivers();
     let mut infos = Vec::new();
-    for path in touched_paths {
+    for path in overlaps {
         for driver in &effective_drivers {
             let matches = glob::Pattern::new(&driver.match_glob)
                 .ok()
                 .is_some_and(|p| p.matches_path(path));
-            if matches {
-                let command = matches!(driver.kind, MergeDriverKind::Regenerate)
-                    .then(|| driver.command.clone())
-                    .flatten();
+            if !matches {
+                continue;
+            }
+            let is_regenerate = matches!(driver.kind, MergeDriverKind::Regenerate);
+            // First matching driver wins — even when it will not fire, a
+            // later driver does not get a second chance at the path.
+            if !is_regenerate || conflict_paths.contains(path) {
                 infos.push(DriverInfo {
                     path: path.clone(),
                     kind: driver.kind.to_string(),
-                    command,
+                    command: is_regenerate.then(|| driver.command.clone()).flatten(),
                 });
-                break; // First matching driver wins
             }
+            break;
         }
     }
     infos
@@ -2426,9 +2521,12 @@ fn print_plan_text(plan: &MergePlan) {
         println!("  (all overlapping paths resolved cleanly via diff3 or drivers)");
     }
 
+    // bn-1du0: only drivers that will actually fire are listed, so the
+    // heading promises exactly that. A configured driver whose path merged
+    // cleanly (or that only one workspace touched) does not appear.
     if !plan.drivers.is_empty() {
         println!();
-        println!("Merge drivers:");
+        println!("Merge drivers that will fire:");
         for driver in &plan.drivers {
             if let Some(cmd) = &driver.command {
                 println!(
@@ -4626,6 +4724,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     );
     textln!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
 
+    // bn-1du0: a driver rewrite discards the textually merged content, so it
+    // is recorded next to the conflicts. The BUILD phase already printed the
+    // matching `NOTE:` lines.
+    emit_merge_drivers_applied(
+        &manifold_dir,
+        &ws_to_merge,
+        into_target,
+        &build_output.driver_rewrites,
+    );
+
     // Check for empty merge (no changes detected)
     if build_output.unique_count == 0
         && build_output.shared_count == 0
@@ -4762,6 +4870,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     resolved_count: build_output.resolved_count + conflicts_with_ids.len(),
                     conflicts: vec![],
                     resolved_paths: build_output.resolved_paths.clone(),
+                    driver_rewrites: build_output.driver_rewrites.clone(),
                 };
             } else {
                 // Some conflicts remain unresolved — report them with IDs
@@ -5541,6 +5650,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             recovery: MergeRecoveryJson {
                 pinned_refs: destroy_outcome.pinned_refs.clone(),
             },
+            driver_rewrites: build_output
+                .driver_rewrites
+                .iter()
+                .map(DriverRewriteJson::from)
+                .collect(),
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
@@ -7190,6 +7304,50 @@ mod tests {
         WorkspaceId::new(name).expect("operation should succeed")
     }
 
+    // -----------------------------------------------------------------------
+    // bn-1du0: the merge plan must only list drivers that will actually fire
+    // -----------------------------------------------------------------------
+
+    /// Config with the built-in `regenerate` lockfile drivers plus an `ours`
+    /// driver on `NOTES.md`.
+    fn driver_plan_config() -> ManifoldConfig {
+        ManifoldConfig::parse(
+            "[[merge.drivers]]\nmatch = \"Cargo.lock\"\nkind = \"regenerate\"\n\
+             command = \"cargo generate-lockfile\"\n\n\
+             [[merge.drivers]]\nmatch = \"NOTES.md\"\nkind = \"ours\"\n",
+        )
+        .expect("config should parse")
+    }
+
+    #[test]
+    fn plan_omits_regenerate_driver_for_cleanly_merged_path() {
+        let overlaps = vec![PathBuf::from("Cargo.lock")];
+        let infos = build_driver_infos(&overlaps, &BTreeSet::new(), &driver_plan_config());
+        assert!(
+            infos.is_empty(),
+            "a cleanly merged lockfile must not advertise `cargo generate-lockfile`: {infos:?}"
+        );
+    }
+
+    #[test]
+    fn plan_lists_regenerate_driver_for_conflicting_path() {
+        let overlaps = vec![PathBuf::from("Cargo.lock")];
+        let conflicts: BTreeSet<PathBuf> = [PathBuf::from("Cargo.lock")].into_iter().collect();
+        let infos = build_driver_infos(&overlaps, &conflicts, &driver_plan_config());
+        assert_eq!(infos.len(), 1, "{infos:?}");
+        assert_eq!(infos[0].kind, "regenerate");
+        assert_eq!(infos[0].command.as_deref(), Some("cargo generate-lockfile"));
+    }
+
+    #[test]
+    fn plan_lists_ours_driver_for_any_overlap() {
+        let overlaps = vec![PathBuf::from("NOTES.md")];
+        let infos = build_driver_infos(&overlaps, &BTreeSet::new(), &driver_plan_config());
+        assert_eq!(infos.len(), 1, "{infos:?}");
+        assert_eq!(infos[0].kind, "ours");
+        assert_eq!(infos[0].command, None);
+    }
+
     fn make_side(workspace: &str, kind: ChangeKind, content: Option<Vec<u8>>) -> ResolveSide {
         ResolveSide {
             workspace_id: ws_id(workspace),
@@ -7628,6 +7786,7 @@ mod tests {
             warnings: vec![],
             cwd_destroyed: false,
             recovery: MergeRecoveryJson::default(),
+            driver_rewrites: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -7701,6 +7860,7 @@ mod tests {
             warnings: vec!["1 sibling workspace(s) now have conflicts: bob".to_string()],
             cwd_destroyed: false,
             recovery: MergeRecoveryJson::default(),
+            driver_rewrites: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
