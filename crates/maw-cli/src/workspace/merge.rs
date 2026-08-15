@@ -7024,10 +7024,61 @@ fn pin_pre_merge_recovery_ref(
     pin_recovery_ref_from_oid(repo_root, ws_name, &commit.to_string())
 }
 
+/// Filter-aware equality check for [`verify_trunk_replay_fidelity`] (bn-1ero).
+///
+/// `pre_bytes` is captured straight off disk *before* the merge touches the
+/// tree, so for an LFS-tracked path it holds the smudged real content (the
+/// same bytes `checkout_tree`'s smudge post-pass would have put there).
+/// `final_bytes` is read straight off disk *after* replay, which writes
+/// committed blob content more or less verbatim for paths the merge left
+/// unchanged (see `working_copy.rs`'s replay paths) — for an LFS path that is
+/// the **pointer text**, not the smudged content, even though nothing was
+/// actually lost. Comparing those two forms byte-for-byte made the bn-1xmk
+/// warning fire on essentially every dirty LFS-tracked trunk file.
+///
+/// Normalize both sides through the same clean filter `write_blob_with_path`
+/// uses (real content -> pointer blob for `filter=lfs` paths, identity
+/// otherwise — see `lfs_clean.rs`) and compare the resulting blob OIDs
+/// instead of raw bytes. Real content and its own pointer stand-in normalize
+/// to the same OID, so this only reports equal when the underlying content
+/// truly is the same; a genuine edit (different content, different hash)
+/// still normalizes to a different OID and is still caught. Absence vs.
+/// presence is always a mismatch, and non-LFS content is unaffected (the
+/// clean filter is a no-op there, so this reduces to the previous raw-byte
+/// comparison).
+fn trunk_replay_content_matches(
+    repo: &maw_git::GixRepo,
+    path: &Path,
+    pre_bytes: Option<&[u8]>,
+    final_bytes: Option<&[u8]>,
+) -> bool {
+    match (pre_bytes, final_bytes) {
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+        (Some(a), Some(b)) if a == b => true,
+        (Some(a), Some(b)) => {
+            let path_str = path.to_string_lossy().replace('\\', "/");
+            match (
+                repo.write_blob_with_path(a, &path_str),
+                repo.write_blob_with_path(b, &path_str),
+            ) {
+                (Ok(oid_a), Ok(oid_b)) => oid_a == oid_b,
+                // Couldn't normalize either side — fall back to the raw
+                // comparison result we already know is false, rather than
+                // silently treating a write failure as a match.
+                _ => false,
+            }
+        }
+    }
+}
+
 /// Post-replay fidelity check: every pre-merge-dirty trunk path whose committed
 /// content the merge did NOT change must end up with exactly the user's
-/// uncommitted bytes on disk. On any mismatch, repair from memory and print a
-/// loud, actionable recovery pointer. This is the guard that turns the
+/// uncommitted bytes on disk. Any raw-byte mismatch is repaired from the
+/// authoritative in-memory content; whether that also prints a loud,
+/// actionable WARNING depends on whether the mismatch is a genuine one or
+/// "only" an LFS pointer/real-content representation difference (bn-1ero —
+/// see `trunk_replay_content_matches`). This is the guard that turns the
 /// events-journal silent-clobber class into an impossible-to-miss, self-healing
 /// event (bn-1xmk).
 fn verify_trunk_replay_fidelity(
@@ -7057,16 +7108,28 @@ fn verify_trunk_replay_fidelity(
         } else {
             None
         };
-        let matches = match (pre_bytes, &final_bytes) {
-            (Some(a), Some(b)) => a == b,
-            (None, None) => true,
-            _ => false,
-        };
-        if matches {
+        if pre_bytes.as_deref() == final_bytes.as_deref() {
             continue;
         }
 
-        // Data-loss detected — repair from the authoritative in-memory content.
+        // bn-1ero: the raw bytes differ, but for an LFS-tracked path that can
+        // simply be a representation mismatch — replay may have written the
+        // committed pointer blob verbatim for a path the merge left
+        // untouched (see `working_copy.rs`'s replay paths), while
+        // `pre_bytes` holds the smudged real content the user actually had
+        // on disk. `trunk_replay_content_matches` normalizes both sides
+        // through the same clean filter `write_blob_with_path` uses and
+        // compares the resulting OIDs, so it reports true only when the
+        // underlying content truly is the same.
+        let logically_equal =
+            trunk_replay_content_matches(&repo, path, pre_bytes.as_deref(), final_bytes.as_deref());
+
+        // Repair from the authoritative in-memory content either way: even a
+        // "logically equal" mismatch means the worktree ended up holding the
+        // wrong *form* (pointer text instead of the real content the user
+        // had), and every other maw materialization path promises real
+        // content on disk for a resolvable LFS object. Only the ALARM below
+        // is conditional on this being a genuine, unexplained mismatch.
         let repaired = pre_bytes.as_ref().map_or_else(
             || !full.is_file() || std::fs::remove_file(&full).is_ok(),
             |bytes| {
@@ -7076,6 +7139,12 @@ fn verify_trunk_replay_fidelity(
                 std::fs::write(&full, bytes).is_ok()
             },
         );
+
+        if logically_equal {
+            // Same underlying content, just needed to be re-materialized in
+            // its real-content form — not a data-loss event, so no alarm.
+            continue;
+        }
 
         eprintln!();
         eprintln!(
@@ -8481,5 +8550,133 @@ mod tests {
             link.symlink_metadata().is_err(),
             "dangling symlink at an epoch-deleted path must be removed",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1ero: trunk_replay_content_matches must be filter-aware
+    // -----------------------------------------------------------------------
+
+    /// Repo with `*.bin` tracked as LFS via a committed `.gitattributes`, so
+    /// `write_blob_with_path` (and therefore `trunk_replay_content_matches`)
+    /// can resolve the clean-filter rule from HEAD.
+    fn repo_with_lfs_attrs() -> (tempfile::TempDir, std::path::PathBuf, maw_git::GixRepo) {
+        let (dir, root) = maw_git::test_support::init_test_repo();
+        std::fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .expect("write .gitattributes");
+        let _ = maw_git::test_support::commit_all(&root, "attrs");
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        (dir, root, repo)
+    }
+
+    /// The exact bn-1ero false-alarm case: `pre_bytes` is the smudged real
+    /// content a dirty trunk file had on disk before the merge; `final_bytes`
+    /// is the pointer text the (unmodified, committed-unchanged) path ended
+    /// up with after replay. Byte-for-byte they differ, but they represent
+    /// the *same* underlying content — the comparison must recognize that
+    /// and report a match, so the bn-1xmk warning does not fire spuriously.
+    #[test]
+    fn trunk_replay_content_matches_treats_pointer_and_real_content_as_equal() {
+        let (_dir, _root, repo) = repo_with_lfs_attrs();
+        let real_content = b"same underlying content, two representations\n".to_vec();
+
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+        assert!(maw_lfs::looks_like_pointer(&pointer_bytes));
+
+        assert!(
+            trunk_replay_content_matches(
+                &repo,
+                Path::new("data.bin"),
+                Some(&real_content),
+                Some(&pointer_bytes),
+            ),
+            "real content and its own pointer stand-in must compare equal"
+        );
+        // Symmetric: order of pre/final shouldn't matter for this comparison.
+        assert!(trunk_replay_content_matches(
+            &repo,
+            Path::new("data.bin"),
+            Some(&pointer_bytes),
+            Some(&real_content),
+        ));
+    }
+
+    /// A genuine edit to the LFS file's real content must still be caught:
+    /// this is the "do not weaken the real mismatch detection" requirement.
+    /// `pre_bytes` here is different content from whatever `final_bytes`
+    /// normalizes to, so the clean-filtered OIDs must differ.
+    #[test]
+    fn trunk_replay_content_matches_still_flags_genuine_content_edit() {
+        let (_dir, _root, repo) = repo_with_lfs_attrs();
+        let original = b"original committed content\n".to_vec();
+        let edited = b"the user's genuinely different edit\n".to_vec();
+
+        let pointer_oid = repo
+            .write_blob_with_path(&original, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+
+        assert!(
+            !trunk_replay_content_matches(
+                &repo,
+                Path::new("data.bin"),
+                Some(&edited),
+                Some(&pointer_bytes),
+            ),
+            "a genuine content edit must still be reported as a mismatch"
+        );
+    }
+
+    /// Presence vs. absence is always a mismatch, regardless of LFS status.
+    #[test]
+    fn trunk_replay_content_matches_absence_presence_asymmetry_always_mismatches() {
+        let (_dir, _root, repo) = repo_with_lfs_attrs();
+        let content = b"some content\n".to_vec();
+
+        assert!(!trunk_replay_content_matches(
+            &repo,
+            Path::new("data.bin"),
+            Some(&content),
+            None,
+        ));
+        assert!(!trunk_replay_content_matches(
+            &repo,
+            Path::new("data.bin"),
+            None,
+            Some(&content),
+        ));
+        assert!(trunk_replay_content_matches(
+            &repo,
+            Path::new("data.bin"),
+            None,
+            None,
+        ));
+    }
+
+    /// Non-LFS paths are unaffected: the clean filter is a no-op there, so
+    /// the comparison reduces to the original raw-byte behavior.
+    #[test]
+    fn trunk_replay_content_matches_raw_compare_for_non_lfs_path() {
+        let (_dir, _root, repo) = repo_with_lfs_attrs();
+        let a = b"hello\n".to_vec();
+        let b = b"world\n".to_vec();
+
+        assert!(trunk_replay_content_matches(
+            &repo,
+            Path::new("plain.txt"),
+            Some(&a),
+            Some(&a),
+        ));
+        assert!(!trunk_replay_content_matches(
+            &repo,
+            Path::new("plain.txt"),
+            Some(&a),
+            Some(&b),
+        ));
     }
 }

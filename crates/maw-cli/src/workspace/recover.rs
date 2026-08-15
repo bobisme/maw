@@ -1339,6 +1339,70 @@ fn cat_file_blob(git_cwd: &Path, blob_oid: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("read_blob failed: {e}"))
 }
 
+/// Smudge-side materialization for `--restore-file` (bn-1ero).
+///
+/// `restore_file_at_oid` writes a single snapshot blob straight into the
+/// default workspace's worktree, bypassing `checkout_tree` (and its LFS
+/// smudge post-pass entirely) — so an LFS-tracked path was always restored
+/// as 129-byte pointer text, never the real content, even when the object
+/// sat right there in the local LFS store.
+///
+/// If `content` looks like an LFS pointer, resolve it against the local
+/// object store (shared at the git *common* dir — see the fix in
+/// `maw-git/src/checkout_impl.rs` for why `common_dir`, not `git_dir`,
+/// matters for any non-default workspace). Falls back to leaving the
+/// pointer bytes untouched — with a warning on stderr — when the object
+/// cannot be resolved (missing from the store, unreadable, or the store
+/// itself can't be opened), so recovery never silently claims success while
+/// producing a stub file.
+#[cfg(feature = "lfs")]
+fn maybe_smudge(git_cwd: &Path, path: &str, content: Vec<u8>) -> Vec<u8> {
+    if !maw_lfs::looks_like_pointer(&content) {
+        return content;
+    }
+    let Ok(pointer) = maw_lfs::Pointer::parse(&content) else {
+        // Pointer-shaped but not a valid pointer — leave it exactly as read.
+        return content;
+    };
+
+    let warn_and_keep_pointer = |reason: &str| {
+        eprintln!(
+            "WARNING: lfs object for '{path}' (oid {}) {reason} — restoring pointer text \
+             instead of content.\n  Fetch the object into the local store, then re-run recover.",
+            pointer.oid_hex()
+        );
+        content.clone()
+    };
+
+    let Ok(repo) = open_repo(git_cwd) else {
+        return warn_and_keep_pointer("could not be resolved: failed to open repo");
+    };
+    let Ok(store) = maw_lfs::Store::open(repo.common_dir()) else {
+        return warn_and_keep_pointer("could not be resolved: failed to open local LFS store");
+    };
+
+    match store.open_object(&pointer.oid) {
+        Ok(Some(mut reader)) => {
+            // `size` is only a capacity hint; a value that doesn't fit
+            // `usize` (32-bit targets) just means a few extra reallocations.
+            let mut buf = Vec::with_capacity(usize::try_from(pointer.size).unwrap_or(0));
+            match std::io::Read::read_to_end(&mut reader, &mut buf) {
+                Ok(_) => buf,
+                Err(_) => warn_and_keep_pointer("failed to read from the local LFS store"),
+            }
+        }
+        Ok(None) => warn_and_keep_pointer("is not present in the local LFS store"),
+        Err(_) => warn_and_keep_pointer("could not be read from the local LFS store"),
+    }
+}
+
+/// Non-LFS builds: no smudge path exists, so restore verbatim (identity),
+/// matching `GitRepo::write_blob_with_path`'s default (non-LFS) behavior.
+#[cfg(not(feature = "lfs"))]
+fn maybe_smudge(_git_cwd: &Path, _path: &str, content: Vec<u8>) -> Vec<u8> {
+    content
+}
+
 /// List blob/symlink paths reachable from `oid`. Used for the
 /// "available paths" hint when `--restore-file` cannot find the target.
 fn ls_tree_paths(git_cwd: &Path, oid: &str) -> Result<Vec<String>> {
@@ -1447,6 +1511,7 @@ fn restore_file_at_oid(
     }
 
     let content = cat_file_blob(git_cwd, &entry.oid)?;
+    let content = maybe_smudge(git_cwd, path, content);
 
     let dest = default_ws.join(path);
     if let Some(parent) = dest.parent() {
@@ -1595,6 +1660,53 @@ fn resolve_recoverable_oid(record: &DestroyRecord) -> Result<String> {
 // Restore snapshot to a new workspace
 // ---------------------------------------------------------------------------
 
+/// After materializing a workspace from a snapshot, scan for LFS-tracked
+/// paths that are still pointer text on disk — meaning `checkout_tree`'s
+/// smudge post-pass could not resolve them because the object is not in the
+/// local LFS store — and print one warning per path (bn-1ero).
+///
+/// `checkout_tree` itself only logs this via `tracing::warn!`, which is
+/// invisible in normal CLI usage: maw installs no tracing subscriber unless
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set (see `telemetry.rs`), so without this
+/// a `recover --to` that silently leaves pointer stubs on disk gives the
+/// user no indication anything is missing. This is a read-only audit pass —
+/// it does not rewrite anything the smudge pass already decided.
+#[cfg(feature = "lfs")]
+fn warn_unresolved_lfs_pointers(git_cwd: &Path, ws_path: &Path, oid: &str) {
+    let Ok(paths) = ls_tree_paths(git_cwd, oid) else {
+        return;
+    };
+    let Ok(repo) = open_repo(ws_path) else {
+        return;
+    };
+    let Ok(store) = maw_lfs::Store::open(repo.common_dir()) else {
+        return;
+    };
+    for path in paths {
+        let full = ws_path.join(&path);
+        let Ok(bytes) = std::fs::read(&full) else {
+            continue;
+        };
+        if !maw_lfs::looks_like_pointer(&bytes) {
+            continue;
+        }
+        let Ok(pointer) = maw_lfs::Pointer::parse(&bytes) else {
+            continue;
+        };
+        if !store.contains(&pointer.oid) {
+            eprintln!(
+                "WARNING: '{path}' is LFS-tracked but its object (oid {}) is not in the \
+                 local LFS store — restored as pointer text, not content.\n  \
+                 Fetch the object (e.g. `git lfs pull`) into the store, then re-run recover.",
+                pointer.oid_hex()
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "lfs"))]
+fn warn_unresolved_lfs_pointers(_git_cwd: &Path, _ws_path: &Path, _oid: &str) {}
+
 pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     validate_recovery_ref(recovery_ref)?;
     validate_workspace_name(new_name)?;
@@ -1621,6 +1733,7 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
         }
         return Err(e).context("Failed to populate workspace from snapshot");
     }
+    warn_unresolved_lfs_pointers(&git_cwd, &new_path, &oid);
 
     println!(
         "Restored snapshot {oid_short} to workspace '{new_name}'.",
@@ -1664,6 +1777,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     let ResolvedSnapshot {
         oid, dirty_count, ..
     } = resolve_latest_snapshot(&root, name)?;
+    let git_cwd = super::git_cwd()?;
 
     // Step 1: Create the new workspace via the standard create path
     println!("Creating workspace '{new_name}' from snapshot of '{name}'...");
@@ -1681,6 +1795,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
         }
         return Err(e).context("Failed to populate workspace from snapshot");
     }
+    warn_unresolved_lfs_pointers(&git_cwd, &new_ws_path, &oid);
 
     println!();
     println!("Restored snapshot of '{name}' into workspace '{new_name}'.");
@@ -2637,5 +2752,82 @@ three
         for d in &result {
             assert_eq!(d.workspace, "alice");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1ero: maybe_smudge (the `--restore-file` materializer)
+    // -----------------------------------------------------------------------
+
+    /// Repo with `*.bin` tracked as LFS via a committed `.gitattributes`, so
+    /// `write_blob_with_path` can build a genuine pointer blob for `data.bin`.
+    fn repo_with_lfs_attrs() -> (tempfile::TempDir, std::path::PathBuf) {
+        let (dir, root) = maw_git::test_support::init_test_repo();
+        fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .expect("write .gitattributes");
+        let _ = maw_git::test_support::commit_all(&root, "attrs");
+        let _ = maw_git::GixRepo::open(&root).expect("open repo"); // sanity: repo opens
+        (dir, root)
+    }
+
+    /// `restore_file_at_oid` reads a snapshot blob directly (bypassing
+    /// `checkout_tree`'s smudge post-pass entirely) — `maybe_smudge` is what
+    /// makes `--restore-file` resolve an LFS pointer to real content when the
+    /// object is present in the local store.
+    #[test]
+    fn maybe_smudge_resolves_pointer_when_object_present() {
+        use maw_git::GitRepo as _;
+
+        let (_dir, root) = repo_with_lfs_attrs();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let real_content = b"real content for maybe_smudge test\n".to_vec();
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+        assert!(maw_lfs::looks_like_pointer(&pointer_bytes));
+
+        let result = maybe_smudge(&root, "data.bin", pointer_bytes);
+        assert_eq!(
+            result, real_content,
+            "maybe_smudge should resolve the pointer to real content"
+        );
+    }
+
+    /// Fallback behavior (must not be weakened): when the object is missing
+    /// from the local store, `maybe_smudge` leaves the pointer bytes exactly
+    /// as given — no fabricated content, no panic.
+    #[test]
+    fn maybe_smudge_leaves_pointer_when_object_missing() {
+        use maw_git::GitRepo as _;
+
+        let (_dir, root) = repo_with_lfs_attrs();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let real_content = b"real content that will be deleted from the store\n".to_vec();
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+
+        std::fs::remove_dir_all(root.join(".git").join("lfs").join("objects"))
+            .expect("remove lfs objects dir");
+
+        let result = maybe_smudge(&root, "data.bin", pointer_bytes.clone());
+        assert_eq!(
+            result, pointer_bytes,
+            "with the object missing, maybe_smudge must return the pointer bytes unchanged"
+        );
+    }
+
+    /// Non-pointer content (the common case — most restored files aren't
+    /// LFS-tracked) passes through untouched.
+    #[test]
+    fn maybe_smudge_passthrough_for_non_pointer_content() {
+        let (_dir, root) = repo_with_lfs_attrs();
+        let content = b"just a regular text file, not a pointer\n".to_vec();
+        let result = maybe_smudge(&root, "notes.txt", content.clone());
+        assert_eq!(result, content);
     }
 }

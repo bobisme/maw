@@ -396,8 +396,18 @@ fn smudge_lfs_pointers(
             message: format!("lfs attrs: {e}"),
         })?;
 
-    // Open (or create) the LFS store under the git dir.
-    let git_dir = repo.repo.git_dir();
+    // Open (or create) the LFS store under the COMMON git dir, not the
+    // per-worktree git dir. Every maw workspace other than the default one is
+    // a linked worktree, whose `git_dir()` is the private
+    // `<common>/worktrees/<name>/` admin directory — but LFS objects are
+    // fetched/pushed once and shared at `<common>/lfs/objects/`. Using
+    // `git_dir()` here silently pointed the smudge pass at an
+    // always-empty per-worktree `lfs/objects/` directory, so every object
+    // looked "missing from the local store" even when it was present in the
+    // real (common) store, and the pointer was left on disk with only a
+    // `tracing::warn!` (bn-1ero symptom 1). See `GixRepo::common_dir` and the
+    // matching fix in `lfs_clean.rs` (write side).
+    let git_dir = repo.repo.common_dir();
     let store = maw_lfs::Store::open(git_dir).map_err(|e| GitError::BackendError {
         message: format!("lfs store: {e}"),
     })?;
@@ -850,7 +860,7 @@ mod tests {
     use std::process::Command;
 
     use crate::GixRepo;
-    use crate::types::GitOid;
+    use crate::types::{EntryMode, GitOid};
 
     /// Run a git command in `dir`, panic on failure, return stdout trimmed.
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -1103,5 +1113,169 @@ mod tests {
             wt.join("untracked2.txt").exists(),
             "untracked file must survive"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // LFS smudge tests (bn-1ero)
+    // -----------------------------------------------------------------------
+
+    /// Build a root repo with `*.bin` tracked as LFS, commit a real-content
+    /// blob through maw's own clean-filter writer (so the object lands in the
+    /// COMMON `lfs/objects/` store exactly like a real commit/merge would),
+    /// then create a linked worktree detached at that commit. Returns
+    /// `(TempDir, commit_oid, worktree_path, real_content)`.
+    #[cfg(feature = "lfs")]
+    fn setup_repo_with_lfs_file_and_linked_worktree()
+    -> (tempfile::TempDir, GitOid, std::path::PathBuf, Vec<u8>) {
+        use crate::repo::GitRepo as _;
+        use crate::types::TreeEdit;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        git(&root, &["add", ".gitattributes"]);
+        git(&root, &["commit", "-qm", "attrs"]);
+        let base_oid: GitOid = git(&root, &["rev-parse", "HEAD"])
+            .parse()
+            .expect("parse base oid");
+
+        let repo = GixRepo::open(&root).expect("open root repo");
+        let real_content =
+            b"real content for the bn-1ero smudge-in-linked-worktree regression test\n".to_vec();
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path should store the LFS object + pointer blob");
+
+        let base_commit = repo.read_commit(base_oid).expect("read base commit");
+        let new_tree = repo
+            .edit_tree(
+                base_commit.tree_oid,
+                &[TreeEdit::Upsert {
+                    path: "data.bin".to_string(),
+                    mode: EntryMode::Blob,
+                    oid: pointer_oid,
+                }],
+            )
+            .expect("edit_tree");
+        let commit_oid = repo
+            .create_commit(new_tree, &[base_oid], "add data.bin", None)
+            .expect("create_commit");
+
+        // Create the linked worktree with the real git-lfs smudge filter
+        // disabled (`GIT_LFS_SKIP_SMUDGE=1` — a real, documented git-lfs
+        // config knob), so `data.bin` lands on disk as the raw pointer text
+        // regardless of whether the *test machine* happens to have git-lfs
+        // installed. That decouples this test from the environment: without
+        // this, a machine with git-lfs installed would have `git worktree
+        // add` itself resolve the pointer (git-lfs and maw-lfs share the
+        // exact same on-disk object layout under `<git-dir>/lfs/objects/`),
+        // masking the very bug under test. This is the same starting state a
+        // freshly-created maw workspace worktree is in before maw's own
+        // native smudge pass (which never shells out to git-lfs) runs.
+        let wt = root.join("wt");
+        git_no_lfs_smudge(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt.to_str().expect("utf8 path"),
+                &commit_oid.to_string(),
+            ],
+        );
+
+        (dir, commit_oid, wt, real_content)
+    }
+
+    /// Like [`git`], but disables git-lfs's own smudge filter for the
+    /// duration of the call (see [`setup_repo_with_lfs_file_and_linked_worktree`]).
+    #[cfg(feature = "lfs")]
+    fn git_no_lfs_smudge(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_LFS_SKIP_SMUDGE", "1")
+            .output()
+            .unwrap_or_else(|e| panic!("git {}: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "git {} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Regression test (bn-1ero, symptom 1 / test a): `checkout_tree`'s LFS
+    /// smudge post-pass must resolve pointer blobs to real content using the
+    /// shared **common** git dir, not the per-worktree admin dir. Every maw
+    /// workspace other than the default one is a linked worktree —
+    /// `GixRepo::git_dir()` there returns `<common>/worktrees/<name>/`, which
+    /// has no `lfs/objects/` of its own — so looking the object up there
+    /// always missed, even though it was sitting right there in
+    /// `<common>/lfs/objects/`. This is exactly the shape
+    /// `populate_from_snapshot` (`maw ws recover --to`) uses.
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn checkout_tree_smudges_lfs_pointer_in_linked_worktree_via_common_store() {
+        let (_dir, commit_oid, wt, real_content) = setup_repo_with_lfs_file_and_linked_worktree();
+
+        // Confirm the starting state really is unsmudged pointer text (sanity
+        // check that the test setup exercises the bug, not a no-op).
+        let before = fs::read(wt.join("data.bin")).expect("read data.bin before checkout_tree");
+        assert!(
+            maw_lfs::looks_like_pointer(&before),
+            "test setup sanity: worktree should start with pointer text"
+        );
+
+        let wt_repo = GixRepo::open(&wt).expect("open worktree repo");
+        super::checkout_tree(&wt_repo, commit_oid, &wt).expect("checkout_tree");
+
+        let on_disk = fs::read(wt.join("data.bin")).expect("read data.bin after checkout_tree");
+        assert_eq!(
+            on_disk, real_content,
+            "checkout_tree must smudge the LFS pointer to real content by reading the \
+             COMMON lfs store, not the per-worktree one"
+        );
+    }
+
+    /// Regression test (bn-1ero, test b): when the LFS object is NOT present
+    /// in the local store, `checkout_tree`'s smudge pass must leave the
+    /// pointer text on disk untouched (never fabricate content, never crash)
+    /// — the fallback behavior this bone explicitly must not weaken.
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn checkout_tree_leaves_pointer_when_lfs_object_missing_from_store() {
+        let (dir, commit_oid, wt, _real_content) = setup_repo_with_lfs_file_and_linked_worktree();
+
+        // Delete the object from the COMMON store to simulate "never
+        // fetched" / "gc'd locally".
+        let root = dir.path();
+        let objects_dir = root.join(".git").join("lfs").join("objects");
+        std::fs::remove_dir_all(&objects_dir).expect("remove lfs objects dir");
+
+        let before = fs::read(wt.join("data.bin")).expect("read data.bin before checkout_tree");
+        assert!(maw_lfs::looks_like_pointer(&before));
+
+        let wt_repo = GixRepo::open(&wt).expect("open worktree repo");
+        super::checkout_tree(&wt_repo, commit_oid, &wt).expect("checkout_tree");
+
+        let after = fs::read(wt.join("data.bin")).expect("read data.bin after checkout_tree");
+        assert_eq!(
+            after, before,
+            "with the object missing from the local store, checkout_tree must leave the \
+             pointer text exactly as checked out — no fabricated content, no crash"
+        );
+        assert!(maw_lfs::looks_like_pointer(&after));
     }
 }
