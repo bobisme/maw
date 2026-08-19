@@ -21,6 +21,15 @@ pub struct GixRepo {
     /// so `write_blob_with_path` uses the incoming attrs instead of HEAD's.
     #[cfg(feature = "lfs")]
     pub(crate) pending_gitattributes: Option<Vec<(String, Vec<u8>)>>,
+    /// Memoized `.gitattributes` matcher for `write_blob_with_path`
+    /// (bn-2fps). Keyed by HEAD tree OID / pending-override presence; see
+    /// [`crate::lfs_clean::AttrsCache`] for the invalidation contract.
+    ///
+    /// `RefCell` costs nothing in bounds: `gix::Repository` is already
+    /// `!Sync` (it holds `RefCell` buffer free-lists), so `GixRepo` never
+    /// was `Sync`, and `GitRepo` carries no `Send`/`Sync` bound.
+    #[cfg(feature = "lfs")]
+    pub(crate) attrs_cache: std::cell::RefCell<Option<crate::lfs_clean::AttrsCache>>,
 }
 
 impl GixRepo {
@@ -38,6 +47,8 @@ impl GixRepo {
             workdir,
             #[cfg(feature = "lfs")]
             pending_gitattributes: None,
+            #[cfg(feature = "lfs")]
+            attrs_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -82,6 +93,8 @@ impl GixRepo {
             workdir,
             #[cfg(feature = "lfs")]
             pending_gitattributes: None,
+            #[cfg(feature = "lfs")]
+            attrs_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -96,12 +109,26 @@ impl GixRepo {
     #[cfg(feature = "lfs")]
     pub fn set_pending_gitattributes(&mut self, entries: Vec<(String, Vec<u8>)>) {
         self.pending_gitattributes = Some(entries);
+        self.invalidate_attrs_cache();
     }
 
     /// Clear the override set by [`set_pending_gitattributes`].
     #[cfg(feature = "lfs")]
     pub fn clear_pending_gitattributes(&mut self) {
         self.pending_gitattributes = None;
+        self.invalidate_attrs_cache();
+    }
+
+    /// Drop the memoized `.gitattributes` matcher (bn-2fps).
+    ///
+    /// The cache keys off the HEAD tree OID, so commits and HEAD moves
+    /// invalidate themselves. Call this only for the one case the key
+    /// cannot see: writing `.gitattributes` files **into the working
+    /// tree** without moving HEAD, while reusing the same `GixRepo`
+    /// afterwards. Cheap — it just clears an `Option`.
+    #[cfg(feature = "lfs")]
+    pub fn invalidate_attrs_cache(&self) {
+        *self.attrs_cache.borrow_mut() = None;
     }
 
     /// Resolve a slash-separated `path` inside the tree at `tree_or_commit_oid`.

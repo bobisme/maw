@@ -13,49 +13,192 @@
 //! existing LFS blob from another tree), we pass them through unchanged.
 
 use std::io::Cursor;
+use std::rc::Rc;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
 use crate::types::GitOid;
+
+/// What the cached [`maw_lfs::AttrsMatcher`] was derived from.
+///
+/// Two calls that compute the same key are guaranteed to produce the same
+/// matcher, so the second may reuse the first's result. See
+/// [`AttrsCache`] for the full invalidation contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttrsKey {
+    /// Built from `GixRepo::pending_gitattributes`. That field is only
+    /// reachable through `&mut self` setters, both of which drop the
+    /// cache, so a single `Pending` key can never span two different
+    /// override sets.
+    Pending,
+    /// Built from the HEAD tree with this OID (`None` = no resolvable
+    /// HEAD), falling back to the working directory when that tree
+    /// carries no `.gitattributes`.
+    Head(Option<gix::ObjectId>),
+}
+
+/// Memoized `.gitattributes` resolution for `write_blob_with_path`
+/// (bn-2fps).
+///
+/// Building an [`maw_lfs::AttrsMatcher`] means a full recursive walk of
+/// the HEAD tree, plus a full recursive walk of the working directory
+/// when HEAD holds no `.gitattributes` at all. Every caller of
+/// `write_blob_with_path` loops over files (merge `write_blob_at`,
+/// `patch_candidate_tree`, sync/rebase, `worktree_state_commit`,
+/// recover), so an N-file operation paid 2N repo-sized walks for a
+/// result that is identical every time.
+///
+/// # Invalidation contract
+///
+/// The cache is keyed by [`AttrsKey`] and re-derived whenever the key
+/// changes:
+///
+/// * **HEAD moves** — the key carries the HEAD *tree* OID, so a commit
+///   that adds, edits, or removes a `.gitattributes` produces a new key
+///   on the next call and the matcher is rebuilt. Content-addressing
+///   makes this exact: same tree OID ⇒ byte-identical attributes.
+/// * **Pending override set/cleared** — `set_pending_gitattributes` and
+///   `clear_pending_gitattributes` take `&mut self` and clear the cache
+///   outright.
+/// * **Working-tree writes** — the workdir fallback reads `.gitattributes`
+///   files off disk, which are *not* content-addressed by the key. Any
+///   code that writes into the working tree while holding a `GixRepo`
+///   must call [`GixRepo::invalidate_attrs_cache`]. `checkout_tree` does
+///   this already; external writers (maw-cli materialization, etc.) that
+///   reuse a long-lived `GixRepo` across a worktree rewrite should too.
+///   Note this only matters when HEAD's tree has no `.gitattributes` and
+///   HEAD does not move — in every other case the OID key already covers
+///   it.
+pub struct AttrsCache {
+    key: AttrsKey,
+    matcher: Rc<maw_lfs::AttrsMatcher>,
+}
+
+// Test-only counter of *actual* matcher builds (cache misses). Lets the
+// unit tests below assert that N writes against one HEAD walk the tree
+// once, not N times.
+#[cfg(test)]
+thread_local! {
+    static ATTRS_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_attrs_build() {
+    ATTRS_BUILDS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+const fn note_attrs_build() {}
+
+/// Test-only: number of matcher builds on this thread since the last reset.
+#[cfg(test)]
+pub fn attrs_builds() -> usize {
+    ATTRS_BUILDS.with(std::cell::Cell::get)
+}
+
+/// Test-only: reset the build counter for this thread.
+#[cfg(test)]
+pub fn reset_attrs_builds() {
+    ATTRS_BUILDS.with(|c| c.set(0));
+}
+
+/// Resolve the `.gitattributes` matcher for this repo, reusing the cached
+/// one when the derivation inputs are unchanged.
+///
+/// Failures (unparsable attributes, unreadable workdir, bare repo with no
+/// HEAD) resolve to an empty matcher — `is_lfs` then answers `false` for
+/// every path and the caller writes a raw blob, exactly as before the
+/// cache existed.
+fn resolve_attrs(repo: &GixRepo) -> Rc<maw_lfs::AttrsMatcher> {
+    let key = if repo.pending_gitattributes.is_some() {
+        AttrsKey::Pending
+    } else {
+        AttrsKey::Head(head_tree_oid(repo))
+    };
+
+    if let Some(cached) = repo.attrs_cache.borrow().as_ref()
+        && cached.key == key
+    {
+        return Rc::clone(&cached.matcher);
+    }
+
+    let matcher = Rc::new(build_attrs(repo, &key));
+    *repo.attrs_cache.borrow_mut() = Some(AttrsCache {
+        key,
+        matcher: Rc::clone(&matcher),
+    });
+    matcher
+}
+
+/// The OID of HEAD's tree, or `None` when HEAD cannot be resolved
+/// (fresh repo, unborn branch, corrupt ref).
+fn head_tree_oid(repo: &GixRepo) -> Option<gix::ObjectId> {
+    let commit = repo.repo.head_commit().ok()?;
+    commit.tree_id().ok().map(gix::Id::detach)
+}
+
+/// Build the matcher for `key` from scratch. This is the walk the cache
+/// exists to avoid.
+fn build_attrs(repo: &GixRepo, key: &AttrsKey) -> maw_lfs::AttrsMatcher {
+    note_attrs_build();
+    match key {
+        AttrsKey::Pending => {
+            let entries = repo
+                .pending_gitattributes
+                .as_ref()
+                .map_or_else(Vec::new, Clone::clone);
+            match maw_lfs::AttrsMatcher::from_entries(entries) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("pending gitattributes parse failed: {e}");
+                    maw_lfs::AttrsMatcher::empty()
+                }
+            }
+        }
+        AttrsKey::Head(tree_oid) => {
+            // HEAD tree first (correct repo-relative paths; works for
+            // bare repos), then the workdir fallback for repos whose
+            // HEAD carries no attributes (or has no HEAD at all).
+            let from_head = tree_oid.and_then(|oid| {
+                let tree = repo.repo.find_tree(oid).ok()?;
+                maw_lfs::AttrsMatcher::from_gix_tree(&repo.repo, &tree).ok()
+            });
+            match from_head {
+                Some(a) if !a.is_empty() => a,
+                _ => attrs_from_workdir(repo),
+            }
+        }
+    }
+}
+
+fn attrs_from_workdir(repo: &GixRepo) -> maw_lfs::AttrsMatcher {
+    let Some(workdir) = repo.repo.workdir() else {
+        return maw_lfs::AttrsMatcher::empty();
+    };
+    match maw_lfs::AttrsMatcher::from_workdir(workdir) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
+            maw_lfs::AttrsMatcher::empty()
+        }
+    }
+}
 
 pub fn write_blob_with_path(
     repo: &GixRepo,
     data: &[u8],
     rel_path: &str,
 ) -> Result<GitOid, GitError> {
-    // Load .gitattributes for LFS pattern matching.
+    // Load .gitattributes for LFS pattern matching (memoized — see
+    // `AttrsCache`).
     //
     // Priority:
     // 1. Pending attrs override (set by merge callers when the merge itself
     //    modifies .gitattributes — uses the INCOMING attrs, not HEAD's).
     // 2. HEAD tree (correct repo-relative paths; works for bare repos).
     // 3. Workdir fallback (fresh repo with no HEAD).
-    let attrs = if let Some(ref entries) = repo.pending_gitattributes {
-        match maw_lfs::AttrsMatcher::from_entries(entries.clone()) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!("pending gitattributes parse failed: {e}");
-                return crate::objects_impl::write_blob(repo, data);
-            }
-        }
-    } else {
-        match load_attrs_from_head(repo) {
-            Ok(a) if !a.is_empty() => a,
-            _ => {
-                let workdir = match repo.repo.workdir() {
-                    Some(w) => w.to_owned(),
-                    None => return crate::objects_impl::write_blob(repo, data),
-                };
-                match maw_lfs::AttrsMatcher::from_workdir(&workdir) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
-                        return crate::objects_impl::write_blob(repo, data);
-                    }
-                }
-            }
-        }
-    };
+    let attrs = resolve_attrs(repo);
     if !attrs.is_lfs(rel_path) {
         return crate::objects_impl::write_blob(repo, data);
     }
@@ -95,17 +238,6 @@ pub fn write_blob_with_path(
     crate::objects_impl::write_blob(repo, &pointer_bytes)
 }
 
-/// Load `.gitattributes` entries from the HEAD tree of a bare repo.
-///
-/// Walks the HEAD commit's tree recursively, collecting every entry named
-/// `.gitattributes`, and builds an [`maw_lfs::AttrsMatcher`] from their
-/// blob contents.
-fn load_attrs_from_head(repo: &GixRepo) -> Result<maw_lfs::AttrsMatcher, GitError> {
-    maw_lfs::AttrsMatcher::from_gix_head(&repo.repo).map_err(|e| GitError::BackendError {
-        message: format!("bare repo: failed to load .gitattributes from HEAD: {e}"),
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -129,6 +261,137 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Set up a repo whose HEAD commits a root `.gitattributes` marking
+    /// `*.bin` as LFS. Returns the tempdir and an open `GixRepo`.
+    fn repo_with_attrs(rules: &str) -> (tempfile::TempDir, GixRepo) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join(".gitattributes"), rules).unwrap();
+        git(&root, &["add", ".gitattributes"]);
+        git(&root, &["commit", "-qm", "attrs"]);
+        let repo = GixRepo::open(&root).unwrap();
+        (dir, repo)
+    }
+
+    /// bn-2fps: the `.gitattributes` matcher is memoized per HEAD tree
+    /// OID. N `write_blob_with_path` calls against one HEAD must walk the
+    /// tree exactly once — not N times, which is what made an N-file
+    /// snapshot quadratic-ish in repo size.
+    #[test]
+    fn attrs_matcher_is_built_once_per_head_tree() {
+        let (dir, repo) = repo_with_attrs("*.bin filter=lfs diff=lfs merge=lfs -text\n");
+        let root = dir.path().to_path_buf();
+
+        super::reset_attrs_builds();
+        for i in 0..25 {
+            repo.write_blob_with_path(format!("payload {i}\n").as_bytes(), "notes.txt")
+                .unwrap();
+        }
+        assert_eq!(
+            super::attrs_builds(),
+            1,
+            "25 writes against one HEAD must walk the tree once"
+        );
+
+        // Moving HEAD (here: a commit that broadens the LFS rules) must
+        // invalidate the cache — the key carries the HEAD tree OID.
+        fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs -text\n*.dat filter=lfs -text\n",
+        )
+        .unwrap();
+        git(&root, &["add", ".gitattributes"]);
+        git(&root, &["commit", "-qm", "widen attrs"]);
+
+        let oid = repo
+            .write_blob_with_path(b"raw dat content\n", "thing.dat")
+            .unwrap();
+        assert_eq!(
+            super::attrs_builds(),
+            2,
+            "HEAD moved, so the matcher must be rebuilt exactly once more"
+        );
+
+        // ...and the rebuilt matcher must actually see the new rule.
+        let blob = git(&root, &["cat-file", "-p", &oid.to_string()]);
+        assert!(
+            blob.starts_with("version https://git-lfs.github.com/spec/v1"),
+            "new HEAD's `*.dat filter=lfs` rule must apply; got:\n{blob}"
+        );
+
+        // A second write against the (still unchanged) new HEAD reuses it.
+        repo.write_blob_with_path(b"more dat\n", "other.dat")
+            .unwrap();
+        assert_eq!(super::attrs_builds(), 2, "same HEAD must reuse the matcher");
+    }
+
+    /// bn-2fps: the pending-`.gitattributes` override is its own cache
+    /// key, and both setters drop the cache, so merge callers never see a
+    /// stale matcher across a set/clear boundary.
+    #[test]
+    fn pending_gitattributes_override_invalidates_cache() {
+        let (_dir, mut repo) = repo_with_attrs("*.bin filter=lfs -text\n");
+
+        super::reset_attrs_builds();
+        let head_oid = repo.write_blob_with_path(b"plain\n", "a.dat").unwrap();
+        assert_eq!(super::attrs_builds(), 1);
+
+        // Incoming merge attrs mark *.dat as LFS instead.
+        repo.set_pending_gitattributes(vec![(String::new(), b"*.dat filter=lfs -text\n".to_vec())]);
+        let pending_oid = repo.write_blob_with_path(b"plain\n", "a.dat").unwrap();
+        assert_eq!(
+            super::attrs_builds(),
+            2,
+            "setting a pending override must rebuild"
+        );
+        assert_ne!(
+            head_oid, pending_oid,
+            "pending attrs must turn a.dat into a pointer blob"
+        );
+        repo.write_blob_with_path(b"plain2\n", "b.dat").unwrap();
+        assert_eq!(super::attrs_builds(), 2, "override is cached too");
+
+        // Clearing it must fall back to HEAD's rules again.
+        repo.clear_pending_gitattributes();
+        let cleared_oid = repo.write_blob_with_path(b"plain\n", "a.dat").unwrap();
+        assert_eq!(super::attrs_builds(), 3, "clearing must rebuild");
+        assert_eq!(
+            head_oid, cleared_oid,
+            "after clearing, HEAD's rules apply again"
+        );
+    }
+
+    /// bn-2fps: a repo with no `.gitattributes` anywhere still resolves
+    /// (empty matcher, raw blobs) and still caches — this is the common
+    /// case that previously paid a HEAD-tree walk *and* a full workdir
+    /// walk per file.
+    #[test]
+    fn no_gitattributes_anywhere_is_cached_and_writes_raw_blobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "seed"]);
+        let repo = GixRepo::open(&root).unwrap();
+
+        super::reset_attrs_builds();
+        let a = repo.write_blob_with_path(b"hello\n", "x.bin").unwrap();
+        for _ in 0..10 {
+            repo.write_blob_with_path(b"hello\n", "x.bin").unwrap();
+        }
+        assert_eq!(super::attrs_builds(), 1);
+        let plain = repo.write_blob(b"hello\n").unwrap();
+        assert_eq!(a, plain, "no LFS rules -> raw blob");
     }
 
     /// Regression test (bn-1ero, write side): `write_blob_with_path`'s LFS

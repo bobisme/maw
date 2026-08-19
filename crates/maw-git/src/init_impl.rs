@@ -30,6 +30,8 @@ pub fn init_repo(directory: &Path) -> Result<GixRepo, GitError> {
         workdir,
         #[cfg(feature = "lfs")]
         pending_gitattributes: None,
+        #[cfg(feature = "lfs")]
+        attrs_cache: std::cell::RefCell::new(None),
     })
 }
 

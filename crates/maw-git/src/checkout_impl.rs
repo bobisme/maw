@@ -15,6 +15,12 @@ use crate::types::{EntryMode, GitOid, IndexEntry};
     reason = "checkout is a sequential git plumbing operation"
 )]
 pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), GitError> {
+    // This rewrites the working tree, which may add/remove/edit
+    // `.gitattributes` files that the memoized LFS matcher read off disk
+    // (bn-2fps). HEAD need not move, so drop the cache explicitly.
+    #[cfg(feature = "lfs")]
+    repo.invalidate_attrs_cache();
+
     let gix_oid = gix::ObjectId::from_bytes_or_panic(oid.as_bytes());
 
     // If oid is a commit, resolve to its tree.
