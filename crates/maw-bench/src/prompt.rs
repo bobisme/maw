@@ -183,6 +183,19 @@ fn task_battery_from_plan(plan: &ScenarioPlan) -> Vec<String> {
                     tasks.push("Run routine garbage collection on the repository.".to_owned());
                 }
             }
+            Op::CorruptWorktreeStatMasked { ws, path, .. } => {
+                // SG2 drives real agents, which cannot be asked to forge an
+                // index stat cache. Describe the OBSERVABLE end state instead
+                // and let the harness decide whether the substrate can honour
+                // it; a substrate that cannot simply no-ops the step.
+                let target = path.as_deref().unwrap_or("any tracked file");
+                tasks.push(format!(
+                    "In workspace `{}`, make the working-tree copy of {target} disagree with its \
+                     committed content WITHOUT git reporting the workspace as dirty (a \
+                     stat-cache-masked stale file).",
+                    ws.0
+                ));
+            }
         }
     }
     tasks

@@ -98,7 +98,7 @@ use maw::assurance::oracle_escape::{
     SiblingRefFaithfulness, TrunkDirtyPreservation, check_record_ref_coherence,
 };
 #[cfg(feature = "assurance")]
-use maw::assurance::oracle_worktree::CleanMaterialization;
+use maw::assurance::oracle_worktree::{CleanMaterialization, MaskedStalePreservation};
 #[cfg(feature = "assurance")]
 use maw::assurance::scenario::{BaseRef, ConditionProfile, FaultSpec, Op, Target, generate_plan};
 
@@ -207,6 +207,24 @@ struct Liveness {
     /// for the bn-p3m9 gate: 0 checks means the oracle judged nothing and a
     /// green run proves nothing about the class.
     clean_materialization_checks: u64,
+    /// bn-22jy: `CorruptWorktreeStatMasked` ops the driver attempted.
+    masked_corruptions: u64,
+    /// bn-22jy: attempts where the stat-cache mask actually took — i.e. the
+    /// workspace really did carry stale bytes that `git status` called clean.
+    /// The decisive non-vacuity signal for the corruption tier: if it is 0 the
+    /// primitive silently degraded to a no-op and the bn-154g guard was never
+    /// armed.
+    masked_corruptions_effective: u64,
+    /// bn-22jy: `MaskedStalePreservation` judgements — masked files that were
+    /// actually overwritten by a later op. 0 means nothing ever reached the
+    /// preserve-before-overwrite path, so a green run proves nothing.
+    masked_overwrites_judged: u64,
+    /// bn-22jy: masked paths dropped unjudged because their whole workspace was
+    /// destroyed — the size of the oracle's deliberate scope carve-out.
+    masked_destroyed_unjudged: u64,
+    /// bn-22jy: masked-stale workspaces later observed clean at their own HEAD
+    /// again — maw re-materialized them, so `CleanMaterialization` re-armed.
+    masked_resolutions: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -224,6 +242,7 @@ const fn op_name(op: &Op) -> &'static str {
         Op::OutOfMawCommit { .. } => "out_of_maw_commit",
         Op::DirtyTrunkWrite { .. } => "dirty_trunk_write",
         Op::Gc { .. } => "gc",
+        Op::CorruptWorktreeStatMasked { .. } => "corrupt_worktree_stat_masked",
     }
 }
 
@@ -247,8 +266,12 @@ const fn base_ref_arg(base: &BaseRef) -> &'static str {
 /// primary maw invocation exited 0 (for liveness accounting). The oracle — not
 /// this return value — is the judge of correctness.
 #[cfg(feature = "assurance")]
-fn execute_op(repo: &TestRepo, op: &Op) -> bool {
-    match op {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat Op -> CLI mapping table; splitting it would hide which op maps to which invocation"
+)]
+fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
+    OpOutcome::from(match op {
         Op::WsCreate { ws, from } => {
             // Create as --persistent so the `Advance` op (maw ws advance) has a
             // valid target: advance refuses non-persistent workspaces
@@ -372,7 +395,240 @@ fn execute_op(repo: &TestRepo, op: &Op) -> bool {
             let out = repo.maw_raw_exact(&args);
             out.status.success()
         }
+        Op::CorruptWorktreeStatMasked { ws, path, nonce } => {
+            // bn-22jy: handled out-of-band because it is the one op whose
+            // outcome the oracles need in DETAIL (which path, which bytes), not
+            // just as a boolean. `execute_op_recording` is the entry point that
+            // both runs it and feeds `MaskedStalePreservation`; this arm exists
+            // so the match stays exhaustive and so a caller that only wants the
+            // side effect still gets it.
+            return OpOutcome {
+                succeeded: false,
+                masked: corrupt_worktree_stat_masked(repo, &ws.0, path.as_deref(), *nonce),
+            };
+        }
+    })
+}
+
+/// What one executed op did: the maw exit verdict, plus (bn-22jy) the resolved
+/// victim of a `CorruptWorktreeStatMasked` op when the stat mask actually took.
+#[cfg(feature = "assurance")]
+#[derive(Debug, Default)]
+struct OpOutcome {
+    /// `true` iff the op's maw invocation exited 0. Non-maw ops (edits, dirty
+    /// trunk writes, the corruption primitive) report `false` — they are not
+    /// maw invocations and must not inflate the liveness counters.
+    succeeded: bool,
+    /// `(resolved_path, stale_bytes)` iff a corruption op established a mask
+    /// that `git status` genuinely reports as clean.
+    masked: Option<(String, String)>,
+}
+
+#[cfg(feature = "assurance")]
+impl From<bool> for OpOutcome {
+    fn from(succeeded: bool) -> Self {
+        Self {
+            succeeded,
+            masked: None,
+        }
     }
+}
+
+/// **bn-22jy: the stat-cache-masked worktree corruption primitive.**
+///
+/// Poison one tracked file in `ws` with stale bytes of the SAME length, then
+/// forge the index stat cache so `git status`, `git diff HEAD` and gix's
+/// `status_head_to_worktree` all report the workspace CLEAN. Returns
+/// `Some((path, stale_bytes))` only when the mask is confirmed to have taken;
+/// `None` means the primitive degraded to a no-op and nothing was recorded.
+///
+/// # The recipe, and why each step is load-bearing
+///
+/// This reproduces the bn-p3m9 signature in the order the real corrupter
+/// produced it. It is the same recipe the e2e fixture
+/// `tests/sync_ff_hidden_divergence_bn_154g.rs::inject_hidden_divergence` uses;
+/// see that file for the incident narrative.
+///
+/// 1. `core.checkStat = minimal` narrows git's comparison to size+mtime. It is
+///    a real, documented setting (recommended on filesystems with unstable
+///    ctime/ino), and it is the only part of the fingerprint that cannot be
+///    reproduced portably: `ctime` cannot be set from userspace on Linux.
+/// 2. `core.trustCTime = false` must be set ALONGSIDE it, and is load-bearing
+///    for maw specifically. maw's dirty check is **gix**, and
+///    `gix_index::entry::stat::Stat::matches` compares `ctime.secs` whenever
+///    `trust_ctime` is on, **independently of `check_stat`** — where git's
+///    `minimal` drops ctime entirely. Writing the stale bytes always bumps
+///    ctime, so without this the mask survives only while the whole injection
+///    lands inside a single wall-clock second: green on an idle machine, flaky
+///    under a loaded `just check`. With it, the mask is deterministic.
+/// 3. Back-date the victim BEFORE rebuilding the index: an entry whose mtime
+///    equals the index's own is "racily clean" and gets re-hashed, which would
+///    accidentally rescue a stat-based checker.
+/// 4. `reset --mixed HEAD` + `update-index --refresh` leave every entry holding
+///    HEAD's CORRECT blob OID stamped with freshly re-stat'd (back-dated)
+///    data — the index shape the corrupting call site leaves behind.
+/// 5. Write the same-length stale bytes and re-apply the back-dated mtime, so
+///    `(size, mtime)` still match the index entry.
+///
+/// # Scope guards (why this may return `None`)
+///
+/// * The workspace must exist and be **status-clean**. On a genuinely dirty
+///   workspace the confirmation in step 6 could not tell "the mask failed" from
+///   "this file was already modified", and `maw ws sync` would refuse on the
+///   visible dirt anyway — so there would be nothing to arm.
+/// * The victim must be a non-empty regular tracked file whose bytes currently
+///   EQUAL its HEAD blob, so the recorded stale bytes are exactly the ones maw
+///   is about to destroy.
+/// * If the mask does not hold, the original bytes are put back and `None` is
+///   returned. A half-corrupted workspace would be a fixture bug masquerading
+///   as a maw bug.
+///
+/// # `git config` writes to the SHARED config
+///
+/// In a linked worktree `git config` writes `.git/config`, which every
+/// workspace in the repo shares. That is intended: maw's gix must read
+/// `trustCTime = false` for the mask to hold, and a per-worktree config would
+/// not reach it. It only ever weakens *stat-based* comparisons — every oracle
+/// here, and both production detectors this op exists to arm
+/// (`divergent_paths_by_tree`, `CleanMaterialization`), compare TREES.
+#[cfg(feature = "assurance")]
+fn corrupt_worktree_stat_masked(
+    repo: &TestRepo,
+    ws: &str,
+    hint: Option<&str>,
+    nonce: u64,
+) -> Option<(String, String)> {
+    use std::fs::FileTimes;
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+
+    if !repo.workspace_exists(ws) {
+        return None;
+    }
+    let ws_path = repo.workspace_path(ws);
+
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&ws_path)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let status_clean = || git(&["status", "--porcelain"]).is_some_and(|s| s.trim().is_empty());
+    let refresh_index = || {
+        // Exits non-zero when some entry "needs update"; informational here.
+        let _ = Command::new("git")
+            .args(["update-index", "--refresh"])
+            .current_dir(&ws_path)
+            .output();
+    };
+
+    // Only a status-clean workspace can be masked (see the doc comment).
+    if !status_clean() {
+        return None;
+    }
+
+    // Resolve the victim: the hint if it holds, else the first tracked path
+    // that does. `ls-tree` output is sorted, so the fallback is deterministic.
+    let tracked = git(&["ls-tree", "-r", "--name-only", "-z", "HEAD"])?;
+    let candidates: Vec<&str> = hint
+        .into_iter()
+        .chain(tracked.split('\0').filter(|p| !p.is_empty()))
+        .collect();
+    let mut victim: Option<(std::path::PathBuf, String, String)> = None;
+    for rel in candidates {
+        let abs = ws_path.join(rel);
+        // Must be a regular file (not a symlink or directory) with content.
+        let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 {
+            continue;
+        }
+        // Non-UTF-8 files are skipped: the payload generator below is textual.
+        let Ok(disk) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        // The bytes must currently equal HEAD's, so the stale bytes recorded
+        // for the oracle are exactly what maw is about to destroy.
+        if git(&["show", &format!("HEAD:{rel}")]).as_deref() != Some(disk.as_str()) {
+            continue;
+        }
+        victim = Some((abs, rel.to_owned(), disk));
+        break;
+    }
+    let (abs, rel, original) = victim?;
+
+    // Same-length stale payload, deterministic in `nonce`. Same length so even
+    // a size-only stat comparison cannot separate the two — the strongest form
+    // of the mask.
+    let stale = same_length_stale_bytes(&original, nonce);
+    if stale == original {
+        return None;
+    }
+
+    // 1 + 2. The two config knobs (see the doc comment).
+    git(&["config", "core.checkStat", "minimal"])?;
+    git(&["config", "core.trustctime", "false"])?;
+
+    let backdated = SystemTime::now() - Duration::from_mins(10);
+    let times = FileTimes::new()
+        .set_accessed(backdated)
+        .set_modified(backdated);
+    let backdate = || -> Option<()> {
+        std::fs::File::options()
+            .write(true)
+            .open(&abs)
+            .ok()?
+            .set_times(times)
+            .ok()
+    };
+
+    // 3 + 4. Back-date, then rebuild the index from HEAD and re-stat it.
+    backdate()?;
+    git(&["reset", "--mixed", "HEAD"])?;
+    refresh_index();
+
+    // 5. Plant the stale bytes and re-apply the back-dated mtime.
+    std::fs::write(&abs, &stale).ok()?;
+    backdate()?;
+
+    // 6. Confirm the mask. Run the status query TWICE: the first run can
+    // legitimately cause git to write back a refreshed index, and it is the
+    // SECOND, settled answer that maw will see.
+    if status_clean() && status_clean() {
+        return Some((rel, stale));
+    }
+
+    // The mask did not hold — put the original bytes back rather than leave a
+    // half-corrupted workspace that every downstream oracle would read as a maw
+    // bug.
+    let _ = std::fs::write(&abs, &original);
+    refresh_index();
+    None
+}
+
+/// A deterministic stale payload with **exactly** `original.len()` bytes.
+///
+/// A `nonce`-derived ASCII banner, then padded with `.` or truncated to length.
+/// ASCII-only (so truncation can never split a `char`) keeps the result valid
+/// UTF-8, and the banner makes a stray copy instantly identifiable in a failing
+/// trace.
+#[cfg(feature = "assurance")]
+fn same_length_stale_bytes(original: &str, nonce: u64) -> String {
+    let want = original.len();
+    let mut out = format!("STALE-bn-22jy-{nonce:016x}\n");
+    if out.len() > want {
+        out.truncate(want);
+        return out;
+    }
+    while out.len() < want {
+        out.push('.');
+    }
+    out
 }
 
 /// Make a commit directly on `refs/heads/main` outside of maw, via git
@@ -474,8 +730,8 @@ fn out_of_maw_commit(
 /// the failpoints binary here; any other op (defensively) falls back to the
 /// plain unfaulted path.
 ///
-/// Returns `(succeeded, crashed)`:
-/// - `succeeded` is `true` iff the maw invocation exited 0 (for liveness),
+/// Returns `(outcome, crashed)`:
+/// - `outcome.succeeded` is `true` iff the maw invocation exited 0 (liveness),
 /// - `crashed` is `true` iff the process did not exit cleanly (non-zero or
 ///   killed by a signal — the realistic "mid-op kill"). A crash is EXPECTED,
 ///   not a failure: the post-crash repo state is what the oracle must judge.
@@ -489,7 +745,7 @@ fn out_of_maw_commit(
 /// still runs), and matches the bn-18mv model where the armed env trips a later
 /// merge.
 #[cfg(feature = "assurance")]
-fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (bool, bool) {
+fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (OpOutcome, bool) {
     use std::process::Command;
 
     let bin = failpoints_maw_bin();
@@ -537,7 +793,7 @@ fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (bool, bool) {
 
     let succeeded = out.status.success();
     let crashed = !out.status.success();
-    (succeeded, crashed)
+    (OpOutcome::from(succeeded), crashed)
 }
 
 /// Merge target name. Increment 1 always merges into `default`.
@@ -577,7 +833,13 @@ const fn merge_target(into: &Target) -> &'static str {
 /// so the failpoints binary is never paid for ops that carry no fault.
 #[cfg(feature = "assurance")]
 #[allow(clippy::too_many_lines)]
-fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness) -> Vec<String> {
+fn run_seed(
+    seed: u64,
+    n_steps: usize,
+    inject_faults: bool,
+    corrupt_weight: u32,
+    live: &mut Liveness,
+) -> Vec<String> {
     let mut violations = Vec::new();
 
     let repo = TestRepo::new();
@@ -597,11 +859,20 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     // untouched; this tier regenerates plans each run so a different byte
     // stream here is fine. Soak campaigns raise `DST_ESCAPE_WEIGHT`.
     let escape_weight = u32::try_from(env_count("DST_ESCAPE_WEIGHT", 3)).unwrap_or(3);
+    // bn-22jy: the stat-cache-masked corruption op is a SEPARATE opt-in knob,
+    // defaulting to 0 here as well. `dst_production_tier_no_work_lost` (the
+    // default gate) therefore generates exactly the plans it generated before
+    // bn-22jy; only `dst_production_tier_masked_stale_corruption` turns it on.
+    // Keeping it off by default matters beyond determinism: a poisoned
+    // workspace is excluded from `CleanMaterialization` until an op rewrites
+    // its worktree wholesale, so a high corruption rate would quietly erode the
+    // bn-p3m9 gate's coverage.
     let plan = generate_plan(
         seed,
         &ConditionProfile::default()
             .with_advance_weight(8)
-            .with_escape_weight(escape_weight),
+            .with_escape_weight(escape_weight)
+            .with_corrupt_weight(corrupt_weight),
         n_steps,
     );
 
@@ -615,6 +886,10 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     // bn-3gba: CleanMaterialization is incremental (one per seed, fed every
     // step in order with the op's success verdict).
     let mut clean_materialization = CleanMaterialization::new();
+    // bn-22jy: MaskedStalePreservation watches every path the corruption
+    // primitive actually poisoned. Inert until `record_masked` is called, so
+    // corrupt_weight=0 runs pay nothing.
+    let mut masked_oracle = MaskedStalePreservation::new();
     let mut last_epoch = repo.current_epoch();
 
     for (i, step) in plan.steps.iter().enumerate() {
@@ -633,16 +908,29 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
             None
         };
 
-        let succeeded = if let Some(fp_name) = fault_name {
+        let outcome = if let Some(fp_name) = fault_name {
             // Arm MAW_FP=<name>=abort on the failpoints binary; the op will
             // likely crash mid-flight. That is EXPECTED — the oracle judges the
             // post-crash state below.
             live.faults_injected += 1;
-            let (ok, _crashed) = execute_op_faulted(&repo, op, fp_name);
-            ok
+            let (out, _crashed) = execute_op_faulted(&repo, op, fp_name);
+            out
         } else {
             execute_op(&repo, op)
         };
+        let succeeded = outcome.succeeded;
+        // bn-22jy: feed the corruption oracle the RESOLVED victim (the op
+        // carries only a hint), so it never judges a path that was not actually
+        // poisoned.
+        if matches!(op, Op::CorruptWorktreeStatMasked { .. }) {
+            live.masked_corruptions += 1;
+        }
+        if let Op::CorruptWorktreeStatMasked { ws, .. } = op
+            && let Some((path, stale)) = &outcome.masked
+        {
+            live.masked_corruptions_effective += 1;
+            masked_oracle.record_masked(&ws.0, path, stale);
+        }
         if succeeded {
             live.ops_succeeded += 1;
         }
@@ -743,6 +1031,14 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
                 "seed={seed} step={i} op={name} CleanMaterialization: {v}"
             ));
         }
+        // --- bn-22jy / bn-154g preserve-before-overwrite oracle ---
+        // Once maw overwrites a stat-cache-masked stale file, the pre-overwrite
+        // bytes must be reachable from that workspace's own recovery namespace.
+        for v in masked_oracle.check_step(repo.root(), op) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} MaskedStalePreservation: {v}"
+            ));
+        }
     }
 
     // Record how much content Oracle A actually witnessed this seed (the
@@ -754,6 +1050,16 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     live.clean_materialization_checks = live
         .clean_materialization_checks
         .saturating_add(clean_materialization.checks_run());
+    // bn-22jy: same discipline for the preserve-before-overwrite oracle.
+    live.masked_overwrites_judged = live
+        .masked_overwrites_judged
+        .saturating_add(masked_oracle.overwrites_judged());
+    live.masked_destroyed_unjudged = live
+        .masked_destroyed_unjudged
+        .saturating_add(masked_oracle.destroyed_unjudged());
+    live.masked_resolutions = live
+        .masked_resolutions
+        .saturating_add(clean_materialization.masked_resolutions());
 
     violations
 }
@@ -777,13 +1083,14 @@ fn drive_tier(
     count: u64,
     n_steps: usize,
     inject_faults: bool,
+    corrupt_weight: u32,
 ) -> (Liveness, Vec<String>, Vec<u64>) {
     let mut live = Liveness::default();
     let mut all_violations: Vec<String> = Vec::new();
     let mut failing_seeds: Vec<u64> = Vec::new();
 
     for seed in 0..count {
-        let v = run_seed(seed, n_steps, inject_faults, &mut live);
+        let v = run_seed(seed, n_steps, inject_faults, corrupt_weight, &mut live);
         if !v.is_empty() {
             failing_seeds.push(seed);
             for line in &v {
@@ -817,6 +1124,8 @@ fn drive_tier(
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
          {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx); \
          {} clean-materialization checks (bn-3gba); \
+         {} masked corruptions ({} effective), {} masked-overwrite judgements, \
+         {} dropped with a destroyed workspace, {} masks re-materialized (bn-22jy); \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
@@ -831,6 +1140,11 @@ fn drive_tier(
         live.dirty_trunk_writes,
         live.gc_runs,
         live.clean_materialization_checks,
+        live.masked_corruptions,
+        live.masked_corruptions_effective,
+        live.masked_overwrites_judged,
+        live.masked_destroyed_unjudged,
+        live.masked_resolutions,
         all_violations.len(),
         n_trials,
         wilson_ub,
@@ -920,7 +1234,7 @@ fn dst_production_tier_no_work_lost() {
     let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
 
     let (live, all_violations, failing_seeds) =
-        drive_tier("dst-production-tier", count, n_steps, false);
+        drive_tier("dst-production-tier", count, n_steps, false, 0);
 
     assert_shared_liveness(&live, count, n_steps);
 
@@ -985,7 +1299,7 @@ fn dst_production_tier_survives_faults() {
     let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
 
     let (live, all_violations, failing_seeds) =
-        drive_tier("dst-production-tier-faults", count, n_steps, true);
+        drive_tier("dst-production-tier-faults", count, n_steps, true, 0);
 
     assert_shared_liveness(&live, count, n_steps);
 
@@ -1045,6 +1359,18 @@ struct RegressionRun {
     /// `true` if some blob reachable at the end of the run bears maw's diff3
     /// conflict markers — the marker rewrite the bn-286g carveout is about.
     saw_conflict_marker_blob: bool,
+    /// bn-22jy: `(workspace, path)` pairs the corruption primitive actually
+    /// masked. Empty means the primitive degraded to a no-op, so a green run
+    /// says nothing about the bn-154g guard.
+    masked_paths: Vec<(String, String)>,
+    /// bn-22jy: how many masked paths were later overwritten and judged. 0
+    /// means nothing ever reached the preserve-before-overwrite site.
+    masked_overwrites_judged: u64,
+    /// bn-22jy: every `refs/manifold/recovery/*` ref present at the end of the
+    /// run, so a test can pin the EXACT observable bn-154g produces
+    /// (`refs/manifold/recovery/<ws>/materialize-<ts>`) rather than settling
+    /// for "the bytes turned up somewhere recoverable".
+    recovery_refs: Vec<String>,
 }
 
 /// [`drive_regression_plan`] plus the non-vacuity evidence.
@@ -1057,12 +1383,22 @@ fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan)
     let mut sibling_oracle = SiblingRefFaithfulness::new();
     let mut trunk_oracle = TrunkDirtyPreservation::new();
     let mut clean_materialization = CleanMaterialization::new();
+    let mut masked_oracle = MaskedStalePreservation::new();
+    let mut masked_paths: Vec<(String, String)> = Vec::new();
     let mut violations = Vec::new();
 
     for (i, step) in plan.steps.iter().enumerate() {
         let op = &step.op;
         let name = op_name(op);
-        let succeeded = execute_op(&repo, op);
+        let outcome = execute_op(&repo, op);
+        let succeeded = outcome.succeeded;
+
+        if let Op::CorruptWorktreeStatMasked { ws, .. } = op
+            && let Some((path, stale)) = &outcome.masked
+        {
+            masked_paths.push((ws.0.clone(), path.clone()));
+            masked_oracle.record_masked(&ws.0, path, stale);
+        }
 
         match op {
             Op::OutOfMawCommit { files, .. } => {
@@ -1100,6 +1436,9 @@ fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan)
         for v in check_record_ref_coherence(repo.root()) {
             violations.push(format!("step={i} op={name} RecordRefCoherence: {v}"));
         }
+        for v in masked_oracle.check_step(repo.root(), op) {
+            violations.push(format!("step={i} op={name} MaskedStalePreservation: {v}"));
+        }
         for v in clean_materialization.check_step(repo.root(), op, succeeded) {
             violations.push(format!("step={i} op={name} CleanMaterialization: {v}"));
         }
@@ -1111,7 +1450,35 @@ fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan)
         violations,
         conflicted_workspaces,
         saw_conflict_marker_blob,
+        masked_paths,
+        masked_overwrites_judged: masked_oracle.overwrites_judged(),
+        recovery_refs: recovery_ref_names(repo.root()),
     }
+}
+
+/// Every `refs/manifold/recovery/*` ref name in the repo, sorted.
+#[cfg(feature = "assurance")]
+fn recovery_ref_names(root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/manifold/recovery",
+        ])
+        .current_dir(root)
+        .output();
+    let mut names: Vec<String> = out
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// Names of workspaces whose `artifacts/ws/<name>/rebase-conflicts.json`
@@ -1236,6 +1603,124 @@ fn bn_1xmk_regression_is_green() {
     assert!(
         violations.is_empty(),
         "bn-1xmk regression must be clean with the fix in place; oracle violations:\n{}",
+        violations.join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-22jy: stat-cache-masked worktree corruption
+// ---------------------------------------------------------------------------
+
+/// The bn-154g scenario — a stat-cache-masked stale file flattened by the
+/// `ws sync` fast-forward checkout — must be GREEN, and must actually happen.
+///
+/// This is the deliberately-seeded trace the generator op exists to make
+/// reachable: `ws-victim` goes stale behind a merge it did not join, gets
+/// poisoned behind a forged index stat cache, and is then synced. The FF
+/// `checkout_detach` overwrites every entry of the target tree, so the stale
+/// bytes are destroyed by design — and `preserve_divergence_before_overwrite`
+/// must have pinned them to `refs/manifold/recovery/ws-victim/materialize-*`
+/// first. Reverting the bn-154g guard turns this test RED.
+///
+/// The two non-vacuity assertions are load-bearing. Without a confirmed mask
+/// the sync would simply refuse on visible dirt, and without a judged overwrite
+/// the pin was never needed — either way a green result would say nothing.
+#[cfg(feature = "assurance")]
+#[test]
+fn bn_154g_masked_stale_pin_is_green() {
+    let plan = maw::assurance::scenario::bn_154g_regression_plan();
+    let run = drive_regression_plan_reported(&plan);
+
+    assert!(
+        run.masked_paths
+            .iter()
+            .any(|(ws, path)| ws == "ws-victim" && path == "base.txt"),
+        "NON-VACUITY (bn-22jy): the stat-cache mask never took, so `maw ws sync` \
+         would have refused on visible dirt and the bn-154g guard was never \
+         armed. Masked paths: {:?}",
+        run.masked_paths,
+    );
+    assert_eq!(
+        run.masked_overwrites_judged, 1,
+        "NON-VACUITY (bn-154g): expected the sync's fast-forward checkout to \
+         destroy the masked bytes exactly once; the oracle judged {} overwrite(s). \
+         0 means the sync never overwrote the poisoned path (did it refuse?), so \
+         the preserve-before-overwrite site was never reached.",
+        run.masked_overwrites_judged,
+    );
+
+    assert!(
+        run.violations.is_empty(),
+        "bn-154g: the epoch-bump fast-forward must pin the hidden divergence \
+         before its checkout flattens it; oracle violations:\n{}",
+        run.violations.join("\n"),
+    );
+
+    // The EXACT bn-154g observable, not merely "recoverable somewhere":
+    // `preserve_divergence_before_overwrite` pins to
+    // `refs/manifold/recovery/<ws>/materialize-<ts>`.
+    assert!(
+        run.recovery_refs
+            .iter()
+            .any(|r| r.starts_with("refs/manifold/recovery/ws-victim/materialize-")),
+        "bn-154g: expected a `refs/manifold/recovery/ws-victim/materialize-*` pin \
+         from preserve_divergence_before_overwrite; recovery refs present: {:?}",
+        run.recovery_refs,
+    );
+}
+
+/// The corruption-enabled production tier: a modest budget over seed-generated
+/// plans with `corrupt_weight > 0`, so the DST explores the bn-154g /
+/// bn-3gba interleavings it could not previously reach.
+///
+/// Deliberately a SEPARATE test from `dst_production_tier_no_work_lost` rather
+/// than a knob on it: the default gate keeps `corrupt_weight = 0` so its plans
+/// (and the `CleanMaterialization` coverage a poisoned workspace suppresses)
+/// are exactly what they were before bn-22jy.
+///
+/// Budget: 8 seeds x 16 steps by default, raisable via the same `DST_TRACES` /
+/// `DST_STEPS` knobs. The corruption weight itself is `DST_CORRUPT_WEIGHT`
+/// (default 10 — high relative to the core op weights, because a corruption is
+/// only interesting when a LATER op overwrites it, and short plans need the
+/// density).
+#[cfg(feature = "assurance")]
+#[test]
+fn dst_production_tier_masked_stale_corruption() {
+    let count = env_count("DST_TRACES", 8);
+    let n_steps = usize::try_from(env_count("DST_STEPS", 16)).expect("DST_STEPS fits usize");
+    let corrupt_weight = u32::try_from(env_count("DST_CORRUPT_WEIGHT", 10)).unwrap_or(10);
+
+    let (live, violations, failing_seeds) = drive_tier(
+        "dst-production-tier-masked-stale",
+        count,
+        n_steps,
+        false,
+        corrupt_weight,
+    );
+
+    // ----- Liveness: the primitive must have actually fired. -----
+    assert!(
+        live.masked_corruptions > 0,
+        "LIVENESS FAILURE (bn-22jy): the generator emitted ZERO \
+         CorruptWorktreeStatMasked ops across {count} seeds ({n_steps} steps/seed) \
+         with corrupt_weight={corrupt_weight}. The profile gating is wrong."
+    );
+    assert!(
+        live.masked_corruptions_effective > 0,
+        "LIVENESS FAILURE (bn-22jy): {} corruption ops were attempted but the \
+         stat-cache mask NEVER held, so every one degraded to a no-op and no \
+         hidden divergence was ever created. This is a FIXTURE failure, not a \
+         maw pass: investigate `corrupt_worktree_stat_masked` (core.checkStat / \
+         core.trustCTime, mtime back-dating, filesystem timestamp granularity) \
+         rather than trusting this as green.",
+        live.masked_corruptions,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "bn-22jy corruption tier: {} oracle violation(s) across seeds {:?}:\n{}",
+        violations.len(),
+        failing_seeds,
         violations.join("\n"),
     );
 }

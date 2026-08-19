@@ -94,6 +94,14 @@ pub mod oracle_escape;
 /// merge-state) and the bn-2bcx escape oracles are all blind to this class by
 /// construction: in bn-p3m9 every ref was correct and the stale blobs were
 /// perfectly reachable — only the *working tree* was wrong.
+///
+/// bn-22jy adds [`oracle_worktree::MaskedStalePreservation`] alongside it: the
+/// preserve-before-overwrite gate (bn-154g). When maw overwrites a
+/// **stat-cache-masked** stale file — a divergence every status-shaped query
+/// calls clean — the pre-overwrite bytes must first be pinned to
+/// `refs/manifold/recovery/<ws>/materialize-*`. The generator op that arms it
+/// is `Op::CorruptWorktreeStatMasked`, gated behind
+/// `ConditionProfile::corrupt_weight` (0 by default).
 #[cfg(feature = "oracles")]
 pub mod oracle_worktree;
 #[cfg(feature = "scenario")]

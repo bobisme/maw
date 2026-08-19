@@ -356,7 +356,7 @@ impl TrunkDirtyPreservation {
         }
         let default_ws = LayoutFlavor::detect(repo_root).default_target_path(repo_root, "default");
         // The set of blob OIDs reachable from recovery refs (surfaced content).
-        let recovery_blobs = recovery_reachable_blobs(repo_root);
+        let recovery_blobs = recovery_reachable_blobs(repo_root, None);
 
         let mut violations = Vec::new();
         for (path, content) in &self.pending {
@@ -596,16 +596,24 @@ fn blobs_of_ref(repo_root: &Path, ref_name: &str) -> BTreeSet<String> {
 }
 
 /// The set of blob OIDs reachable from any `refs/manifold/recovery/*` ref.
-fn recovery_reachable_blobs(repo_root: &Path) -> BTreeSet<String> {
+///
+/// `scope` narrows the ref namespace: `None` means every recovery ref in the
+/// repo, `Some("alice")` means only `refs/manifold/recovery/alice/*`. bn-22jy's
+/// [`crate::oracle_worktree::MaskedStalePreservation`] uses the narrow form so
+/// it asserts the bn-154g observable exactly — the doomed bytes must be pinned
+/// under the workspace maw was about to overwrite, not merely present in some
+/// unrelated snapshot.
+pub(crate) fn recovery_reachable_blobs(repo_root: &Path, scope: Option<&str>) -> BTreeSet<String> {
+    let prefix = scope.map_or_else(
+        || "refs/manifold/recovery/".to_owned(),
+        |ws| format!("refs/manifold/recovery/{ws}/"),
+    );
     // Names of every recovery ref, then their reachable blobs.
     let Ok(refs) = all_ref_names(repo_root) else {
         return BTreeSet::new();
     };
     let mut blobs = BTreeSet::new();
-    for r in refs
-        .iter()
-        .filter(|r| r.starts_with("refs/manifold/recovery/"))
-    {
+    for r in refs.iter().filter(|r| r.starts_with(&prefix)) {
         blobs.extend(blobs_of_ref(repo_root, r));
     }
     blobs
@@ -613,7 +621,7 @@ fn recovery_reachable_blobs(repo_root: &Path) -> BTreeSet<String> {
 
 /// Compute the git blob OID for `content` WITHOUT writing it (`git hash-object
 /// --stdin`), so we can test membership in a reachable set.
-fn hash_blob(repo_root: &Path, content: &str) -> Option<String> {
+pub(crate) fn hash_blob(repo_root: &Path, content: &str) -> Option<String> {
     use std::io::Write as _;
     use std::process::Stdio;
     let mut child = Command::new("git")
@@ -637,11 +645,15 @@ fn hash_blob(repo_root: &Path, content: &str) -> Option<String> {
 fn op_targets(op: &Op) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     match op {
+        // bn-22jy: `CorruptWorktreeStatMasked` belongs in this list — it
+        // deliberately mutates `ws`'s worktree, so a content change there is
+        // expected, not an orphaning side effect.
         Op::WsCreate { ws, .. }
         | Op::EditFiles { ws, .. }
         | Op::Commit { ws, .. }
         | Op::Sync { ws }
         | Op::Advance { ws }
+        | Op::CorruptWorktreeStatMasked { ws, .. }
         | Op::Destroy { ws, .. } => {
             set.insert(ws.0.clone());
         }

@@ -46,6 +46,15 @@
 //! | `Merge` (fail) | **all live workspaces dirty** — see the fault note below |
 //! | `Destroy` | forgotten |
 //! | `Commit` (fail) | no change — nothing was staged |
+//! | `CorruptWorktreeStatMasked` | **masked-stale** — see below (bn-22jy) |
+//!
+//! **Masked-stale note (bn-22jy).** [`Op::CorruptWorktreeStatMasked`] plants a
+//! divergence that git itself calls clean, so the workspace is neither "dirty"
+//! nor assertable. It is tracked in a separate set, excluded from the assertion
+//! while the divergence persists, and re-armed the moment the worktree is
+//! *observed* to equal its HEAD again. That last part is observed, never
+//! inferred from the plan: none of the ops that might clear a mask does so
+//! reliably (see [`CleanMaterialization::judge`]).
 //!
 //! **Fault note.** The faulted tier (`just sg1-production-tier-faults`) aborts
 //! `maw` mid-op via `MAW_FP=<name>=abort`, and the generator only attaches
@@ -183,9 +192,18 @@ pub struct CleanMaterialization {
     /// Workspaces the plan has deliberately dirtied (or whose state is unknown
     /// after a crashed op). Everything else must be clean.
     expected_dirty: BTreeSet<String>,
+    /// Workspaces carrying a deliberate **stat-cache-masked** divergence
+    /// (bn-22jy's [`Op::CorruptWorktreeStatMasked`]). Held separately from
+    /// `expected_dirty` because it clears on a *different* set of ops — see
+    /// [`CleanMaterialization::absorb`].
+    masked_stale: BTreeSet<String>,
     /// How many workspace-level clean assertions actually ran. The
     /// non-vacuity signal: a run where this stays 0 proved nothing.
     checks_run: u64,
+    /// bn-22jy: how many times a masked-stale workspace was observed clean
+    /// again and re-armed. Evidence that the corruption primitive's effect was
+    /// actually repaired by maw rather than merely stopped being looked at.
+    masked_resolutions: u64,
 }
 
 impl CleanMaterialization {
@@ -208,6 +226,20 @@ impl CleanMaterialization {
     #[must_use]
     pub const fn expected_dirty(&self) -> &BTreeSet<String> {
         &self.expected_dirty
+    }
+
+    /// Workspaces currently carrying a stat-cache-masked divergence
+    /// (test/diagnostic accessor, bn-22jy).
+    #[must_use]
+    pub const fn masked_stale(&self) -> &BTreeSet<String> {
+        &self.masked_stale
+    }
+
+    /// How many masked-stale workspaces were later observed clean at their own
+    /// HEAD again — i.e. maw really did re-materialize them (bn-22jy).
+    #[must_use]
+    pub const fn masked_resolutions(&self) -> u64 {
+        self.masked_resolutions
     }
 
     /// Fold `op` (which just executed, with outcome `succeeded`) into the
@@ -274,6 +306,15 @@ impl CleanMaterialization {
             }
             // Trunk-only / repo-level ops; `default` is never judged anyway.
             Op::OutOfMawCommit { .. } | Op::DirtyTrunkWrite { .. } | Op::Gc { .. } => {}
+            // bn-22jy: the workspace now (deliberately) disagrees with its own
+            // HEAD on a tracked path, and git says otherwise. Disarm the clean
+            // assertion until an op that rewrites the whole worktree clears it.
+            //
+            // Armed on the PLAN, not on the driver's success verdict, and
+            // deliberately so: this is the one place where being conservative
+            // costs only coverage, whereas being optimistic manufactures a
+            // false WorktreeDivergedFromHead on maw's most sensitive oracle.
+            Op::CorruptWorktreeStatMasked { ws, .. } => self.mark_masked_stale(&ws.0),
         }
     }
 
@@ -283,7 +324,25 @@ impl CleanMaterialization {
         }
     }
 
+    fn mark_masked_stale(&mut self, ws: &str) {
+        if ws != DEFAULT_WS {
+            self.masked_stale.insert(ws.to_owned());
+        }
+    }
+
     /// Judge every live, non-default workspace that is not expected-dirty.
+    ///
+    /// bn-22jy: a masked-stale workspace is not asserted on, but it IS still
+    /// inspected — and the moment its worktree is observed to equal its HEAD
+    /// again the mask is cleared and normal assertions resume. Deriving that
+    /// from observed reality rather than from the plan is the only sound
+    /// option: none of the ops that could clear a mask does so reliably.
+    /// A successful `Commit` does not (`git add -A` trusts the very stat cache
+    /// the primitive forged, so the stale bytes are never staged); a successful
+    /// `Sync`/`Advance` does not (an already-current workspace exits 0 with
+    /// "up to date" without touching the worktree); a `Destroy` may have been
+    /// refused. Every one of those guesses produced a real false positive in a
+    /// 16x24 corruption run before this was rewritten to observe instead.
     fn judge(
         &mut self,
         root: &Path,
@@ -292,25 +351,45 @@ impl CleanMaterialization {
     ) -> Vec<WorktreeViolation> {
         let flavor = LayoutFlavor::detect_with_env(root);
         let mut violations = Vec::new();
+        let mut unmasked: Vec<String> = Vec::new();
         for ws in live {
             if ws == DEFAULT_WS || self.expected_dirty.contains(ws) {
                 continue;
             }
+            let masked = self.masked_stale.contains(ws);
             let ws_path: PathBuf = flavor.workspace_path(root, ws);
-            self.checks_run += 1;
+            if !masked {
+                self.checks_run += 1;
+            }
             match tracked_status_lines(&ws_path) {
-                Ok(lines) if lines.is_empty() => {}
-                Ok(lines) => violations.push(WorktreeViolation::WorktreeDivergedFromHead {
-                    workspace: ws.clone(),
-                    after_op,
-                    status_lines: lines,
-                }),
+                Ok(lines) if lines.is_empty() => {
+                    if masked {
+                        // The divergence is gone: some op re-materialized the
+                        // worktree. Resume asserting on this workspace.
+                        unmasked.push(ws.clone());
+                        self.masked_resolutions += 1;
+                    }
+                }
+                // A masked workspace is EXPECTED to differ; that is the whole
+                // point of the primitive, not a maw defect.
+                Ok(lines) => {
+                    if !masked {
+                        violations.push(WorktreeViolation::WorktreeDivergedFromHead {
+                            workspace: ws.clone(),
+                            after_op,
+                            status_lines: lines,
+                        });
+                    }
+                }
                 Err((command, stderr)) => violations.push(WorktreeViolation::GitError {
                     workspace: ws.clone(),
                     command,
                     stderr,
                 }),
             }
+        }
+        for ws in unmasked {
+            self.masked_stale.remove(&ws);
         }
         violations
     }
@@ -417,6 +496,253 @@ const fn op_label(op: &Op) -> &'static str {
         Op::OutOfMawCommit { .. } => "out-of-maw-commit",
         Op::DirtyTrunkWrite { .. } => "dirty-trunk-write",
         Op::Gc { .. } => "gc",
+        Op::CorruptWorktreeStatMasked { .. } => "corrupt-worktree-stat-masked",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MaskedStalePreservation (bn-22jy / bn-154g)
+// ---------------------------------------------------------------------------
+
+/// A violation of the preserve-before-overwrite contract (bn-154g).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaskedStaleViolation {
+    /// **bn-154g** — maw overwrote a stat-cache-masked stale file and the
+    /// pre-overwrite bytes are recoverable from nowhere.
+    MaskedBytesDestroyedWithoutPin {
+        /// Workspace whose worktree held the doomed bytes.
+        workspace: String,
+        /// Tracked path that was poisoned and then overwritten.
+        path: String,
+        /// The op that ran immediately before the bytes disappeared.
+        after_op: &'static str,
+        /// Blob OID of the destroyed bytes, for forensics.
+        blob: String,
+    },
+}
+
+impl fmt::Display for MaskedStaleViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MaskedBytesDestroyedWithoutPin {
+                workspace,
+                path,
+                after_op,
+                blob,
+            } => write!(
+                f,
+                "MaskedStalePreservation (bn-154g): '{after_op}' overwrote the \
+                 stat-cache-masked bytes at '{workspace}/{path}' (blob {blob}) and they are \
+                 reachable from no refs/manifold/recovery/{workspace}/* ref — maw destroyed \
+                 content it never made recoverable"
+            ),
+        }
+    }
+}
+
+/// One workspace path this oracle is watching.
+#[derive(Debug, Clone)]
+struct MaskedEntry {
+    workspace: String,
+    path: String,
+    /// The stale bytes the driver actually wrote (already confirmed masked).
+    stale: String,
+    /// Set once the bytes leave the working tree, so a single overwrite is
+    /// judged exactly once and later ops cannot re-report it.
+    settled: bool,
+}
+
+/// **Preserve-before-overwrite oracle** for the bn-154g class (bn-22jy).
+///
+/// # The invariant
+///
+/// When maw overwrites a tracked file whose working-tree bytes it believes are
+/// clean but which actually disagree with HEAD, it must first PIN those bytes
+/// somewhere recoverable. The Prime Invariant is unconditional: maw never
+/// destroys bytes it has not first made recoverable, *even bytes it believes
+/// are wrong*.
+///
+/// The production guard is
+/// `maw_cli::workspace::materialize_verify::preserve_divergence_before_overwrite`,
+/// called immediately before the fast-forward `checkout_detach` in
+/// `sync::checks::sync_worktree_to_epoch_inner`. Its observable is a
+/// `refs/manifold/recovery/<ws>/materialize-<ts>` ref whose tree carries the
+/// pre-overwrite bytes verbatim (plus a loud stderr WARNING and a
+/// `preserved-before-overwrite` JSON artifact, which the e2e test
+/// `tests/sync_ff_hidden_divergence_bn_154g.rs` asserts on directly).
+///
+/// Note that `sync_worktree_to_epoch_inner` serves BOTH the `maw ws sync`
+/// command and — via `sync_worktree_to_epoch_quiet` — the post-merge sibling
+/// auto-rebase, so the same guard covers both. In practice the DST reaches it
+/// far more often through the auto-rebase: a merge fast-forwards every clean
+/// sibling itself, so by the time a `Sync` op runs the workspace is usually
+/// already current and the command exits 0 without touching the worktree.
+///
+/// This oracle asserts the byte-level half of that observable — the half that
+/// generalises to every op the DST can schedule, not just the one the e2e test
+/// drives.
+///
+/// # Why the existing oracles are blind to it
+///
+/// * [`CleanMaterialization`] judges "worktree == HEAD". After the sync's
+///   checkout that is *true* — the checkout is the repair. A silently destroyed
+///   pre-overwrite snapshot is invisible to it, which is exactly how the bug
+///   reached black-box validation (`/tmp/maw-validate/t9`: right outcome, no
+///   WARNING, no artifact, no pin).
+/// * [`crate::oracle_a`] judges blob reachability for **committed** content.
+///   These bytes were never committed anywhere, so they are outside its witness
+///   set by construction.
+/// * [`crate::oracle_escape::TrunkDirtyPreservation`] is the same shape but for
+///   the *default* workspace's visibly-dirty bytes. This oracle is its
+///   counterpart for a non-default workspace's *invisibly* stale bytes.
+///
+/// # Scope: overwrite of a LIVE workspace, not removal of the workspace
+///
+/// Only paths the driver has actually poisoned and confirmed masked are
+/// watched, via [`MaskedStalePreservation::record_masked`]. The oracle is
+/// otherwise inert — a run that never enables `corrupt_weight` pays one
+/// `is_empty()` check per step.
+///
+/// A watched path is judged only while its **workspace directory still
+/// exists**. If the whole workspace is gone (`maw ws destroy`, `ws merge
+/// --destroy`), the bytes went with it and the governing contract is the
+/// *destroy* recovery-snapshot contract, not bn-154g's preserve-before-
+/// overwrite: the user asked for the workspace to be removed, and what must be
+/// snapshotted is judged by the destroy gate
+/// ([`crate::oracle::check_g4_destructive_gate`]) and the destroy-record
+/// oracles. Those entries are dropped and counted in
+/// [`MaskedStalePreservation::destroyed_unjudged`] rather than silently
+/// ignored.
+///
+/// This distinction is not cosmetic — it is where a DST run *does* find
+/// something. maw's destroy snapshot is built from the workspace's git state,
+/// so a stat-cache-masked file is invisible to it exactly as it was to the sync
+/// checkout before bn-154g. Whether destroy should pin such bytes is a real
+/// question, but it is a different site with a different contract, and folding
+/// it in here would turn one oracle into a permanently-red conflation of two.
+///
+/// # Profile neutrality (bn-2bcx rule)
+///
+/// Read-only: it generates no ops, changes no weights and never mutates the
+/// repo.
+#[derive(Debug, Default)]
+pub struct MaskedStalePreservation {
+    entries: Vec<MaskedEntry>,
+    /// How many "these bytes left the disk" judgements actually ran — the
+    /// non-vacuity signal. A run with 0 proved nothing about bn-154g.
+    overwrites_judged: u64,
+    /// Watched paths dropped because their whole workspace was removed. Counted
+    /// so the scope carve-out is visible in the run report instead of being an
+    /// invisible source of vacuity (see the type-level docs).
+    destroyed_unjudged: u64,
+}
+
+impl MaskedStalePreservation {
+    /// A fresh oracle watching nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `stale` bytes were successfully planted (and confirmed
+    /// masked) at `workspace/path`.
+    ///
+    /// The driver — not the plan — supplies these, because the corruption op
+    /// carries only a *hint* and the driver resolves the real victim against
+    /// the repo. Recording the resolved truth is what keeps the oracle from
+    /// judging a path that was never poisoned.
+    pub fn record_masked(&mut self, workspace: &str, path: &str, stale: &str) {
+        // A repeat poisoning of the same path supersedes the previous bytes.
+        self.entries
+            .retain(|e| !(e.workspace == workspace && e.path == path));
+        self.entries.push(MaskedEntry {
+            workspace: workspace.to_owned(),
+            path: path.to_owned(),
+            stale: stale.to_owned(),
+            settled: false,
+        });
+    }
+
+    /// Number of overwrite judgements performed. Harnesses should assert this
+    /// is `> 0` when the corruption op is enabled: a green run in which no
+    /// masked file was ever overwritten never reached the bn-154g guard.
+    #[must_use]
+    pub const fn overwrites_judged(&self) -> u64 {
+        self.overwrites_judged
+    }
+
+    /// Watched paths dropped unjudged because their workspace was removed —
+    /// the visible size of this oracle's scope carve-out (see type docs).
+    #[must_use]
+    pub const fn destroyed_unjudged(&self) -> u64 {
+        self.destroyed_unjudged
+    }
+
+    /// Number of paths still being watched (still holding their stale bytes).
+    #[must_use]
+    pub fn watching(&self) -> usize {
+        self.entries.iter().filter(|e| !e.settled).count()
+    }
+
+    /// Judge every watched path after the op labelled by `op`.
+    ///
+    /// A path whose stale bytes are still on disk is not yet interesting. Once
+    /// they are gone — overwritten by a checkout, or taken away with the whole
+    /// workspace — the bytes MUST be reachable from that workspace's own
+    /// `refs/manifold/recovery/<ws>/` namespace.
+    pub fn check_step(&mut self, root: &Path, op: &Op) -> Vec<MaskedStaleViolation> {
+        if self.entries.iter().all(|e| e.settled) {
+            return Vec::new();
+        }
+        let after_op = op_label(op);
+        let flavor = LayoutFlavor::detect_with_env(root);
+        let mut violations = Vec::new();
+        // Cache the per-workspace recovery blob sets: several entries usually
+        // share a workspace and `rev-list` is the expensive part.
+        let mut recovery_cache: std::collections::BTreeMap<String, BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+
+        for entry in &mut self.entries {
+            if entry.settled {
+                continue;
+            }
+            let ws_dir = flavor.workspace_path(root, &entry.workspace);
+            if !ws_dir.is_dir() {
+                // The whole workspace is gone: out of scope (see type docs).
+                entry.settled = true;
+                self.destroyed_unjudged += 1;
+                continue;
+            }
+            let on_disk = std::fs::read_to_string(ws_dir.join(&entry.path)).ok();
+            if on_disk.as_deref() == Some(entry.stale.as_str()) {
+                // Still poisoned; nothing has been destroyed yet.
+                continue;
+            }
+            // The bytes are gone. This is the judgement bn-154g is about.
+            entry.settled = true;
+            self.overwrites_judged += 1;
+            let blobs = recovery_cache
+                .entry(entry.workspace.clone())
+                .or_insert_with(|| {
+                    crate::oracle_escape::recovery_reachable_blobs(root, Some(&entry.workspace))
+                });
+            let Some(blob) = crate::oracle_escape::hash_blob(root, &entry.stale) else {
+                // `git hash-object` failed: we cannot decide, and inventing a
+                // violation from broken plumbing would be worse than silence
+                // (the GitError arm of CleanMaterialization already fires loudly
+                // on a broken git in the same loop).
+                continue;
+            };
+            if !blobs.contains(&blob) {
+                violations.push(MaskedStaleViolation::MaskedBytesDestroyedWithoutPin {
+                    workspace: entry.workspace.clone(),
+                    path: entry.path.clone(),
+                    after_op,
+                    blob,
+                });
+            }
+        }
+        violations
     }
 }
 
@@ -605,6 +931,233 @@ mod tests {
             &live(&[DEFAULT_WS]),
         );
         assert!(o.expected_dirty().is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // bn-22jy: masked-stale bookkeeping + MaskedStalePreservation
+    // -------------------------------------------------------------------
+
+    fn corrupt(name: &str) -> Op {
+        Op::CorruptWorktreeStatMasked {
+            ws: ws(name),
+            path: Some("a.txt".to_owned()),
+            nonce: 7,
+        }
+    }
+
+    /// A masked workspace is excluded from the clean assertion — otherwise the
+    /// primitive would make maw's own oracle red on the corruption IT injected.
+    #[test]
+    fn corruption_op_masks_the_workspace() {
+        let mut o = CleanMaterialization::new();
+        o.absorb(&corrupt("alice"), true, &live(&["alice"]));
+        assert!(o.masked_stale().contains("alice"));
+        // Not the same thing as "dirty": the two sets clear on different ops.
+        assert!(!o.expected_dirty().contains("alice"));
+    }
+
+    /// The mask is NOT cleared by any plan-level guess — not even a successful
+    /// sync, which exits 0 with "up to date" when the workspace is already
+    /// current and never touches the worktree. Only observing a clean worktree
+    /// clears it (exercised end-to-end by `judge`).
+    #[test]
+    fn no_op_clears_the_mask_from_the_plan_alone() {
+        let l = live(&["alice"]);
+        for (op, ok) in [
+            (
+                Op::Commit {
+                    ws: ws("alice"),
+                    msg: Seeded("m".into()),
+                },
+                true,
+            ),
+            (Op::Sync { ws: ws("alice") }, true),
+            (Op::Advance { ws: ws("alice") }, true),
+            (
+                Op::Destroy {
+                    ws: ws("alice"),
+                    force: true,
+                },
+                true,
+            ),
+            (create("alice"), true),
+        ] {
+            let mut o = CleanMaterialization::new();
+            o.absorb(&corrupt("alice"), true, &l);
+            o.absorb(&op, ok, &l);
+            assert!(
+                o.masked_stale().contains("alice"),
+                "{op:?} must not clear the mask from the plan alone"
+            );
+        }
+    }
+
+    /// Build a throwaway repo with one workspace holding `content` at `a.txt`.
+    /// Returns `(tempdir, root, ws_path)`.
+    fn masked_repo(content: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().to_path_buf();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@e.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "init"]);
+
+        let ws_path = LayoutFlavor::detect_with_env(&root).workspace_path(&root, "alice");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        std::fs::write(ws_path.join("a.txt"), content).unwrap();
+        (td, root, ws_path)
+    }
+
+    /// Pin `content` under `refs/manifold/recovery/<ws>/materialize-test`,
+    /// exactly as `preserve_divergence_before_overwrite` does.
+    fn pin_recovery(root: &Path, ws_name: &str, content: &str) {
+        let git = |args: &[&str], stdin: Option<&str>| -> String {
+            use std::io::Write as _;
+            let mut c = Command::new("git");
+            c.current_dir(root).args(args);
+            if stdin.is_some() {
+                c.stdin(std::process::Stdio::piped());
+            }
+            c.stdout(std::process::Stdio::piped());
+            let mut child = c.spawn().unwrap();
+            if let Some(data) = stdin {
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(data.as_bytes())
+                    .unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let blob = git(&["hash-object", "-w", "--stdin"], Some(content));
+        let index = root.join(".git").join("pin-index");
+        let idx = index.to_str().unwrap().to_owned();
+        let run_idx = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(root)
+                .env("GIT_INDEX_FILE", &idx)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        run_idx(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},a.txt"),
+        ]);
+        let tree = run_idx(&["write-tree"]);
+        let _ = std::fs::remove_file(&index);
+        let commit = git(&["commit-tree", &tree, "-m", "pin"], None);
+        git(
+            &[
+                "update-ref",
+                &format!("refs/manifold/recovery/{ws_name}/materialize-test"),
+                &commit,
+            ],
+            None,
+        );
+    }
+
+    const MASKED_STALE: &str = "STALE masked bytes\n";
+    const REPAIRED: &str = "repaired from HEAD\n";
+
+    /// bn-154g RED: the masked bytes are overwritten and nothing pinned them.
+    #[test]
+    fn masked_bytes_destroyed_without_pin_trips() {
+        let (_td, root, ws_path) = masked_repo(MASKED_STALE);
+        let mut o = MaskedStalePreservation::new();
+        o.record_masked("alice", "a.txt", MASKED_STALE);
+
+        let op = Op::Sync { ws: ws("alice") };
+        assert!(
+            o.check_step(&root, &op).is_empty(),
+            "bytes still on disk: nothing has been destroyed yet"
+        );
+        assert_eq!(o.overwrites_judged(), 0);
+
+        std::fs::write(ws_path.join("a.txt"), REPAIRED).unwrap();
+        let v = o.check_step(&root, &op);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(matches!(
+            &v[0],
+            MaskedStaleViolation::MaskedBytesDestroyedWithoutPin { workspace, path, .. }
+                if workspace == "alice" && path == "a.txt"
+        ));
+        assert_eq!(o.overwrites_judged(), 1);
+        // Judged exactly once, so a long plan cannot re-report one overwrite.
+        assert!(o.check_step(&root, &op).is_empty());
+    }
+
+    /// bn-154g GREEN: same overwrite, but the bytes were pinned first.
+    #[test]
+    fn masked_bytes_pinned_before_overwrite_is_green() {
+        let (_td, root, ws_path) = masked_repo(MASKED_STALE);
+        let mut o = MaskedStalePreservation::new();
+        o.record_masked("alice", "a.txt", MASKED_STALE);
+
+        pin_recovery(&root, "alice", MASKED_STALE);
+        std::fs::write(ws_path.join("a.txt"), REPAIRED).unwrap();
+
+        let v = o.check_step(&root, &Op::Sync { ws: ws("alice") });
+        assert!(v.is_empty(), "pinned bytes must read as preserved: {v:?}");
+        assert_eq!(o.overwrites_judged(), 1);
+    }
+
+    /// A pin in ANOTHER workspace's recovery namespace does not count: bn-154g
+    /// pins under the workspace it is about to overwrite.
+    #[test]
+    fn pin_in_another_workspaces_namespace_does_not_rescue() {
+        let (_td, root, ws_path) = masked_repo(MASKED_STALE);
+        let mut o = MaskedStalePreservation::new();
+        o.record_masked("alice", "a.txt", MASKED_STALE);
+
+        pin_recovery(&root, "bob", MASKED_STALE);
+        std::fs::write(ws_path.join("a.txt"), REPAIRED).unwrap();
+
+        assert_eq!(o.check_step(&root, &Op::Sync { ws: ws("alice") }).len(), 1);
+    }
+
+    /// Removing the whole workspace is out of scope (destroy's own contract),
+    /// and the carve-out is counted rather than silently swallowed.
+    #[test]
+    fn destroyed_workspace_is_dropped_unjudged() {
+        let (_td, root, ws_path) = masked_repo(MASKED_STALE);
+        let mut o = MaskedStalePreservation::new();
+        o.record_masked("alice", "a.txt", MASKED_STALE);
+
+        std::fs::remove_dir_all(&ws_path).unwrap();
+        let v = o.check_step(
+            &root,
+            &Op::Destroy {
+                ws: ws("alice"),
+                force: true,
+            },
+        );
+        assert!(v.is_empty(), "{v:?}");
+        assert_eq!(o.destroyed_unjudged(), 1);
+        assert_eq!(o.overwrites_judged(), 0);
+        assert_eq!(o.watching(), 0);
     }
 
     /// End-to-end plumbing sanity for the verifier's own git usage: clean →

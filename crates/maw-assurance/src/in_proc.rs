@@ -473,7 +473,17 @@ impl InProcDriver {
             // The in-proc model has no real default worktree, so an uncommitted
             // trunk edit has no ref-shape effect to model — the driver that can
             // exercise it is the production tier.
-            Op::DirtyTrunkWrite { .. } => Ok(()),
+            //
+            // bn-22jy: the corruption primitive lands in the same bucket — the
+            // in-proc model's "workspaces" are plain directories, not real git
+            // worktrees with an index, so there is no stat cache to mask and no
+            // `maw ws sync` checkout to arm. Its load-bearing coverage is the
+            // production-code DST tier (`tests/dst_production_tier.rs`), which
+            // drives the REAL maw binary where bn-154g's
+            // preserve-before-overwrite guard actually lives. Only generated
+            // when a profile sets corrupt_weight > 0; the in-proc soak profile
+            // keeps it 0, so this arm is inert for the bn-2yzz campaign.
+            Op::DirtyTrunkWrite { .. } | Op::CorruptWorktreeStatMasked { .. } => Ok(()),
             Op::Gc {
                 recovery_snapshots,
                 older_than_days,

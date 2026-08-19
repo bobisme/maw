@@ -365,6 +365,56 @@ pub enum Op {
         /// the whole recover queue (the most hostile setting for bn-3uou).
         older_than_days: u64,
     },
+    /// Poison one tracked file in `ws` with **stale bytes of the same length**
+    /// and then mask the index stat cache so every status-shaped query — `git
+    /// status`, `git diff HEAD`, gix's `status_head_to_worktree` — reports the
+    /// workspace CLEAN (bn-22jy).
+    ///
+    /// # Why the DST needs this primitive
+    ///
+    /// This is the on-disk signature of the bn-p3m9 field report, and it is the
+    /// **arming condition** for two production guards that no other generator
+    /// op can reach:
+    ///
+    /// * bn-154g — `maw ws sync`'s fast-forward `checkout_detach` overwrites
+    ///   the whole worktree, so it must PIN the divergent bytes to a
+    ///   `refs/manifold/recovery/<ws>/materialize-*` ref **before** the
+    ///   checkout; afterwards the evidence is gone.
+    /// * bn-3gba — `verify_clean_materialization`'s post-hoc
+    ///   detect → pin → repair path.
+    ///
+    /// Both refuse to run on a *visibly* dirty workspace, so an ordinary
+    /// [`Op::EditFiles`] can never arm them: the sync is simply refused. Only a
+    /// divergence git itself calls clean gets past the front door — which is
+    /// precisely what this op manufactures.
+    ///
+    /// # Determinism
+    ///
+    /// The stale bytes are derived from `nonce` and stretched to the victim
+    /// file's exact length by the driver, so the plan stays a pure function of
+    /// the seed while the payload adapts to whatever the file contains.
+    ///
+    /// Gated on `corrupt_weight > 0` (see
+    /// [`ConditionProfile::with_corrupt_weight`]); the default soak profile
+    /// keeps it 0, so the default-profile seed→plan byte stream (the bn-2yzz
+    /// campaign) is unchanged — pinned by
+    /// [`DEFAULT_PROFILE_OP_STREAM_DIGEST`].
+    CorruptWorktreeStatMasked {
+        /// Workspace whose worktree is poisoned. Never the default workspace:
+        /// trunk's dirty-byte lifecycle is [`Op::DirtyTrunkWrite`]'s territory.
+        ws: WsId,
+        /// Preferred tracked path to poison, when the abstract model knows one
+        /// this workspace has committed. `None` ⇒ "driver picks", which it does
+        /// deterministically (the first path in `HEAD` that is a non-empty
+        /// regular file currently equal to its HEAD blob). The hint is advisory
+        /// for the same reason [`Op::EditFiles`] may target a workspace whose
+        /// create failed: the abstract model is not a replica of the repo.
+        path: Option<String>,
+        /// Seed-derived nonce selecting the stale byte pattern. The driver
+        /// stretches it to the victim's exact length so `(size, mtime)` — the
+        /// whole of `core.checkStat = minimal` — still matches the index entry.
+        nonce: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +459,23 @@ pub struct ConditionProfile {
     /// stays within budget; the soak profile turns it up.
     #[serde(default)]
     pub escape_weight: u32,
+    /// Selection weight for the **stat-cache-masked worktree corruption** op
+    /// (bn-22jy): [`Op::CorruptWorktreeStatMasked`]. **0 by default**, which
+    /// keeps it out of the chooser entirely so the default-profile seed→plan
+    /// byte stream (the bn-2yzz in-proc campaign) is unchanged — pinned by
+    /// [`DEFAULT_PROFILE_OP_STREAM_DIGEST`]. Set `> 0` (via
+    /// [`with_corrupt_weight`](Self::with_corrupt_weight)) on drivers that want
+    /// to arm the preserve-before-overwrite pin (bn-154g) and the
+    /// materialization repair path (bn-3gba).
+    ///
+    /// Deliberately a knob **separate** from `escape_weight`: the bn-2bcx
+    /// escape ops are pure "unusual but legal user behaviour", while this one
+    /// injects a corruption no user action can produce. Keeping them separate
+    /// means the escape-path soak budget can be raised without also raising the
+    /// corruption rate (which suppresses `CleanMaterialization` coverage on the
+    /// poisoned workspace — see `oracle_worktree`'s masked-stale carveout).
+    #[serde(default)]
+    pub corrupt_weight: u32,
 }
 
 impl ConditionProfile {
@@ -429,6 +496,7 @@ impl ConditionProfile {
             stale_workspace_rate: stale_workspace_rate.clamp(0.0, 1.0),
             advance_weight: 0,
             escape_weight: 0,
+            corrupt_weight: 0,
         }
     }
 
@@ -448,6 +516,16 @@ impl ConditionProfile {
     #[must_use]
     pub const fn with_escape_weight(mut self, w: u32) -> Self {
         self.escape_weight = w;
+        self
+    }
+
+    /// Return a copy of this profile with the stat-cache-masked corruption op
+    /// weight (bn-22jy: [`Op::CorruptWorktreeStatMasked`]) set to `w`. `w = 0`
+    /// leaves the chooser's op set — and therefore the seed→plan byte stream —
+    /// identical to a profile without the corruption op.
+    #[must_use]
+    pub const fn with_corrupt_weight(mut self, w: u32) -> Self {
+        self.corrupt_weight = w;
         self
     }
 }
@@ -672,6 +750,16 @@ pub const BN_1XMK_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0002;
 /// auto-rebase — conflict-as-data must not read as an orphan). See
 /// [`BN_RAH2_REGRESSION_SEED`].
 pub const BN_286G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0003;
+
+/// Sentinel seed tagging the [`bn_154g_regression_plan`] (stat-cache-masked
+/// worktree corruption absorbed by a `ws sync` fast-forward). See
+/// [`BN_RAH2_REGRESSION_SEED`].
+pub const BN_154G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0004;
+
+/// Tracked path the [`bn_154g_regression_plan`] poisons. Seeded into every
+/// production-tier repo by `TestRepo::seed_files`, so it is tracked in every
+/// workspace's HEAD from the moment the workspace exists.
+pub const BN_154G_VICTIM_PATH: &str = "base.txt";
 
 /// Build a `PlannedStep` with a monotonic seed-independent clock derived from
 /// the step index (regression plans are hand-built, so the clock is a simple
@@ -944,6 +1032,102 @@ pub fn bn_286g_regression_plan() -> ScenarioPlan {
     }
 }
 
+/// The **bn-154g** shape as a named, deterministic regression plan: a
+/// stat-cache-masked worktree corruption that a `maw ws sync` fast-forward is
+/// about to flatten.
+///
+/// `ws-victim` is created, poisoned behind an index stat-cache mask, and then
+/// left behind by an epoch bump. Because the mask makes it look CLEAN to every
+/// query maw makes, the epoch bump's sibling auto-rebase treats it as an
+/// ordinary stale-but-clean workspace and fast-forwards it — through
+/// `sync::checks::sync_worktree_to_epoch_quiet`, i.e. the very
+/// `sync_worktree_to_epoch_inner` the `maw ws sync` command uses. Its
+/// `checkout_detach` materializes every entry of the target tree with
+/// `overwrite_existing = true`, so the poisoned bytes are destroyed by design.
+///
+/// The op order is load-bearing: **corrupt BEFORE the epoch bump.** Corrupting
+/// afterwards proves nothing, because the merge's auto-rebase has already
+/// brought the sibling to the new epoch and the trailing `maw ws sync` then
+/// reports "up to date" without touching the worktree at all.
+///
+/// bn-154g's fix is `preserve_divergence_before_overwrite`: detect the hidden
+/// divergence, PIN the doomed bytes to
+/// `refs/manifold/recovery/<ws>/materialize-*`, warn, and only then let the
+/// caller's checkout perform the repair. `MaskedStalePreservation`
+/// (`maw_assurance::oracle_worktree`) asserts exactly that observable — once
+/// the stale bytes leave the disk they MUST be reachable from that workspace's
+/// own recovery namespace. Reverting the bn-154g guard turns it RED.
+///
+/// Steps:
+/// 0. create `ws-victim`, from main (tracks the seeded `base.txt`)
+/// 1. create `ws-a`, from main
+/// 2. edit a `ws-a`-private file
+/// 3. commit `ws-a`
+/// 4. poison `ws-victim`'s `base.txt` behind a stat-cache mask
+/// 5. merge `ws-a` into default → epoch bump; the sibling auto-rebase
+///    fast-forwards `ws-victim` straight over the poisoned bytes
+/// 6. sync `ws-victim` → the front-door command, asserting the same guard is
+///    reachable from the CLI and that the workspace really did land clean
+#[must_use]
+pub fn bn_154g_regression_plan() -> ScenarioPlan {
+    let victim = WsId("ws-victim".to_owned());
+    let ws_a = WsId("ws-a".to_owned());
+    let steps = vec![
+        regression_step(
+            0,
+            Op::WsCreate {
+                ws: victim.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            1,
+            Op::WsCreate {
+                ws: ws_a.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            2,
+            Op::EditFiles {
+                ws: ws_a.clone(),
+                files: vec![edit("ws-a/work.txt", "ws-a work that bumps the epoch\n")],
+            },
+        ),
+        regression_step(
+            3,
+            Op::Commit {
+                ws: ws_a.clone(),
+                msg: Seeded("ws-a: work (bn-154g)".to_owned()),
+            },
+        ),
+        regression_step(
+            4,
+            Op::CorruptWorktreeStatMasked {
+                ws: victim.clone(),
+                path: Some(BN_154G_VICTIM_PATH.to_owned()),
+                // Fixed nonce: the plan is hand-built and driven verbatim, so
+                // the stale payload must not depend on a generator draw.
+                nonce: 0x0154_0000_0000_0154,
+            },
+        ),
+        regression_step(
+            5,
+            Op::Merge {
+                srcs: vec![ws_a],
+                into: Target::Default,
+                destroy: false,
+            },
+        ),
+        regression_step(6, Op::Sync { ws: victim }),
+    ];
+    ScenarioPlan {
+        seed: BN_154G_REGRESSION_SEED,
+        profile: ConditionProfile::default().with_corrupt_weight(1),
+        steps,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Abstract model — minimum state to keep ops valid + reach hostile interleavings
 // ---------------------------------------------------------------------------
@@ -968,6 +1152,14 @@ struct WsState {
     /// `true` while this workspace is a source of an in-flight Merge. Used
     /// to *deliberately* schedule the bn-cm63 concurrent-destroy class.
     in_flight_merge_source: bool,
+    /// Paths written by `EditFiles` since the last `Commit` (bn-22jy). Moved
+    /// into `committed_paths` when a `Commit` fires.
+    pending_paths: BTreeSet<String>,
+    /// Paths this workspace has committed at least once (bn-22jy). Used ONLY
+    /// to give [`Op::CorruptWorktreeStatMasked`] a plausible victim hint; the
+    /// driver validates the hint against the real HEAD tree and falls back if
+    /// it does not hold, so a stale entry here can never invalidate a plan.
+    committed_paths: BTreeSet<String>,
 }
 
 /// The whole abstract model. Uses `BTreeMap` / `BTreeSet` throughout — the
@@ -1005,6 +1197,8 @@ impl AbstractModel {
                 has_uncommitted: false,
                 is_stale: false,
                 in_flight_merge_source: false,
+                pending_paths: BTreeSet::new(),
+                committed_paths: BTreeSet::new(),
             },
         );
     }
@@ -1085,6 +1279,9 @@ enum OpKind {
     /// Run `maw gc` (optionally the recovery-snapshot sweep; bn-3uou). Gated
     /// on `profile.escape_weight > 0`; never ranked otherwise.
     Gc,
+    /// Poison a tracked file behind an index stat-cache mask (bn-22jy). Gated
+    /// on `profile.corrupt_weight > 0`; never ranked otherwise.
+    CorruptWorktreeStatMasked,
     /// Special: emit a destroy of a live merge source (bn-cm63 class).
     DestroyLiveMergeSource,
 }
@@ -1133,6 +1330,13 @@ fn choose_op(rng: &mut StdRng, model: &mut AbstractModel, profile: &ConditionPro
         kinds.push((OpKind::DirtyTrunkWrite, profile.escape_weight));
         kinds.push((OpKind::Gc, profile.escape_weight));
     }
+    // bn-22jy: the stat-cache-masked corruption op is appended ONLY when
+    // `corrupt_weight > 0`. Same rule as `Advance` / the escape ops — at weight
+    // 0 the slice, the `weighted_choice` draw and the whole seed→plan byte
+    // stream are unchanged (pinned by `DEFAULT_PROFILE_OP_STREAM_DIGEST`).
+    if profile.corrupt_weight > 0 {
+        kinds.push((OpKind::CorruptWorktreeStatMasked, profile.corrupt_weight));
+    }
     let mut desired = weighted_choice(rng, &kinds);
 
     // Validity narrowing: if the desired op isn't legal right now, fall back
@@ -1166,17 +1370,19 @@ const fn next_kind_fallback(k: OpKind) -> OpKind {
         OpKind::Commit => OpKind::Sync,
         OpKind::Sync => OpKind::Destroy,
         OpKind::Destroy => OpKind::Recover,
-        // `Advance` and the bn-2bcx escape ops share `Recover`'s fallback
-        // target (WsCreate). They are spurs INTO the cycle, not part of it: no
-        // existing kind falls back to them, so the historical 8-kind fallback
-        // chains are byte-identical. They are reachable only when directly
-        // desired (`advance_weight` / `escape_weight > 0`); from there they
-        // join the normal cycle at WsCreate.
+        // `Advance`, the bn-2bcx escape ops and the bn-22jy corruption op share
+        // `Recover`'s fallback target (WsCreate). They are spurs INTO the
+        // cycle, not part of it: no existing kind falls back to them, so the
+        // historical 8-kind fallback chains are byte-identical. They are
+        // reachable only when directly desired (`advance_weight` /
+        // `escape_weight` / `corrupt_weight > 0`); from there they join the
+        // normal cycle at WsCreate.
         OpKind::Recover
         | OpKind::Advance
         | OpKind::OutOfMawCommit
         | OpKind::DirtyTrunkWrite
-        | OpKind::Gc => OpKind::WsCreate,
+        | OpKind::Gc
+        | OpKind::CorruptWorktreeStatMasked => OpKind::WsCreate,
         OpKind::WsCreate => OpKind::EditFiles,
         OpKind::EditFiles => OpKind::DestroyLiveMergeSource,
     }
@@ -1348,6 +1554,33 @@ fn try_emit(
                 older_than_days,
             })
         }
+        OpKind::CorruptWorktreeStatMasked => {
+            // Only a workspace the model believes is status-CLEAN can be
+            // poisoned: the mask recipe rebuilds the index from HEAD and then
+            // asserts `git status --porcelain` is empty, which a genuinely
+            // dirty workspace would fail. (The driver re-checks against the
+            // real repo and no-ops if the model was optimistic.)
+            let candidates: Vec<WsId> = model
+                .workspaces
+                .iter()
+                .filter(|(_, s)| !s.has_uncommitted)
+                .map(|(k, _)| k.clone())
+                .collect();
+            let ws = pick_from(rng, &candidates)?;
+            // Victim hint: a path this workspace has committed, when we know
+            // one. BTreeSet iteration is ordered, so the Vec is byte-stable.
+            let known: Vec<String> = model
+                .workspaces
+                .get(&ws)
+                .map(|s| s.committed_paths.iter().cloned().collect())
+                .unwrap_or_default();
+            let path = pick_from(rng, &known);
+            Some(Op::CorruptWorktreeStatMasked {
+                ws,
+                path,
+                nonce: rng.random(),
+            })
+        }
         OpKind::Recover => {
             let candidates: Vec<WsId> = model.destroyed.iter().cloned().collect();
             let src = pick_from(rng, &candidates)?;
@@ -1382,15 +1615,19 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
             model.alloc_slot();
             model.create_ws(ws.clone(), false);
         }
-        Op::EditFiles { ws, .. } => {
+        Op::EditFiles { ws, files } => {
             if let Some(st) = model.workspaces.get_mut(ws) {
                 st.has_uncommitted = true;
+                for f in files {
+                    st.pending_paths.insert(f.path.clone());
+                }
             }
         }
         Op::Commit { ws, .. } => {
             if let Some(st) = model.workspaces.get_mut(ws) {
                 st.has_uncommitted = false;
                 st.has_commit = true;
+                st.committed_paths.append(&mut st.pending_paths);
             }
         }
         Op::Merge { srcs, destroy, .. } => {
@@ -1441,6 +1678,19 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
         // materialises their real effect (trunk drift / dirty bytes / gc sweep)
         // and the new oracles judge it.
         Op::OutOfMawCommit { .. } | Op::DirtyTrunkWrite { .. } | Op::Gc { .. } => {}
+        // bn-22jy: the corruption is INVISIBLE to git by construction — that is
+        // the entire point of the stat-cache mask — so it must NOT set
+        // `has_uncommitted`. Leaving the model's view "clean" is what keeps
+        // `Op::Sync` emittable for the poisoned workspace, and the sync is the
+        // production site (bn-154g preserve-before-overwrite) this op exists to
+        // arm. A model that "knew" about the corruption would gate away the
+        // very interleaving under test.
+        Op::CorruptWorktreeStatMasked { ws, .. } => {
+            // Explicitly a no-op on `ws`, spelled out rather than folded into
+            // the trunk-op arm above: the reasons differ, and a future reader
+            // must not "tidy" this into "the corruption dirties the workspace".
+            debug_assert!(!ws.0.is_empty(), "corruption op must name a workspace");
+        }
     }
 }
 
@@ -2044,7 +2294,7 @@ mod tests {
     /// Replays `plan` through the same abstract model used by the generator
     /// and asserts every op's preconditions hold. This is the "no nonsense
     /// sequences" acceptance criterion (bn-1f53).
-    fn validate_plan_against_model(plan: &ScenarioPlan, seed: u64) {
+    pub fn validate_plan_against_model(plan: &ScenarioPlan, seed: u64) {
         let mut model = AbstractModel::default();
         for step in &plan.steps {
             // Settle an in-flight merge with the same probability the chooser
@@ -2136,6 +2386,18 @@ mod tests {
                 );
             }
             Op::Gc { .. } => { /* always valid */ }
+            Op::CorruptWorktreeStatMasked { ws, .. } => {
+                let st = model.workspaces.get(ws).unwrap_or_else(|| {
+                    panic!(
+                        "seed {seed} step {index}: CorruptWorktreeStatMasked on nonexistent {ws:?}"
+                    )
+                });
+                assert!(
+                    !st.has_uncommitted,
+                    "seed {seed} step {index}: CorruptWorktreeStatMasked on dirty {ws:?} \
+                     (the stat mask can only be established on a status-clean workspace)",
+                );
+            }
         }
     }
 
@@ -2154,5 +2416,281 @@ mod tests {
             apply_to_model(&mut model, &step.op);
         }
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bn-22jy: pinned default-profile op-stream digest
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64-bit over `bytes`. Deliberately hand-rolled: the pinned
+/// default-profile digest below must be stable **forever**, so it may not
+/// depend on `std::collections::hash_map::DefaultHasher` (whose algorithm is
+/// explicitly unspecified across Rust releases) nor on an external crate whose
+/// version could change under us. FNV-1a is fully specified by these four
+/// lines, so the constant means the same thing in ten years.
+#[must_use]
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x1000_0193);
+    }
+    h
+}
+
+/// Digest of the **op stream** (not the profile) produced by
+/// [`ConditionProfile::default`] over a fixed seed/step sweep.
+///
+/// This is the artifact the "default profile stays byte-identical" rule
+/// (bn-2bcx, restated by bn-22jy) is actually about: the sequence of ops a seed
+/// expands into. The `ConditionProfile` struct itself gains a `#[serde(default)]`
+/// field whenever a new gated op class is added — that changes the *profile*
+/// JSON but MUST NOT change a single op, fault or `git_time` in the stream.
+/// Hashing `plan.steps` (and not `plan.profile`) is what makes the distinction
+/// testable instead of aspirational.
+///
+/// # Panics
+///
+/// If a generated plan fails to serialize, which would itself be a defect in
+/// the plan types.
+#[must_use]
+pub fn default_profile_op_stream_digest() -> u64 {
+    op_stream_digest(&ConditionProfile::default())
+}
+
+/// [`default_profile_op_stream_digest`] for an arbitrary profile: FNV-1a over
+/// the JSON of `plan.steps` for seeds `0..256` at 128 steps each.
+///
+/// # Panics
+///
+/// If a generated plan fails to serialize, which would itself be a defect in
+/// the plan types.
+#[must_use]
+pub fn op_stream_digest(profile: &ConditionProfile) -> u64 {
+    let mut acc: Vec<u8> = Vec::new();
+    for seed in 0..256_u64 {
+        let plan = generate_plan(seed, profile, 128);
+        acc.extend_from_slice(
+            serde_json::to_string(&plan.steps)
+                .expect("plan steps serialize")
+                .as_bytes(),
+        );
+        acc.push(b'\n');
+    }
+    fnv1a64(&acc)
+}
+
+/// Op-stream digest of the profile the **production-code DST tier** runs
+/// (`advance_weight = 8`, `escape_weight = 3`), captured at trunk `4537c51e`.
+///
+/// Pinned alongside [`DEFAULT_PROFILE_OP_STREAM_DIGEST`] because that tier —
+/// not the bare default — is what CI actually executes, so it is the stream a
+/// regression would silently perturb.
+pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x7353_896e_acca_2728;
+
+/// Op-stream digest with BOTH pre-bn-22jy gated knobs turned up
+/// (`advance_weight = 8`, `escape_weight = 8`), captured at trunk `4537c51e`.
+/// Guards the soak-shaped corner of the knob space as well as CI's.
+pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0xceff_ff94_f36b_dfd6;
+
+/// The digest [`default_profile_op_stream_digest`] produced at trunk
+/// `4537c51e` — the last commit **before** bn-22jy added the
+/// `CorruptWorktreeStatMasked` op and the `corrupt_weight` knob.
+///
+/// Pinned so that any future change to the generator which perturbs the
+/// DEFAULT profile's op stream fails loudly instead of silently invalidating
+/// the bn-2yzz in-proc soak campaign (whose accrued evidence is only valid for
+/// the seed→plan stream it actually ran). Gated ops must stay gated.
+///
+/// If you are here because this test went red: you changed the default op
+/// stream. That is allowed only as a deliberate campaign reset — not as a side
+/// effect of adding an opt-in op.
+pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x61c7_8834_e645_f514;
+
+#[cfg(test)]
+mod bn_22jy_tests {
+    use super::{
+        BN_154G_REGRESSION_SEED, BN_154G_VICTIM_PATH, ConditionProfile,
+        DEFAULT_PROFILE_OP_STREAM_DIGEST, ESCAPE_HEAVY_OP_STREAM_DIGEST, Op,
+        PRODUCTION_TIER_OP_STREAM_DIGEST, Target, bn_154g_regression_plan,
+        default_profile_op_stream_digest, generate_plan, op_stream_digest,
+    };
+
+    /// **The byte-identical proof.** The DEFAULT profile's op stream is
+    /// unchanged by bn-22jy (and by every future gated op).
+    ///
+    /// This hashes `plan.steps` — the ops, faults and `git_time`s — across
+    /// 256 seeds x 128 steps, deliberately EXCLUDING `plan.profile`: adding a
+    /// `#[serde(default)]` weight field does change the profile's JSON (that is
+    /// unavoidable and harmless, since the corpus loader defaults it), but it
+    /// must not move a single op. The constant was captured at trunk 4537c51e,
+    /// before the `CorruptWorktreeStatMasked` op existed.
+    #[test]
+    fn default_profile_op_stream_digest_is_pinned() {
+        assert_eq!(
+            default_profile_op_stream_digest(),
+            DEFAULT_PROFILE_OP_STREAM_DIGEST,
+            "the DEFAULT profile's seed->plan op stream changed. The bn-2yzz \
+             in-proc soak campaign's accrued evidence is only valid for the \
+             stream it actually ran, so a new op MUST be gated behind a \
+             weight that defaults to 0 (see with_corrupt_weight / \
+             with_escape_weight / with_advance_weight). Re-pin this constant \
+             ONLY as a deliberate campaign reset."
+        );
+    }
+
+    /// The same pin for the two profiles that actually run in CI and in soak
+    /// campaigns. `corrupt_weight` defaults to 0, so turning the OTHER gated
+    /// knobs up must still reproduce the pre-bn-22jy stream exactly.
+    #[test]
+    fn gated_profiles_op_stream_digests_are_pinned() {
+        let prod = ConditionProfile::default()
+            .with_advance_weight(8)
+            .with_escape_weight(3);
+        assert_eq!(
+            op_stream_digest(&prod),
+            PRODUCTION_TIER_OP_STREAM_DIGEST,
+            "the production-code DST tier's seed->plan op stream changed"
+        );
+        let heavy = ConditionProfile::default()
+            .with_advance_weight(8)
+            .with_escape_weight(8);
+        assert_eq!(
+            op_stream_digest(&heavy),
+            ESCAPE_HEAVY_OP_STREAM_DIGEST,
+            "the escape-heavy profile's seed->plan op stream changed"
+        );
+        // ...and the new knob is not a no-op: turning it on MUST change the
+        // stream, or the primitive is never generated and every other
+        // assertion here is vacuous.
+        assert_ne!(
+            op_stream_digest(&prod.with_corrupt_weight(10)),
+            PRODUCTION_TIER_OP_STREAM_DIGEST,
+            "corrupt_weight > 0 did not change the op stream"
+        );
+    }
+
+    /// The corruption op is invisible at `corrupt_weight = 0` — including under
+    /// profiles that turn every OTHER gated op on, which is the combination a
+    /// soak driver actually uses.
+    #[test]
+    fn default_profile_never_emits_corruption_op() {
+        let profiles = [
+            ConditionProfile::default(),
+            ConditionProfile::default()
+                .with_advance_weight(8)
+                .with_escape_weight(8),
+            ConditionProfile::new(8, 1.0, 1.0, 1.0),
+        ];
+        for profile in &profiles {
+            assert_eq!(
+                profile.corrupt_weight, 0,
+                "default corrupt_weight must be 0"
+            );
+            for seed in 0..200_u64 {
+                for step in generate_plan(seed, profile, 128).steps {
+                    assert!(
+                        !matches!(step.op, Op::CorruptWorktreeStatMasked { .. }),
+                        "a corrupt_weight=0 profile emitted the corruption op at seed {seed}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Enabling `corrupt_weight` surfaces the op, keeps every plan model-valid,
+    /// and only ever targets a workspace the model believes is status-clean.
+    #[test]
+    fn corrupt_weight_emits_valid_corruption_ops() {
+        let profile = ConditionProfile::default()
+            .with_advance_weight(8)
+            .with_escape_weight(3)
+            .with_corrupt_weight(8);
+        let mut saw = 0_u32;
+        let mut saw_hinted = false;
+        for seed in 0..200_u64 {
+            let plan = generate_plan(seed, &profile, 128);
+            super::tests::validate_plan_against_model(&plan, seed);
+            for step in &plan.steps {
+                if let Op::CorruptWorktreeStatMasked { path, .. } = &step.op {
+                    saw += 1;
+                    saw_hinted |= path.is_some();
+                }
+            }
+        }
+        assert!(
+            saw > 0,
+            "no CorruptWorktreeStatMasked op emitted across 0..200"
+        );
+        assert!(
+            saw_hinted,
+            "the generator never produced a victim-path hint, so the abstract \
+             model's committed-path tracking is dead code"
+        );
+    }
+
+    /// Corruption-enabled plans stay byte-identical per `(seed, profile)`.
+    #[test]
+    fn corrupt_plan_is_byte_identical_for_same_seed() {
+        let profile = ConditionProfile::default().with_corrupt_weight(8);
+        for seed in [0_u64, 1, 42, 99, u64::MAX] {
+            let a = generate_plan(seed, &profile, 96);
+            let b = generate_plan(seed, &profile, 96);
+            assert_eq!(
+                a.canonical_json().expect("ser a"),
+                b.canonical_json().expect("ser b"),
+                "corrupt-profile seed {seed} replay diverged",
+            );
+        }
+    }
+
+    /// The bn-154g regression plan has the load-bearing shape: a stale, clean
+    /// victim workspace, poisoned, then synced.
+    #[test]
+    fn bn_154g_regression_plan_has_expected_shape() {
+        let plan = bn_154g_regression_plan();
+        assert_eq!(plan.seed, BN_154G_REGRESSION_SEED);
+        let ops: Vec<&Op> = plan.steps.iter().map(|s| &s.op).collect();
+        // A merge the victim does not take part in — that is what makes it stale.
+        let merge_idx = ops
+            .iter()
+            .position(|o| {
+                matches!(
+                    o,
+                    Op::Merge {
+                        into: Target::Default,
+                        ..
+                    }
+                )
+            })
+            .expect("plan must contain the epoch-bumping merge");
+        let corrupt_idx = ops
+            .iter()
+            .position(|o| {
+                matches!(
+                    o,
+                    Op::CorruptWorktreeStatMasked { ws, path: Some(p), .. }
+                        if ws.0 == "ws-victim" && p == BN_154G_VICTIM_PATH
+                )
+            })
+            .expect("plan must poison ws-victim's tracked base.txt");
+        let sync_idx = ops
+            .iter()
+            .position(|o| matches!(o, Op::Sync { ws } if ws.0 == "ws-victim"))
+            .expect("plan must sync ws-victim");
+        assert!(
+            corrupt_idx < merge_idx && merge_idx < sync_idx,
+            "order must be corrupt (masked) -> merge (epoch bump, auto-rebase \
+             overwrites) -> sync (front door): {corrupt_idx} / {merge_idx} / {sync_idx}"
+        );
+        assert!(
+            ops.iter().any(|o| matches!(
+                o,
+                Op::Merge { srcs, .. } if srcs.iter().all(|s| s.0 != "ws-victim")
+            )),
+            "the victim must NOT be a merge source, or it would not go stale"
+        );
+        super::tests::validate_plan_against_model(&plan, plan.seed);
     }
 }

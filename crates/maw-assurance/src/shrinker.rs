@@ -344,11 +344,15 @@ impl ShrinkerCorpusEntry {
         let mut create_candidate = false;
         for step in &report.minimal.steps {
             match &step.op {
+                // bn-22jy: `CorruptWorktreeStatMasked` names the workspace it
+                // poisons, so it contributes that name like every other
+                // workspace-scoped op.
                 crate::scenario::Op::WsCreate { ws, .. }
                 | crate::scenario::Op::EditFiles { ws, .. }
                 | crate::scenario::Op::Commit { ws, .. }
                 | crate::scenario::Op::Sync { ws }
                 | crate::scenario::Op::Advance { ws }
+                | crate::scenario::Op::CorruptWorktreeStatMasked { ws, .. }
                 | crate::scenario::Op::Destroy { ws, .. } => {
                     workspaces.insert(ws.0.clone());
                 }
