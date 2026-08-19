@@ -150,16 +150,28 @@ fn ff_absorb_refreshes_paths_a_doubly_stale_sibling_missed() {
     );
 }
 
-/// A local edit on a path that is stale against the absorbed epoch must be
-/// preserved, not clobbered, and the merge must say so.
+/// bn-mq3b / bn-2fto: a dirty sibling whose uncommitted edit lands on a path
+/// that is STALE against the absorbed epoch must be left fully stale — HEAD is
+/// NOT advanced. The pre-fix code advanced the sibling's HEAD to the absorbed
+/// tip while skipping the dirty path's materialization, so the worktree held
+/// the old, agent-edited blob behind a HEAD that claimed the new epoch. The
+/// sibling's next commit then silently REVERTED the epoch's hunks in that path
+/// (data loss that only surfaced at review time).
+///
+/// The safe behavior: leave the sibling exactly where it is (like auto-rebase's
+/// `SkippedDirty`), warn, and let a later `maw ws sync` do a real 3-way rebase.
 #[test]
-fn ff_absorb_preserves_local_edits_on_doubly_stale_paths_and_warns() {
+fn ff_absorb_leaves_stale_dirty_sibling_untouched_no_silent_revert() {
     let td = tempfile::tempdir().expect("tempdir");
     let root = td.path();
     setup(root);
 
     maw(root, &["ws", "create", "victim", "--from", "main"]);
     maw(root, &["ws", "create", "src", "--from", "main"]);
+
+    // Epoch A is the sibling's base. Capture it to prove HEAD never moves.
+    let victim = root.join(".maw/workspaces/victim");
+    let victim_head_a = git(&victim, &["rev-parse", "HEAD"]);
 
     std::fs::write(root.join("f1.txt"), "f1-at-B\n").expect("write f1");
     git_quiet(root, &["add", "-A"]);
@@ -171,8 +183,8 @@ fn ff_absorb_preserves_local_edits_on_doubly_stale_paths_and_warns() {
     git_quiet(root, &["commit", "-m", "C: trunk direct, touches f2"]);
 
     // The sibling has an uncommitted edit on f1.txt — the very path that is
-    // stale against the absorbed epoch.
-    let victim = root.join(".maw/workspaces/victim");
+    // stale against the absorbed epoch (it changed A..B, outside the B..C
+    // `ff_paths` range).
     std::fs::write(victim.join("f1.txt"), "f1-EDITED-BY-AGENT\n").expect("edit victim f1");
 
     let src_path = root.join(".maw/workspaces/src");
@@ -196,13 +208,60 @@ fn ff_absorb_preserves_local_edits_on_doubly_stale_paths_and_warns() {
         ],
     );
 
+    // The uncommitted edit is preserved verbatim.
     let f1 = std::fs::read_to_string(victim.join("f1.txt")).expect("read victim f1");
     assert_eq!(
         f1, "f1-EDITED-BY-AGENT\n",
         "FF-absorb must never clobber an uncommitted local edit"
     );
+    // The merge names the stale sibling it declined to fast-forward.
     assert!(
-        out.contains("were NOT refreshed"),
-        "merge must warn about the stale-but-edited path; got:\n{out}"
+        out.contains("left stale (NOT fast-forwarded)"),
+        "merge must warn that the stale-but-edited sibling was left stale; got:\n{out}"
+    );
+    // The core invariant: HEAD did NOT move. Advancing it is what makes the
+    // next commit silently revert the epoch's hunks.
+    let victim_head_after = git(&victim, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        victim_head_after, victim_head_a,
+        "a stale dirty sibling's HEAD must stay at its base epoch — advancing it \
+         strands the old blob and the next commit reverts the epoch's hunks"
+    );
+
+    // Prove the absence of silent data loss end-to-end: the agent commits, and
+    // the resulting commit must contain ONLY the agent's own change (f1: A ->
+    // EDITED). If HEAD had been advanced to the tip, this diff would instead
+    // DELETE the absorbed hunks (f1-at-B, f2-at-C) — the bn-2fto symptom.
+    maw(root, &["exec", "victim", "--", "git", "add", "-A"]);
+    // `maw exec` auto-sync refuses to advance a dirty stale worktree, so the
+    // commit lands on the sibling's own base epoch.
+    let _ = Command::new(MAW)
+        .current_dir(root)
+        .args([
+            "exec",
+            "victim",
+            "--",
+            "git",
+            "commit",
+            "-m",
+            "agent commit",
+        ])
+        .output()
+        .expect("run maw exec git commit");
+    let parent = git(&victim, &["rev-parse", "HEAD^"]);
+    assert_eq!(
+        parent, victim_head_a,
+        "agent commit must parent on the sibling's base epoch, not the absorbed tip"
+    );
+    let show = git(&victim, &["show", "--stat", "HEAD"]);
+    assert!(
+        !show.contains("f2.txt"),
+        "agent commit must not touch f2.txt (an absorbed-range path it never \
+         edited) — a reference to it means the epoch's hunks were reverted:\n{show}"
+    );
+    let committed_f1 = git(&victim, &["show", "HEAD:f1.txt"]);
+    assert_eq!(
+        committed_f1, "f1-EDITED-BY-AGENT",
+        "agent commit must carry the agent's own f1 edit"
     );
 }

@@ -3685,6 +3685,12 @@ fn reconcile_epoch_with_branch(
             enum SiblingPlan {
                 FastForward { dirty: bool },
                 Replay { base_epoch: String },
+                // bn-mq3b: a dirty sibling whose uncommitted paths also changed
+                // between its HEAD and the absorb target. Advancing its HEAD
+                // would strand the stale worker content behind a HEAD that
+                // claims the new epoch — the next commit then silently reverts
+                // the epoch's hunks. Leave it stale (no ref/HEAD move) and warn.
+                SkipStaleDirty { stale_paths: Vec<PathBuf> },
             }
             #[allow(clippy::items_after_statements)]
             struct SiblingClass {
@@ -3742,10 +3748,32 @@ fn reconcile_epoch_with_branch(
                     // HEAD at base epoch (or unreadable — fall back to the
                     // non-destructive FF path, which preserves the worktree).
                     _ => {
+                        // bn-mq3b: a dirty FF sibling is safe to advance ONLY
+                        // when none of its uncommitted paths changed between its
+                        // HEAD and the absorb target. `ff_paths` (the global
+                        // epoch..branch diff) is too narrow to prove this: a
+                        // sibling more than one epoch behind can be dirty in a
+                        // path that changed in an EARLIER epoch — inside its own
+                        // HEAD..target diff but outside `ff_paths`. Check the
+                        // sibling's own stale set here; on overlap, leave it
+                        // stale instead of stranding the content behind a moved
+                        // HEAD.
+                        let stale_dirty = if dirty {
+                            ff_dirty_stale_conflict(&ws_path, &ws.name, branch_oid)
+                        } else {
+                            Vec::new()
+                        };
+                        let plan = if stale_dirty.is_empty() {
+                            SiblingPlan::FastForward { dirty }
+                        } else {
+                            SiblingPlan::SkipStaleDirty {
+                                stale_paths: stale_dirty,
+                            }
+                        };
                         classes.push(SiblingClass {
                             name: ws.name.clone(),
                             ws_path,
-                            plan: SiblingPlan::FastForward { dirty },
+                            plan,
                         });
                     }
                 }
@@ -3870,6 +3898,30 @@ fn reconcile_epoch_with_branch(
             // cannot clobber local edits; the HEAD move now goes through the
             // guarded `set_head` primitive (bn-8flz invariant).
             for c in &classes {
+                // bn-mq3b: a dirty sibling whose uncommitted edits are stale
+                // against the absorbed tip is left EXACTLY where it is — no
+                // epoch-ref move, no HEAD move, no materialization. It stays
+                // stale relative to the new global epoch (like auto-rebase's
+                // SkippedDirty), so the standard dirty guards protect it and a
+                // later `maw ws sync` performs a real 3-way rebase. Advancing
+                // it here would silently drop the epoch's hunks in those paths.
+                if let SiblingPlan::SkipStaleDirty { stale_paths } = &c.plan {
+                    notes.push(format!(
+                        "  {}: left stale (NOT fast-forwarded) \u{2014} {} uncommitted path(s) \
+                         also changed in the absorbed epoch(s): {} \u{2014} \
+                         commit or stash them, then run: maw ws sync {}",
+                        c.name,
+                        stale_paths.len(),
+                        stale_paths
+                            .iter()
+                            .take(5)
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        c.name
+                    ));
+                    continue;
+                }
                 if let SiblingPlan::FastForward { dirty } = c.plan {
                     let epoch_ref = maw_core::refs::workspace_epoch_ref(&c.name);
                     if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
@@ -4260,6 +4312,39 @@ fn sync_ff_paths_in_worktree(
     };
     let _ = ws_repo_post.unstage_all();
     report
+}
+
+/// bn-mq3b: the uncommitted paths in `ws_path` that ALSO changed between the
+/// workspace's own `HEAD` and the absorb target `branch_oid`.
+///
+/// A non-empty result means a fast-forward of this dirty sibling is UNSAFE:
+/// advancing HEAD to `branch_oid` would strand the stale worker content behind
+/// a HEAD that claims the new epoch, and the sibling's next commit would then
+/// silently revert the epoch's hunks in those paths (the bn-2fto data-loss
+/// class). The caller must leave such a sibling stale instead.
+///
+/// Fails CLOSED: when the stale set cannot be computed (unreadable HEAD/tree),
+/// every dirty path is returned so the caller never advances a dirty worktree
+/// it cannot prove safe. An empty result means the FF is provably safe — the
+/// dirty paths are disjoint from everything the absorb changes.
+fn ff_dirty_stale_conflict(ws_path: &Path, ws_name: &str, branch_oid: &GitOid) -> Vec<PathBuf> {
+    let dirty = dirty_paths_in_workspace(ws_path);
+    if dirty.is_empty() {
+        return Vec::new();
+    }
+    let all_dirty = || dirty.iter().cloned().collect::<Vec<_>>();
+    let Ok(ws_repo) = maw_git::GixRepo::open(ws_path) else {
+        return all_dirty();
+    };
+    let Ok(target_git) = branch_oid.as_str().parse::<maw_git::GitOid>() else {
+        return all_dirty();
+    };
+    // `None` means the stale set could not be computed — fail closed by
+    // returning every dirty path so the caller never advances a dirty worktree
+    // it cannot prove safe.
+    ff_own_stale_paths(&ws_repo, ws_name, target_git).map_or_else(all_dirty, |stale| {
+        stale.into_iter().filter(|p| dirty.contains(p)).collect()
+    })
 }
 
 /// bn-p3m9: paths whose blob differs between the workspace's own `HEAD` tree
