@@ -244,6 +244,17 @@ fn short_oid(oid: &str) -> &str {
     &oid[..12.min(oid.len())]
 }
 
+/// Returns true when `err` is a ref-update CAS conflict.
+///
+/// Classifies by the typed [`maw_git::GitError::RefConflict`] variant rather
+/// than substring-matching the error's `Display` text (bn-2gbv, follow-up to
+/// bn-36id). `create_or_verify_tag`'s retry path exists specifically for the
+/// create-only CAS failure (tag ref already exists), which is exactly what
+/// `RefConflict` represents.
+const fn is_ref_cas_conflict(err: &maw_git::GitError) -> bool {
+    matches!(err, maw_git::GitError::RefConflict { .. })
+}
+
 fn create_or_verify_tag(root: &std::path::Path, tag: &str, release_oid: &str) -> Result<()> {
     if let Some(existing_oid) = resolve_tag_target_oid(root, tag)? {
         if existing_oid == release_oid {
@@ -291,11 +302,7 @@ fn create_or_verify_tag(root: &std::path::Path, tag: &str, release_oid: &str) ->
         Ok(()) => Ok(()),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("conflict")
-                || msg.contains("exists")
-                || msg.contains("expected")
-                || msg.contains("MustNotExist")
-            {
+            if is_ref_cas_conflict(&e) {
                 // Race: another process just wrote the tag. Re-check.
                 let existing_oid = resolve_tag_target_oid(root, tag)?.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -341,7 +348,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{create_or_verify_tag, resolve_tag_target_oid};
+    use super::{create_or_verify_tag, is_ref_cas_conflict, resolve_tag_target_oid};
 
     fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -412,5 +419,39 @@ mod tests {
                 .as_deref(),
             Some(first.as_str())
         );
+    }
+
+    // -- is_ref_cas_conflict: typed classification (bn-2gbv) --
+
+    #[test]
+    fn is_ref_cas_conflict_true_for_ref_conflict_variant() {
+        let err = maw_git::GitError::RefConflict {
+            ref_name: "refs/tags/v1.0.0".to_string(),
+            message: "was not supposed to exist".to_string(),
+        };
+        assert!(is_ref_cas_conflict(&err));
+    }
+
+    #[test]
+    fn is_ref_cas_conflict_false_for_lookalike_backend_error() {
+        // A BackendError whose message happens to contain the words the old
+        // substring check looked for ("conflict", "exists", "expected",
+        // "MustNotExist") must NOT be classified as a ref CAS conflict —
+        // only the typed RefConflict variant should match.
+        let err = maw_git::GitError::BackendError {
+            message: "conflict: tag exists, expected MustNotExist semantics".to_string(),
+        };
+        assert!(!is_ref_cas_conflict(&err));
+    }
+
+    #[test]
+    fn is_ref_cas_conflict_false_for_unrelated_variants() {
+        assert!(!is_ref_cas_conflict(&maw_git::GitError::NotFound {
+            message: "conflict".to_string(),
+        }));
+        assert!(!is_ref_cas_conflict(&maw_git::GitError::PushFailed {
+            remote: "origin".to_string(),
+            message: "exists and expected MustNotExist".to_string(),
+        }));
     }
 }

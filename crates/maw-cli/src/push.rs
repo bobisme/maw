@@ -192,6 +192,18 @@ fn origin_remote_url(root: &Path) -> Result<Option<String>> {
     Ok(url.filter(|s| !s.trim().is_empty()))
 }
 
+/// Returns true when `err` is a ref-update CAS conflict.
+///
+/// Classifies by the typed [`maw_git::GitError::RefConflict`] variant rather
+/// than substring-matching the error's `Display` text (bn-2gbv, follow-up to
+/// bn-36id). Any other `GitError` — including lock contention, which
+/// `classify_edit_error` in `maw-git`'s `refs_impl.rs` deliberately keeps as
+/// `BackendError` since it is not a CAS precondition failure — is not a ref
+/// conflict.
+const fn is_ref_cas_conflict(err: &maw_git::GitError) -> bool {
+    matches!(err, maw_git::GitError::RefConflict { .. })
+}
+
 /// Move the local branch ref to the current epoch.
 ///
 /// In Manifold v2, `maw ws merge` updates both the epoch ref and the
@@ -317,7 +329,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
 
     if let Err(e) = repo.atomic_ref_update(&[edit]) {
         let msg = e.to_string();
-        if msg.contains("conflict") || msg.contains("lock") || msg.contains("expected") {
+        if is_ref_cas_conflict(&e) {
             bail!(
                 "Branch ref was modified concurrently (CAS failed).\n  \
                  Another process (likely a merge) updated {branch} between read and write.\n  \
@@ -597,7 +609,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::active_change_for_epoch;
+    use super::{active_change_for_epoch, is_ref_cas_conflict};
     use crate::changes::store::{
         ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
     };
@@ -711,5 +723,39 @@ mod tests {
         let detected =
             active_change_for_epoch(root, &main_head, "main").expect("operation should succeed");
         assert!(detected.is_none());
+    }
+
+    // -- is_ref_cas_conflict: typed classification (bn-2gbv) --
+
+    #[test]
+    fn is_ref_cas_conflict_true_for_ref_conflict_variant() {
+        let err = maw_git::GitError::RefConflict {
+            ref_name: "refs/heads/main".to_string(),
+            message: "expected old value did not match".to_string(),
+        };
+        assert!(is_ref_cas_conflict(&err));
+    }
+
+    #[test]
+    fn is_ref_cas_conflict_false_for_lookalike_backend_error() {
+        // A BackendError whose message happens to contain the words the old
+        // substring check looked for ("conflict", "lock", "expected") must
+        // NOT be classified as a ref CAS conflict — only the typed
+        // RefConflict variant should match.
+        let err = maw_git::GitError::BackendError {
+            message: "lock contention: conflict acquiring lock, expected clean state".to_string(),
+        };
+        assert!(!is_ref_cas_conflict(&err));
+    }
+
+    #[test]
+    fn is_ref_cas_conflict_false_for_unrelated_variants() {
+        assert!(!is_ref_cas_conflict(&maw_git::GitError::NotFound {
+            message: "conflict".to_string(),
+        }));
+        assert!(!is_ref_cas_conflict(&maw_git::GitError::DirtyWorktree {
+            path: std::path::PathBuf::from("/tmp/x"),
+            message: "conflict and lock and expected".to_string(),
+        }));
     }
 }
