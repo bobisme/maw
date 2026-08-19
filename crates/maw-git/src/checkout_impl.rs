@@ -1005,19 +1005,24 @@ mod tests {
     /// `checkout_detach` back from c2 to c1 removes the file added in c2.
     #[test]
     fn checkout_detach_removes_stale_tracked_files() {
-        let (_dir, root, wt, c1, c2) = setup_repo_with_linked_worktree();
+        let (_dir, _root, wt, c1, c2) = setup_repo_with_linked_worktree();
         // Move worktree forward to c2 first (so file2.txt is tracked and present).
-        git(
-            &root,
-            &[
-                "worktree",
-                "add",
-                "--force",
-                "--detach",
-                wt.to_str().unwrap(),
-                &c2,
-            ],
-        );
+        //
+        // NB: this must NOT be `git worktree add --force --detach wt c2` —
+        // `wt` already exists (populated by `setup_repo_with_linked_worktree`
+        // at c1), and `git worktree add`'s target-path check
+        // (`check_candidate_path` in builtin/worktree.c: `if (file_exists(path)
+        // && !is_empty_dir(path)) die(...)`) is unconditional on `--force` and
+        // has been since `--force` was introduced (verified back to git
+        // 2.17.0, still true in 2.55.0 per upstream source) — `--force` only
+        // ever covered "branch already checked out elsewhere" /
+        // "reuse a registered-but-missing worktree's admin dir", never "path
+        // exists as a non-empty directory". So this always died with `fatal:
+        // '<wt>' already exists`, on every git version. Advance the existing
+        // linked worktree in place instead, which is the correct operation
+        // for "move an already-checked-out worktree to another commit" and
+        // has stable semantics across git versions.
+        git(&wt, &["checkout", "--force", &c2]);
         let repo = GixRepo::open(&wt).expect("open");
         let oid_c1: GitOid = c1.parse().expect("parse");
         super::checkout_detach(&repo, oid_c1, &wt).expect("checkout_detach back to c1");
