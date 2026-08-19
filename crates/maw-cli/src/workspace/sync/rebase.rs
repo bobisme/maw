@@ -2596,11 +2596,15 @@ fn collect_blob_paths(
 ///
 /// Best-effort: any failure is logged as a warning and does NOT abort the
 /// rebase that already succeeded.
+///
+/// `pub`: bn-2fto — the merge FF-absorb fast-forward path advances a
+/// sibling's HEAD without going through the rebase engine, and it must record
+/// the same kind of entry so `maw ws history` shows that advance too.
 #[expect(
     clippy::too_many_arguments,
     reason = "oplog Rebase records require all these fields; a struct would be more ceremony than the single call-site justifies"
 )]
-fn record_rebase_op(
+pub fn record_rebase_op(
     root: &Path,
     ws_name: &str,
     ws_id: &WorkspaceId,

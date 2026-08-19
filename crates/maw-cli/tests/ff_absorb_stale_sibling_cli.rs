@@ -80,6 +80,118 @@ fn setup(dir: &Path) {
     }
 }
 
+/// bn-2fto: the sigil field report's EXACT shape, one epoch deep.
+///
+/// A workspace is created at epoch E0 and edits one hunk of `f1.txt` WITHOUT
+/// committing. A sibling commits a DIFFERENT hunk of the same file and the lead
+/// merges it, advancing the epoch to E1. The dirty workspace must not be
+/// advanced behind the agent's back: its HEAD stays at E0, its uncommitted edit
+/// survives byte-for-byte, and — the symptom that made this a data-loss bug —
+/// its next commit must NOT revert the sibling's hunk.
+///
+/// This shape never reaches FF-absorb (epoch == branch at merge time); it is
+/// handled by the post-merge sibling auto-rebase, which skips dirty siblings.
+/// The test pins that end-to-end behaviour so a future change to either path
+/// cannot reintroduce the field symptom.
+#[test]
+fn dirty_sibling_editing_the_merged_file_is_not_advanced_no_silent_revert() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    setup(root);
+    // A two-hunk file so the agent and the sibling can edit different regions.
+    std::fs::write(root.join("f1.txt"), "head: base\nmiddle\ntail: base\n").expect("write f1");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "f1: two hunks"]);
+    maw(root, &["epoch", "sync"]);
+
+    maw(root, &["ws", "create", "victim", "--from", "main"]);
+    maw(root, &["ws", "create", "src", "--from", "main"]);
+
+    let victim = root.join(".maw/workspaces/victim");
+    let victim_head_e0 = git(&victim, &["rev-parse", "HEAD"]);
+
+    // The agent edits the head hunk — uncommitted.
+    std::fs::write(
+        victim.join("f1.txt"),
+        "head: EDITED-BY-AGENT\nmiddle\ntail: base\n",
+    )
+    .expect("edit victim f1");
+
+    // The sibling commits the tail hunk of the SAME file and is merged.
+    let src_path = root.join(".maw/workspaces/src");
+    std::fs::write(
+        src_path.join("f1.txt"),
+        "head: base\nmiddle\ntail: FROM-SIBLING\n",
+    )
+    .expect("write src f1");
+    maw(root, &["exec", "src", "--", "git", "add", "-A"]);
+    maw(
+        root,
+        &["exec", "src", "--", "git", "commit", "-m", "src: tail hunk"],
+    );
+    let out = maw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "src",
+            "--into",
+            "default",
+            "--message",
+            "merge src",
+        ],
+    );
+    assert!(
+        out.contains("victim") && out.contains("skipped: dirty"),
+        "merge must report the dirty sibling as skipped; got:\n{out}"
+    );
+
+    // HEAD must not have moved: an advance here is what strands the stale
+    // worker bytes behind a HEAD claiming the new epoch.
+    assert_eq!(
+        git(&victim, &["rev-parse", "HEAD"]),
+        victim_head_e0,
+        "a dirty sibling's HEAD must stay at its base epoch across a sibling merge"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("f1.txt")).expect("read victim f1"),
+        "head: EDITED-BY-AGENT\nmiddle\ntail: base\n",
+        "the agent's uncommitted edit must survive verbatim"
+    );
+
+    // End-to-end symptom check: the agent commits and the resulting commit must
+    // carry ONLY its own hunk. Pre-fix, HEAD had advanced, so this diff deleted
+    // the sibling's `tail: FROM-SIBLING` line — a silent revert of merged work.
+    maw(root, &["exec", "victim", "--", "git", "add", "-A"]);
+    let _ = Command::new(MAW)
+        .current_dir(root)
+        .args([
+            "exec",
+            "victim",
+            "--",
+            "git",
+            "commit",
+            "-m",
+            "agent commit",
+        ])
+        .output()
+        .expect("run maw exec git commit");
+    assert_eq!(
+        git(&victim, &["rev-parse", "HEAD^"]),
+        victim_head_e0,
+        "agent commit must parent on the sibling's base epoch"
+    );
+    let diff = git(&victim, &["show", "HEAD", "--", "f1.txt"]);
+    assert!(
+        !diff.contains("-tail: FROM-SIBLING"),
+        "agent commit must not revert the merged sibling's hunk:\n{diff}"
+    );
+    assert!(
+        diff.contains("+head: EDITED-BY-AGENT"),
+        "agent commit must carry the agent's own hunk:\n{diff}"
+    );
+}
+
 /// Drive the exact continuum shape:
 ///   `ws_epoch` (A)  <  `pre_absorb_epoch` (B)  <  branch tip (C)
 /// and assert the FF-absorbed sibling's worktree matches its new HEAD.
@@ -147,6 +259,15 @@ fn ff_absorb_refreshes_paths_a_doubly_stale_sibling_missed() {
     assert!(
         status.is_empty(),
         "FF-absorbed sibling must be clean, got:\n{status}"
+    );
+
+    // bn-2fto (field-report Expected item 3): the FF-absorb moved this
+    // sibling's HEAD and epoch ref behind the agent's back. That advance must
+    // be visible in `maw ws history` — it used to leave no trace at all.
+    let history = maw(root, &["ws", "history", "victim"]);
+    assert!(
+        history.contains("[rebase]") && history.contains("absorb:ff("),
+        "FF-absorb advance must be recorded in ws history; got:\n{history}"
     );
 }
 
@@ -263,5 +384,14 @@ fn ff_absorb_leaves_stale_dirty_sibling_untouched_no_silent_revert() {
     assert_eq!(
         committed_f1, "f1-EDITED-BY-AGENT",
         "agent commit must carry the agent's own f1 edit"
+    );
+
+    // bn-2fto (field-report Expected item 3): a skipped sibling is as important
+    // to see as an advanced one — the agent needs to learn from its own history
+    // why its workspace stayed behind the epoch.
+    let history = maw(root, &["ws", "history", "victim"]);
+    assert!(
+        history.contains("ff-absorb-skipped") && history.contains("f1.txt"),
+        "FF-absorb skip must be recorded in ws history (naming the stale path); got:\n{history}"
     );
 }

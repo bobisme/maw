@@ -154,7 +154,14 @@ fn summarize(payload: &OpPayload) -> String {
         }
         OpPayload::Compensate { reason, .. } => reason.clone(),
         OpPayload::Describe { message } => truncate(message, 60),
-        OpPayload::Annotate { key, .. } => format!("annotate: {key}"),
+        // bn-2fto: mirror `workspace::history` — an annotation carrying a
+        // `summary` string renders it inline so the two surfaces never drift.
+        OpPayload::Annotate { key, data } => {
+            data.get("summary").and_then(|v| v.as_str()).map_or_else(
+                || format!("annotate: {key}"),
+                |detail| format!("annotate: {key} — {detail}"),
+            )
+        }
         OpPayload::RebaseReplay {
             original_commit, ..
         } => format!("replay {}", short(original_commit.as_str())),

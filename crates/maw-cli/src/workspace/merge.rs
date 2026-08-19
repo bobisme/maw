@@ -3697,6 +3697,12 @@ fn reconcile_epoch_with_branch(
                 name: String,
                 ws_path: PathBuf,
                 plan: SiblingPlan,
+                /// bn-2fto: the sibling's per-workspace base epoch BEFORE the
+                /// absorb, kept so the op-log entry can name the transition.
+                base_epoch: String,
+                /// bn-2fto: the sibling's HEAD before the absorb (falls back to
+                /// `base_epoch` when HEAD is unreadable).
+                head_before: String,
             }
 
             let mut classes: Vec<SiblingClass> = Vec::new();
@@ -3730,6 +3736,9 @@ fn reconcile_epoch_with_branch(
                     .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
                     .map(|h| h.to_string());
                 let dirty = !dirty_paths_in_workspace(&ws_path).is_empty();
+                // bn-2fto: remembered for the op-log entry this absorb writes
+                // (`maw ws history <ws>` must show the FF-absorb advance/skip).
+                let head_before = head.clone().unwrap_or_else(|| base_epoch.clone());
 
                 match head {
                     // Committed-ahead: HEAD advanced past the base epoch.
@@ -3741,6 +3750,8 @@ fn reconcile_epoch_with_branch(
                             classes.push(SiblingClass {
                                 name: ws.name.clone(),
                                 ws_path,
+                                head_before,
+                                base_epoch: base_epoch.clone(),
                                 plan: SiblingPlan::Replay { base_epoch },
                             });
                         }
@@ -3774,6 +3785,8 @@ fn reconcile_epoch_with_branch(
                             name: ws.name.clone(),
                             ws_path,
                             plan,
+                            base_epoch,
+                            head_before,
                         });
                     }
                 }
@@ -3920,6 +3933,17 @@ fn reconcile_epoch_with_branch(
                             .join(", "),
                         c.name
                     ));
+                    // bn-2fto: the skip is invisible in `maw ws history`
+                    // otherwise — the field report's third Expected item. Record
+                    // it so an agent can see WHY its workspace stayed behind.
+                    record_ff_absorb_skip_op(
+                        root,
+                        &c.name,
+                        &c.base_epoch,
+                        branch_oid,
+                        stale_paths,
+                        &trigger,
+                    );
                     continue;
                 }
                 if let SiblingPlan::FastForward { dirty } = c.plan {
@@ -3988,6 +4012,29 @@ fn reconcile_epoch_with_branch(
                                 .join(", "),
                             c.name
                         ));
+                    }
+                    // bn-2fto: an FF-absorb advance moves the sibling's HEAD and
+                    // epoch ref behind the agent's back. Until now nothing
+                    // recorded it, so `maw ws history <ws>` jumped straight from
+                    // `[create]` to whatever came next and the advance was
+                    // untraceable. Record it as a zero-replay rebase (exactly
+                    // what the `Rebase` payload documents for the fast-forward
+                    // path) with the `absorb:ff(..)` trigger the replay path
+                    // already uses.
+                    let head_after = maw_git::GixRepo::open(&c.ws_path)
+                        .ok()
+                        .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
+                        .map_or_else(|| branch_oid.as_str().to_owned(), |h| h.to_string());
+                    if head_after != c.head_before {
+                        record_ff_absorb_advance_op(
+                            root,
+                            &c.name,
+                            &c.base_epoch,
+                            branch_oid.as_str(),
+                            &c.head_before,
+                            &head_after,
+                            &trigger,
+                        );
                     }
                 }
             }
@@ -4345,6 +4392,128 @@ fn ff_dirty_stale_conflict(ws_path: &Path, ws_name: &str, branch_oid: &GitOid) -
     ff_own_stale_paths(&ws_repo, ws_name, target_git).map_or_else(all_dirty, |stale| {
         stale.into_iter().filter(|p| dirty.contains(p)).collect()
     })
+}
+
+/// bn-2fto: record an FF-absorb fast-forward of a sibling in its op log so
+/// `maw ws history <ws>` shows the advance.
+///
+/// The advance moves the sibling's epoch ref, HEAD and index while the agent is
+/// working in it. Nothing recorded it before, so history jumped from `[create]`
+/// straight to the agent's own later operations and the epoch transition was
+/// untraceable (field-report Expected item 3).
+///
+/// Reuses `OpPayload::Rebase` with zero replayed commits — the payload already
+/// documents that shape as "fast-forward path" — and the same `absorb:ff(..)`
+/// trigger string the FF-absorb *replay* path passes down to the rebase engine,
+/// so both halves of an absorb read identically in history.
+///
+/// Best-effort: a failure is logged and never aborts an absorb that already
+/// completed.
+fn record_ff_absorb_advance_op(
+    root: &Path,
+    ws_name: &str,
+    old_epoch: &str,
+    new_epoch: &str,
+    old_head: &str,
+    new_head: &str,
+    trigger: &str,
+) {
+    let Ok(ws_id) = WorkspaceId::new(ws_name) else {
+        return;
+    };
+    super::sync::rebase::record_rebase_op(
+        root, ws_name, &ws_id, old_epoch, new_epoch, old_head, new_head, 0, 0, trigger,
+    );
+}
+
+/// bn-2fto: record an FF-absorb sibling that was deliberately LEFT STALE
+/// (bn-mq3b's `SkipStaleDirty`) in its op log.
+///
+/// A skip is as important to see as an advance: the agent's workspace stayed
+/// behind the epoch on purpose, and `maw ws history <ws>` is where it should be
+/// able to find out why. `Annotate` (rather than a new `OpPayload` variant)
+/// keeps the oplog schema additive — an older maw reading a newer log still
+/// deserializes the entry, the same rationale
+/// [`super::materialize_verify`] uses for its repair records.
+///
+/// Best-effort: every failure is logged and none abort the absorb.
+fn record_ff_absorb_skip_op(
+    root: &Path,
+    ws_name: &str,
+    old_epoch: &str,
+    new_epoch: &GitOid,
+    stale_paths: &[PathBuf],
+    trigger: &str,
+) {
+    let Ok(ws_id) = WorkspaceId::new(ws_name) else {
+        return;
+    };
+    let previous_head = match read_head(root, &ws_id) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "FF absorb: oplog head unreadable; skip annotation not recorded"
+            );
+            return;
+        }
+    };
+
+    let sample: Vec<String> = stale_paths
+        .iter()
+        .take(5)
+        .map(|p| p.display().to_string())
+        .collect();
+
+    let mut data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    data.insert("bone".to_owned(), "bn-2fto".into());
+    data.insert("reason".to_owned(), "dirty-stale".into());
+    data.insert("old_epoch".to_owned(), old_epoch.into());
+    data.insert("new_epoch".to_owned(), new_epoch.as_str().into());
+    data.insert("trigger".to_owned(), trigger.into());
+    data.insert("stale_path_count".to_owned(), stale_paths.len().into());
+    data.insert(
+        "stale_paths".to_owned(),
+        serde_json::Value::from(
+            stale_paths
+                .iter()
+                .map(|p| serde_json::Value::from(p.display().to_string()))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    data.insert(
+        "summary".to_owned(),
+        format!(
+            "left stale at {} (not fast-forwarded to {}): {} uncommitted path(s) also changed in \
+             the absorbed epoch(s): {}",
+            &old_epoch[..old_epoch.len().min(8)],
+            &new_epoch.as_str()[..new_epoch.as_str().len().min(8)],
+            stale_paths.len(),
+            sample.join(", ")
+        )
+        .into(),
+    );
+
+    let op = Operation {
+        parent_ids: previous_head.iter().cloned().collect(),
+        workspace_id: ws_id.clone(),
+        timestamp: super::now_timestamp_iso8601(),
+        payload: OpPayload::Annotate {
+            key: "ff-absorb-skipped".to_owned(),
+            data,
+        },
+    };
+
+    if let Err(e) =
+        append_operation_with_runtime_checkpoint(root, &ws_id, &op, previous_head.as_ref())
+    {
+        tracing::warn!(
+            workspace = %ws_name,
+            error = %e,
+            "FF absorb: failed to append skip annotation (non-fatal)"
+        );
+    }
 }
 
 /// bn-p3m9: paths whose blob differs between the workspace's own `HEAD` tree

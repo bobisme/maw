@@ -204,7 +204,16 @@ fn summarize_payload(payload: &OpPayload) -> String {
             };
             format!("describe: {truncated}")
         }
-        OpPayload::Annotate { key, .. } => format!("annotate: {key}"),
+        // bn-2fto: an annotation that carries a `summary` string renders it
+        // inline — the key alone ("annotate: ff-absorb-skipped") says an event
+        // happened without saying what, which is the very gap this record
+        // exists to close.
+        OpPayload::Annotate { key, data } => {
+            data.get("summary").and_then(|v| v.as_str()).map_or_else(
+                || format!("annotate: {key}"),
+                |detail| format!("annotate: {key} — {detail}"),
+            )
+        }
         OpPayload::RebaseReplay {
             original_commit,
             had_conflicts,
@@ -571,6 +580,25 @@ mod tests {
                 data: std::collections::BTreeMap::new(),
             }),
             "annotate: validation"
+        );
+    }
+
+    /// bn-2fto: an annotation carrying a `summary` renders it inline, so
+    /// `[annotate] ff-absorb-skipped` says WHAT happened, not just that
+    /// something did.
+    #[test]
+    fn summarize_annotate_payload_with_summary_detail() {
+        let mut data = std::collections::BTreeMap::new();
+        data.insert(
+            "summary".to_string(),
+            serde_json::Value::from("left stale at aaaaaaaa (not fast-forwarded to bbbbbbbb)"),
+        );
+        assert_eq!(
+            summarize_payload(&OpPayload::Annotate {
+                key: "ff-absorb-skipped".to_string(),
+                data,
+            }),
+            "annotate: ff-absorb-skipped — left stale at aaaaaaaa (not fast-forwarded to bbbbbbbb)"
         );
     }
 }
