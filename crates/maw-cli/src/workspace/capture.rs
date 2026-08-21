@@ -22,6 +22,7 @@
 //! - `HeadOnly`: workspace has no dirty files but is ahead of its base epoch
 //!   (committed-only changes). The final HEAD is pinned as the recovery ref.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -128,7 +129,31 @@ pub fn capture_before_destroy(
     // Step 1: detect dirty state
     let dirty_paths = list_dirty_paths(ws_path)?;
 
-    if dirty_paths.is_empty() {
+    // Step 1b (bn-2k9e): `list_dirty_paths` — like `git status`, `git diff
+    // HEAD` and every other status-shaped query — trusts the index stat cache.
+    // A tracked file whose on-disk bytes disagree with HEAD while its
+    // `(size, mtime[, ctime])` still match its index entry is reported CLEAN
+    // and never reaches the snapshot, so destroy removes the only copy of
+    // those bytes. Hash-compare the worktree against HEAD to find them.
+    let hidden = hidden_divergent_paths(ws_path, &dirty_paths)?;
+    if let Some(ref err) = hidden.unverified {
+        // The hash detector could not run, so "clean" is unproven. Fail CLOSED:
+        // `hidden.rehash` was widened to every tracked file, and the capture
+        // below re-hashes all of them. It still returns `None` when nothing
+        // actually differed, so a genuinely clean workspace pins nothing.
+        tracing::warn!(
+            workspace = %ws_name,
+            error = %err,
+            "pre-destroy hash comparison failed; force-rehashing every tracked file"
+        );
+    }
+
+    if dirty_paths.is_empty() && hidden.paths.is_empty() {
+        if hidden.unverified.is_some()
+            && let Some(result) = capture_dirty_worktree(ws_path, ws_name, &[], &hidden.rehash)?
+        {
+            return Ok(Some(result));
+        }
         // No dirty files — check if HEAD is ahead of base epoch
         let head_oid = resolve_head(ws_path)?;
         if head_oid.as_str() == base_epoch.as_str() {
@@ -140,8 +165,221 @@ pub fn capture_before_destroy(
         return pin_head_only(ws_path, ws_name, &head_oid);
     }
 
-    // Step 2: capture dirty worktree as a detached commit
-    capture_dirty_worktree(ws_path, ws_name, &dirty_paths)
+    if !hidden.paths.is_empty() {
+        warn_hidden_divergence(ws_name, &hidden.paths);
+    }
+
+    // Step 2: capture dirty worktree as a detached commit. The hidden paths
+    // join the reported dirty set AND are force-rehashed, so the stash tree
+    // holds their real bytes rather than the HEAD blob the forged stat cache
+    // would otherwise stage.
+    let mut all_paths = dirty_paths;
+    all_paths.extend(hidden.paths.iter().cloned());
+    all_paths.sort();
+    all_paths.dedup();
+    capture_dirty_worktree(ws_path, ws_name, &all_paths, &hidden.rehash)
+}
+
+/// Snapshot stat-cache-masked stale bytes before a **non-`--force`** destroy
+/// removes the worktree (bn-2k9e).
+///
+/// `maw ws destroy <ws>` without `--force` only proceeds when the workspace is
+/// judged untouched — and every measure feeding that judgement
+/// (`compute_patchset`'s `git diff <epoch>`, gix's `status_head_to_worktree`)
+/// trusts the index stat cache. A file whose bytes were replaced while its
+/// `(size, mtime)` were preserved is therefore destroyed with no capture at
+/// all, reachable from no `refs/manifold/recovery/<ws>/*` ref: a Prime
+/// Invariant violation, and the same blind spot bn-154g closed for `ws sync`'s
+/// fast-forward checkout.
+///
+/// Returns `Ok(None)` — pinning nothing, printing nothing — when the hash
+/// comparison proves the worktree matches HEAD, so an ordinary clean destroy is
+/// byte-for-byte what it was before this guard existed.
+///
+/// # Fail-safe (Prime Invariant)
+///
+/// Returns `Err` when the comparison could not be made or the snapshot could
+/// not be pinned. Callers **must** abort the destroy on `Err`: the worktree is
+/// about to be deleted and maw cannot show that its bytes are recoverable.
+#[instrument(skip_all, fields(workspace = ws_name))]
+pub fn capture_hidden_stale_before_destroy(
+    ws_path: &Path,
+    ws_name: &str,
+) -> Result<Option<CaptureResult>> {
+    let hidden = hidden_divergent_paths(ws_path, &[])?;
+    if let Some(err) = hidden.unverified {
+        bail!(
+            "cannot verify that workspace '{ws_name}' matches HEAD before destroying it: {err}\n  \
+             Refusing rather than deleting bytes that were never proven recoverable.\n  \
+             Snapshot the whole worktree first: maw ws destroy {ws_name} --force"
+        );
+    }
+    if hidden.paths.is_empty() {
+        return Ok(None);
+    }
+    warn_hidden_divergence(ws_name, &hidden.paths);
+    capture_paths_to_ref(ws_path, ws_name, &hidden.paths, RefKind::Destroy)
+}
+
+/// Tracked paths whose on-disk bytes disagree with HEAD but which every
+/// status-shaped query reports CLEAN (bn-2k9e).
+struct HiddenDivergence {
+    /// Paths the hash comparison PROVED divergent, minus the ones the caller
+    /// already captures. Empty when the detector could not run.
+    paths: Vec<String>,
+    /// Paths whose index stat entry must be discarded so the capture re-hashes
+    /// them from disk. Equals `paths` normally; every tracked file when the
+    /// detector failed (fail-closed widening).
+    rehash: Vec<String>,
+    /// `Some(error)` when the hash detector itself could not run, so "clean" is
+    /// unproven.
+    unverified: Option<String>,
+}
+
+/// Hash-compare the worktree against HEAD and return the divergent paths the
+/// caller is not already capturing.
+///
+/// Reuses bn-154g's detector (`materialize_verify::divergent_paths_by_tree`)
+/// verbatim — a throwaway index seeded from `HEAD` (whose entries carry ZEROED
+/// stat data, so nothing can be trusted-as-clean), `git add -A` against it, and
+/// a `diff-tree` against `HEAD^{tree}`. That forces git to re-hash every file,
+/// which is the only thing this corruption class cannot hide from, and it goes
+/// through git's clean filters, so an LFS-smudged worktree file whose pointer
+/// is what HEAD stores does NOT count as divergence.
+///
+/// Deliberately does NOT use `materialize_verify::detect_divergence`: its
+/// fallback is the status query, which is exactly what the mask defeats.
+///
+/// Paths missing from disk are dropped — a deletion cannot be stat-masked
+/// (the stat fails, so git sees it), `git add -f` on one would fail, and it is
+/// already in the caller's status-visible set.
+fn hidden_divergent_paths(ws_path: &Path, already_captured: &[String]) -> Result<HiddenDivergence> {
+    let excluded: BTreeSet<&str> = already_captured.iter().map(String::as_str).collect();
+    match super::materialize_verify::divergent_paths_by_tree(ws_path) {
+        Ok(divergent) => {
+            let paths: Vec<String> = divergent
+                .into_iter()
+                .map(|(p, _)| p)
+                .filter(|p| !excluded.contains(p.as_str()))
+                .filter(|p| ws_path.join(p).symlink_metadata().is_ok())
+                .collect();
+            Ok(HiddenDivergence {
+                rehash: paths.clone(),
+                paths,
+                unverified: None,
+            })
+        }
+        Err(e) => {
+            let rehash: Vec<String> = tracked_files(ws_path)?
+                .into_iter()
+                .filter(|p| !excluded.contains(p.as_str()))
+                .filter(|p| ws_path.join(p).symlink_metadata().is_ok())
+                .collect();
+            Ok(HiddenDivergence {
+                paths: Vec::new(),
+                rehash,
+                unverified: Some(e),
+            })
+        }
+    }
+}
+
+/// Every tracked path in the workspace (`git ls-files -z`).
+///
+/// Only used for the fail-closed widening when the hash detector is unusable;
+/// an error here means git plumbing is broken in this worktree and the caller
+/// aborts rather than deleting unverifiable bytes.
+fn tracked_files(ws_path: &Path) -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to list tracked files for the pre-destroy hash comparison")?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files failed during the pre-destroy hash comparison: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Announce stat-cache-masked stale bytes that are being snapshotted before the
+/// workspace is removed. Loud on purpose: the workspace looked clean, so nothing
+/// else in the destroy output would hint that bytes were about to be lost.
+fn warn_hidden_divergence(ws_name: &str, paths: &[String]) {
+    const MAX_SHOWN: usize = 5;
+    eprintln!(
+        "WARNING: workspace '{ws_name}' holds working-tree bytes that disagree with HEAD but that \
+         every status query reports as CLEAN (stat-cache-masked, bn-2k9e)."
+    );
+    eprintln!("  Snapshotting them into this workspace's recovery snapshot before destroy:");
+    for p in paths.iter().take(MAX_SHOWN) {
+        eprintln!("    {p}");
+    }
+    if paths.len() > MAX_SHOWN {
+        eprintln!("    ...and {} more", paths.len() - MAX_SHOWN);
+    }
+    eprintln!("  Inspect after destroy: maw ws recover {ws_name} --show <path>");
+}
+
+/// Drop the (possibly forged) index stat entries for `paths` so the `git add`
+/// that follows is forced to re-hash them from disk (bn-2k9e).
+///
+/// `git add` — with or without `-f` — consults the same stat cache the mask
+/// forged, so it stages the HEAD blob for a masked file. Removing the entry
+/// first (`update-index --force-remove`) leaves `git add -f` no cache to
+/// consult and it must read the file. Filters still apply, so an LFS-tracked
+/// path is re-cleaned to its pointer exactly as a normal `git add` would.
+///
+/// # Fail-safe (Prime Invariant)
+///
+/// Returns `Err` if either step fails; the caller aborts the capture (and
+/// therefore the destroy) rather than snapshotting bytes it cannot vouch for.
+fn force_rehash_paths(ws_path: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // Chunked so a workspace with tens of thousands of tracked files cannot
+    // overrun the argv limit during the fail-closed widening.
+    for chunk in paths.chunks(256) {
+        let mut remove = Command::new("git");
+        remove.args(["update-index", "--force-remove", "--"]);
+        for p in chunk {
+            remove.arg(p);
+        }
+        let out = remove
+            .current_dir(ws_path)
+            .output()
+            .context("failed to run git update-index --force-remove during capture")?;
+        if !out.status.success() {
+            bail!(
+                "git update-index --force-remove failed during capture: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+
+        let mut add = Command::new("git");
+        add.args(["add", "-f", "--"]);
+        for p in chunk {
+            add.arg(p);
+        }
+        let out = add
+            .current_dir(ws_path)
+            .output()
+            .context("failed to run git add -f during capture")?;
+        if !out.status.success() {
+            bail!(
+                "git add -f failed during capture: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Capture the exact set of files a `maw ws clean` is about to delete, as a
@@ -205,6 +443,13 @@ enum RefKind {
     Clean,
     /// Post-materialization pre-repair snapshot (bn-3gba).
     Materialize,
+    /// Pre-destroy snapshot of stat-cache-masked stale bytes on a workspace
+    /// that every status query calls clean (bn-2k9e). Pins into the ordinary
+    /// destroy namespace (`refs/manifold/recovery/<ws>/<ts>`) on purpose: the
+    /// destroy record then points at it, so `maw ws recover <ws> --show <path>`
+    /// and `--restore-file` resolve the masked bytes through the normal front
+    /// door instead of needing a second, special-cased lookup.
+    Destroy,
 }
 
 impl RefKind {
@@ -212,6 +457,7 @@ impl RefKind {
         match self {
             Self::Clean => clean_recovery_ref(ws_name, timestamp),
             Self::Materialize => materialize_recovery_ref(ws_name, timestamp),
+            Self::Destroy => recovery_ref(ws_name, timestamp),
         }
     }
 
@@ -221,6 +467,10 @@ impl RefKind {
             Self::Materialize => {
                 "post-materialization repair aborted to avoid data loss: divergent paths were \
                  detected"
+            }
+            Self::Destroy => {
+                "destroy aborted to avoid data loss: the worktree holds tracked bytes that \
+                 disagree with HEAD"
             }
         }
     }
@@ -414,11 +664,23 @@ fn pin_head_only(
 /// Uses `git add -A` + `git stash create` to build a commit object that
 /// includes all tracked changes plus untracked files, without moving HEAD
 /// or altering the index/stash-list.
+///
+/// `force_rehash` (bn-2k9e) names paths whose index stat entry must be
+/// discarded before staging, because `git add -A` would otherwise trust a
+/// forged stat cache and stage the HEAD blob instead of the bytes on disk.
 fn capture_dirty_worktree(
     ws_path: &Path,
     ws_name: &str,
     dirty_paths: &[String],
+    force_rehash: &[String],
 ) -> Result<Option<CaptureResult>> {
+    // bn-2k9e: must run BEFORE `stage_all_for_capture`, so the `git add -A`
+    // there sees entries that already carry the real (re-hashed) content.
+    if let Err(e) = force_rehash_paths(ws_path, force_rehash) {
+        warn_on_reset_failure(ws_path, "capture-force-rehash-failure");
+        return Err(e);
+    }
+
     // `git stash create` produces a merge commit that captures the current
     // index + worktree state as a detached object. It does NOT modify
     // HEAD, the index, or the stash list — perfect for our pre-destroy
@@ -609,7 +871,7 @@ fn stage_all_for_capture(ws_path: &Path) -> Result<Vec<String>> {
     Ok(excluded_paths)
 }
 
-fn parse_uncapturable_embedded_repo_paths(stderr: &str) -> Vec<String> {
+pub(super) fn parse_uncapturable_embedded_repo_paths(stderr: &str) -> Vec<String> {
     const PREFIX: &str = "error: '";
     const SUFFIX: &str = "' does not have a commit checked out";
 
@@ -1218,5 +1480,224 @@ mod tests {
             .expect("operation should succeed");
         let tree_files = String::from_utf8_lossy(&tree_output.stdout);
         assert!(tree_files.contains("capturable.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2k9e: stat-cache-masked stale bytes must reach the destroy snapshot
+    // -----------------------------------------------------------------------
+
+    /// Plant stale bytes on `rel` while keeping `(size, mtime)` — and, via
+    /// `core.trustCTime=false`, ctime — matching the index entry, so every
+    /// status-shaped query reports the file CLEAN.
+    ///
+    /// Same recipe as `tests/dst_production_tier.rs`'s
+    /// `corrupt_worktree_stat_masked` and `tests/sync_ff_hidden_divergence_
+    /// bn_154g.rs`. `core.trustCTime=false` is load-bearing: gix compares
+    /// `ctime.secs` whenever `trust_ctime` is on, independently of
+    /// `core.checkStat`, and writing the stale bytes always bumps ctime.
+    ///
+    /// Returns whether the mask actually took (asserted by callers — a fixture
+    /// that fails to mask would make these tests vacuously green).
+    fn plant_masked_stale(root: &std::path::Path, rel: &str, stale: &str) -> bool {
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git")
+        };
+        git(&["config", "core.checkStat", "minimal"]);
+        git(&["config", "core.trustctime", "false"]);
+
+        let abs = root.join(rel);
+        assert_eq!(
+            fs::read_to_string(&abs).expect("read victim").len(),
+            stale.len(),
+            "the stale payload must be the SAME length as the committed bytes"
+        );
+
+        let backdated = SystemTime::now() - Duration::from_mins(10);
+        let times = FileTimes::new()
+            .set_accessed(backdated)
+            .set_modified(backdated);
+        let backdate = || {
+            fs::File::options()
+                .write(true)
+                .open(&abs)
+                .expect("open victim")
+                .set_times(times)
+                .expect("back-date victim");
+        };
+
+        backdate();
+        git(&["reset", "--mixed", "HEAD"]);
+        git(&["update-index", "--refresh"]);
+        fs::write(&abs, stale).expect("write stale bytes");
+        backdate();
+
+        let clean = || {
+            String::from_utf8_lossy(&git(&["status", "--porcelain"]).stdout)
+                .trim()
+                .is_empty()
+        };
+        clean() && clean()
+    }
+
+    fn snapshot_blob(root: &std::path::Path, oid: &str, rel: &str) -> String {
+        let out = Command::new("git")
+            .args(["show", &format!("{oid}:{rel}")])
+            .current_dir(root)
+            .output()
+            .expect("git show");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The core of bn-2k9e: a workspace every status query calls CLEAN, whose
+    /// worktree secretly disagrees with HEAD, must still produce a snapshot —
+    /// and that snapshot must hold the on-disk bytes, not HEAD's.
+    #[test]
+    fn capture_before_destroy_snapshots_stat_masked_stale_bytes() {
+        let (_dir, root, head_oid) = setup_repo();
+
+        assert!(
+            plant_masked_stale(&root, "README.md", "# Stle\n"),
+            "fixture failed to mask the divergence; this test would be vacuous"
+        );
+        assert!(
+            list_dirty_paths(&root).expect("status").is_empty(),
+            "the mask must make the status query report CLEAN"
+        );
+
+        let capture = capture_before_destroy(&root, "test-ws", &head_oid)
+            .expect("capture must succeed")
+            .expect("masked divergence must produce a snapshot");
+
+        assert_eq!(capture.mode, CaptureMode::WorktreeCapture);
+        assert!(
+            capture.dirty_paths.iter().any(|p| p == "README.md"),
+            "the masked path must be reported: {:?}",
+            capture.dirty_paths
+        );
+        assert_eq!(
+            snapshot_blob(&root, capture.commit_oid.as_str(), "README.md"),
+            "# Stle\n",
+            "the snapshot must hold the MASKED bytes, not HEAD's"
+        );
+    }
+
+    /// The non-`--force` entry point: same guarantee, pinned into the ordinary
+    /// destroy namespace so the destroy record can point at it.
+    #[test]
+    fn capture_hidden_stale_pins_into_the_destroy_namespace() {
+        let (_dir, root, _oid) = setup_repo();
+
+        assert!(plant_masked_stale(&root, "README.md", "# Stle\n"));
+
+        let capture = capture_hidden_stale_before_destroy(&root, "test-ws")
+            .expect("capture must succeed")
+            .expect("masked divergence must produce a snapshot");
+
+        assert_eq!(capture.dirty_paths, vec!["README.md".to_string()]);
+        assert!(
+            capture
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/test-ws/")
+                && !capture.pinned_ref.contains("/materialize-")
+                && !capture.pinned_ref.contains("/clean-"),
+            "must pin into the destroy namespace: {}",
+            capture.pinned_ref
+        );
+        assert_eq!(
+            snapshot_blob(&root, capture.commit_oid.as_str(), "README.md"),
+            "# Stle\n"
+        );
+    }
+
+    /// The negative control for the non-force path: a genuinely clean worktree
+    /// must pin nothing. A guard that fired on every destroy would leave a ref
+    /// per workspace behind and bury the signal it exists to raise.
+    #[test]
+    fn capture_hidden_stale_on_a_clean_workspace_pins_nothing() {
+        let (_dir, root, _oid) = setup_repo();
+
+        assert!(
+            capture_hidden_stale_before_destroy(&root, "test-ws")
+                .expect("capture must succeed")
+                .is_none(),
+            "a clean workspace must produce no snapshot"
+        );
+    }
+
+    /// An LFS-tracked path whose HEAD blob is a *pointer* while the worktree
+    /// holds the smudged bytes must NOT read as divergence — `git add` re-runs
+    /// the configured clean filter, so the comparison is filter-aware by
+    /// construction (bn-1ero's replay-compare lesson at this site).
+    ///
+    /// Skipped when `git-lfs` is not installed: without the clean filter the
+    /// worktree bytes genuinely differ from HEAD, and pinning them would be the
+    /// correct — if noisy — answer.
+    #[test]
+    fn lfs_pointer_in_head_vs_smudged_worktree_is_not_divergence() {
+        if Command::new("git")
+            .args(["config", "--get", "filter.lfs.clean"])
+            .output()
+            .is_ok_and(|o| !o.status.success())
+        {
+            eprintln!("skipping: git-lfs clean filter not configured");
+            return;
+        }
+        let (_dir, root, _oid) = setup_repo();
+
+        fs::write(
+            root.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .expect("write attrs");
+        fs::write(root.join("big.bin"), "REAL-LFS-CONTENT\n").expect("write lfs file");
+        for args in [vec!["add", "-A"], vec!["commit", "-m", "lfs"]] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .output()
+                .expect("git");
+        }
+        // HEAD must hold the pointer while the worktree holds the real bytes.
+        assert!(
+            snapshot_blob(&root, "HEAD", "big.bin").starts_with("version https://git-lfs"),
+            "fixture: HEAD must hold an LFS pointer"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("big.bin")).expect("read"),
+            "REAL-LFS-CONTENT\n"
+        );
+
+        let hidden = hidden_divergent_paths(&root, &[]).expect("detector must run");
+        assert!(hidden.unverified.is_none(), "{:?}", hidden.unverified);
+        assert!(
+            !hidden.paths.iter().any(|p| p == "big.bin"),
+            "a smudged LFS file must not count as divergence: {:?}",
+            hidden.paths
+        );
+    }
+
+    /// Paths the caller already captures are not re-reported, so a visibly
+    /// dirty file never produces a second, duplicate pin.
+    #[test]
+    fn hidden_divergent_paths_excludes_already_captured_paths() {
+        let (_dir, root, _oid) = setup_repo();
+        fs::write(root.join("README.md"), "visibly edited\n").expect("write");
+
+        let all = hidden_divergent_paths(&root, &[]).expect("detector");
+        assert!(all.paths.iter().any(|p| p == "README.md"));
+
+        let excluded = hidden_divergent_paths(&root, &["README.md".to_string()]).expect("detector");
+        assert!(
+            !excluded.paths.iter().any(|p| p == "README.md"),
+            "{:?}",
+            excluded.paths
+        );
     }
 }

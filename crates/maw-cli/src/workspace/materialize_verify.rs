@@ -339,7 +339,14 @@ pub fn divergent_entries(entries: &[StatusEntry]) -> Vec<(String, &'static str)>
 /// but NOT in HEAD (untracked scratch) — "repairing" one means deleting it, so
 /// they are never divergence. Renames are disabled (`--no-renames`) so a rename
 /// decomposes into a caught `D` plus an ignored `A`.
-fn divergent_paths_by_tree(ws_path: &Path) -> Result<Vec<(String, &'static str)>, String> {
+///
+/// `pub(crate)` since bn-2k9e: the pre-destroy snapshot uses the same detector,
+/// deliberately WITHOUT `detect_divergence`'s status fallback — a status query
+/// is precisely what the stat-cache mask defeats, so falling back to it there
+/// would report "clean" and lose the bytes.
+pub(crate) fn divergent_paths_by_tree(
+    ws_path: &Path,
+) -> Result<Vec<(String, &'static str)>, String> {
     let temp = tempfile::tempdir().map_err(|e| format!("temp dir: {e}"))?;
     let index = temp.path().join("index");
 
@@ -361,7 +368,25 @@ fn divergent_paths_by_tree(ws_path: &Path) -> Result<Vec<(String, &'static str)>
     };
 
     run(&["read-tree", "HEAD"])?;
-    run(&["add", "-A"])?;
+    if let Err(add_err) = run(&["add", "-A"]) {
+        // An embedded git directory without a checked-out commit makes
+        // `git add -A` fail outright — the same shape
+        // `capture::stage_all_for_capture` already handles. Retry with those
+        // paths excluded so the detector still hashes the rest of the worktree
+        // instead of degrading to the stat-cache-fallible status fallback (or,
+        // at the pre-destroy site, refusing the destroy).
+        let excluded = super::capture::parse_uncapturable_embedded_repo_paths(&add_err);
+        if excluded.is_empty() {
+            return Err(add_err);
+        }
+        let mut args: Vec<String> = ["add", "-A", "--", "."]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        args.extend(excluded.iter().map(|p| format!(":(exclude){p}")));
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&borrowed)?;
+    }
     let worktree_tree = run(&["write-tree"])?.trim().to_owned();
 
     let raw = run(&[

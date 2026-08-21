@@ -219,9 +219,6 @@ struct Liveness {
     /// actually overwritten by a later op. 0 means nothing ever reached the
     /// preserve-before-overwrite path, so a green run proves nothing.
     masked_overwrites_judged: u64,
-    /// bn-22jy: masked paths dropped unjudged because their whole workspace was
-    /// destroyed — the size of the oracle's deliberate scope carve-out.
-    masked_destroyed_unjudged: u64,
     /// bn-22jy: masked-stale workspaces later observed clean at their own HEAD
     /// again — maw re-materialized them, so `CleanMaterialization` re-armed.
     masked_resolutions: u64,
@@ -1054,9 +1051,6 @@ fn run_seed(
     live.masked_overwrites_judged = live
         .masked_overwrites_judged
         .saturating_add(masked_oracle.overwrites_judged());
-    live.masked_destroyed_unjudged = live
-        .masked_destroyed_unjudged
-        .saturating_add(masked_oracle.destroyed_unjudged());
     live.masked_resolutions = live
         .masked_resolutions
         .saturating_add(clean_materialization.masked_resolutions());
@@ -1124,8 +1118,8 @@ fn drive_tier(
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
          {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx); \
          {} clean-materialization checks (bn-3gba); \
-         {} masked corruptions ({} effective), {} masked-overwrite judgements, \
-         {} dropped with a destroyed workspace, {} masks re-materialized (bn-22jy); \
+         {} masked corruptions ({} effective), {} masked-removal judgements \
+         (overwrite or destroy, bn-2k9e), {} masks re-materialized (bn-22jy); \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
@@ -1143,7 +1137,6 @@ fn drive_tier(
         live.masked_corruptions,
         live.masked_corruptions_effective,
         live.masked_overwrites_judged,
-        live.masked_destroyed_unjudged,
         live.masked_resolutions,
         all_violations.len(),
         n_trials,

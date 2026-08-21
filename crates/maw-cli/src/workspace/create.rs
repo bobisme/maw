@@ -855,7 +855,14 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
         super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
             .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?
     } else {
-        None
+        // bn-2k9e: reaching here without `--force` means every status-shaped
+        // measure called this workspace untouched — and all of them trust the
+        // index stat cache, which a stale file with a preserved `(size, mtime)`
+        // defeats. Hash-compare against HEAD and snapshot anything that really
+        // diverges; a genuinely clean workspace pins nothing and says nothing.
+        super::capture::capture_hidden_stale_before_destroy(&path, name).map_err(|e| {
+            anyhow::anyhow!("Failed to preserve hidden worktree divergence before destroy: {e}")
+        })?
     };
 
     // Determine final head for destroy record before we destroy
@@ -903,38 +910,41 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
     // Recovery refs pinned by this destroy (force + snapshot), for the JSON.
     let mut pinned_refs: Vec<String> = Vec::new();
 
-    if force {
-        if let Some(ref capture) = capture_result {
-            pinned_refs.push(capture.pinned_ref.clone());
-            if text_mode {
-                let short_oid = &capture.commit_oid.as_str()[..12];
-                println!("Snapshot saved: {short_oid}");
-                println!("  State: abandoned-with-snapshot (lifecycle vocabulary, bn-29fi).");
-                println!("  Recover (inspect):       maw ws recover {name}");
-                // bn-29fi mergeback queue cue: when force-destroy left
-                // committed work behind, the agent's next safe action is
-                // recover-into-new-ws-then-merge. Naming the two-step
-                // sequence eliminates the discovery cost that drives
-                // `ws_recover_invoked` cluster turns.
-                println!(
-                    "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
+    // bn-2k9e: keyed on the capture, not on `--force` — a non-force destroy can
+    // now also produce one, when the hash comparison found stat-cache-masked
+    // stale bytes that no status query reported.
+    if let Some(ref capture) = capture_result {
+        pinned_refs.push(capture.pinned_ref.clone());
+        if text_mode {
+            let short_oid = &capture.commit_oid.as_str()[..12];
+            println!("Snapshot saved: {short_oid}");
+            println!("  State: abandoned-with-snapshot (lifecycle vocabulary, bn-29fi).");
+            println!("  Recover (inspect):       maw ws recover {name}");
+            // bn-29fi mergeback queue cue: when force-destroy left
+            // committed work behind, the agent's next safe action is
+            // recover-into-new-ws-then-merge. Naming the two-step
+            // sequence eliminates the discovery cost that drives
+            // `ws_recover_invoked` cluster turns.
+            println!(
+                "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
                      && maw ws merge {name}-restored --into default --destroy"
-                );
-                println!("Workspace '{name}' destroyed.");
-                // Emit full recovery surface contract
-                super::capture::emit_recovery_surface(
-                    name,
-                    capture,
-                    artifact_path_result.as_deref().ok(),
-                    false, // no merge commit — standalone destroy
-                    true,  // destroy operation succeeded
-                );
-            }
-        } else if text_mode {
-            println!("Workspace '{name}' destroyed. (nothing to snapshot)");
+            );
+            println!("Workspace '{name}' destroyed.");
+            // Emit full recovery surface contract
+            super::capture::emit_recovery_surface(
+                name,
+                capture,
+                artifact_path_result.as_deref().ok(),
+                false, // no merge commit — standalone destroy
+                true,  // destroy operation succeeded
+            );
         }
     } else if text_mode {
-        println!("Workspace '{name}' destroyed.");
+        if force {
+            println!("Workspace '{name}' destroyed. (nothing to snapshot)");
+        } else {
+            println!("Workspace '{name}' destroyed.");
+        }
     }
 
     if fmt == OutputFormat::Json {

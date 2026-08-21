@@ -531,7 +531,7 @@ impl fmt::Display for MaskedStaleViolation {
                 blob,
             } => write!(
                 f,
-                "MaskedStalePreservation (bn-154g): '{after_op}' overwrote the \
+                "MaskedStalePreservation (bn-154g / bn-2k9e): '{after_op}' removed the \
                  stat-cache-masked bytes at '{workspace}/{path}' (blob {blob}) and they are \
                  reachable from no refs/manifold/recovery/{workspace}/* ref — maw destroyed \
                  content it never made recoverable"
@@ -596,30 +596,26 @@ struct MaskedEntry {
 ///   the *default* workspace's visibly-dirty bytes. This oracle is its
 ///   counterpart for a non-default workspace's *invisibly* stale bytes.
 ///
-/// # Scope: overwrite of a LIVE workspace, not removal of the workspace
+/// # Scope: every way the bytes can leave the disk, destroy included (bn-2k9e)
 ///
 /// Only paths the driver has actually poisoned and confirmed masked are
 /// watched, via [`MaskedStalePreservation::record_masked`]. The oracle is
 /// otherwise inert — a run that never enables `corrupt_weight` pays one
 /// `is_empty()` check per step.
 ///
-/// A watched path is judged only while its **workspace directory still
-/// exists**. If the whole workspace is gone (`maw ws destroy`, `ws merge
-/// --destroy`), the bytes went with it and the governing contract is the
-/// *destroy* recovery-snapshot contract, not bn-154g's preserve-before-
-/// overwrite: the user asked for the workspace to be removed, and what must be
-/// snapshotted is judged by the destroy gate
-/// ([`crate::oracle::check_g4_destructive_gate`]) and the destroy-record
-/// oracles. Those entries are dropped and counted in
-/// [`MaskedStalePreservation::destroyed_unjudged`] rather than silently
-/// ignored.
-///
-/// This distinction is not cosmetic — it is where a DST run *does* find
-/// something. maw's destroy snapshot is built from the workspace's git state,
-/// so a stat-cache-masked file is invisible to it exactly as it was to the sync
-/// checkout before bn-154g. Whether destroy should pin such bytes is a real
-/// question, but it is a different site with a different contract, and folding
-/// it in here would turn one oracle into a permanently-red conflation of two.
+/// A watched path is judged the moment its bytes are no longer on disk — and
+/// that includes the whole workspace being removed by `maw ws destroy` or
+/// `ws merge --destroy`. Between bn-22jy and bn-2k9e those entries were dropped
+/// unjudged (counted in a `destroyed_unjudged` field) because destroy's
+/// snapshot was built from the workspace's *git state*, which the stat-cache
+/// mask defeats exactly as it defeated the sync checkout before bn-154g: at
+/// 8x16 this oracle fired four times on `op=destroy`, and that was a real bug,
+/// not a scope error. bn-2k9e closed it — the pre-destroy capture now
+/// hash-compares the worktree against HEAD and force-rehashes the divergent
+/// paths into the snapshot — so the carve-out is gone and the contract is
+/// uniform: *once masked bytes leave the disk, by any route, they must be
+/// reachable from that workspace's own `refs/manifold/recovery/<ws>/`
+/// namespace.*
 ///
 /// # Profile neutrality (bn-2bcx rule)
 ///
@@ -631,10 +627,6 @@ pub struct MaskedStalePreservation {
     /// How many "these bytes left the disk" judgements actually ran — the
     /// non-vacuity signal. A run with 0 proved nothing about bn-154g.
     overwrites_judged: u64,
-    /// Watched paths dropped because their whole workspace was removed. Counted
-    /// so the scope carve-out is visible in the run report instead of being an
-    /// invisible source of vacuity (see the type-level docs).
-    destroyed_unjudged: u64,
 }
 
 impl MaskedStalePreservation {
@@ -671,13 +663,6 @@ impl MaskedStalePreservation {
         self.overwrites_judged
     }
 
-    /// Watched paths dropped unjudged because their workspace was removed —
-    /// the visible size of this oracle's scope carve-out (see type docs).
-    #[must_use]
-    pub const fn destroyed_unjudged(&self) -> u64 {
-        self.destroyed_unjudged
-    }
-
     /// Number of paths still being watched (still holding their stale bytes).
     #[must_use]
     pub fn watching(&self) -> usize {
@@ -707,12 +692,11 @@ impl MaskedStalePreservation {
                 continue;
             }
             let ws_dir = flavor.workspace_path(root, &entry.workspace);
-            if !ws_dir.is_dir() {
-                // The whole workspace is gone: out of scope (see type docs).
-                entry.settled = true;
-                self.destroyed_unjudged += 1;
-                continue;
-            }
+            // A removed workspace is judged like any other way the bytes can
+            // leave the disk (bn-2k9e): `read_to_string` on a path inside a
+            // deleted directory fails, so the check below sees `None` and the
+            // destroy is held to the same "must be reachable from a recovery
+            // ref" contract as an overwrite.
             let on_disk = std::fs::read_to_string(ws_dir.join(&entry.path)).ok();
             if on_disk.as_deref() == Some(entry.stale.as_str()) {
                 // Still poisoned; nothing has been destroyed yet.
@@ -1138,10 +1122,10 @@ mod tests {
         assert_eq!(o.check_step(&root, &Op::Sync { ws: ws("alice") }).len(), 1);
     }
 
-    /// Removing the whole workspace is out of scope (destroy's own contract),
-    /// and the carve-out is counted rather than silently swallowed.
+    /// bn-2k9e: removing the whole workspace is judged, not carved out. An
+    /// unpinned destroy is a violation — the RED half of the twin.
     #[test]
-    fn destroyed_workspace_is_dropped_unjudged() {
+    fn destroyed_workspace_without_a_pin_is_a_violation() {
         let (_td, root, ws_path) = masked_repo(MASKED_STALE);
         let mut o = MaskedStalePreservation::new();
         o.record_masked("alice", "a.txt", MASKED_STALE);
@@ -1154,10 +1138,34 @@ mod tests {
                 force: true,
             },
         );
-        assert!(v.is_empty(), "{v:?}");
-        assert_eq!(o.destroyed_unjudged(), 1);
-        assert_eq!(o.overwrites_judged(), 0);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(o.overwrites_judged(), 1);
         assert_eq!(o.watching(), 0);
+    }
+
+    /// The GREEN half: a destroy that pinned the masked bytes into the
+    /// workspace's own recovery namespace first is what bn-2k9e ships, and the
+    /// oracle must accept it.
+    #[test]
+    fn destroyed_workspace_with_a_pin_is_clean() {
+        let (_td, root, ws_path) = masked_repo(MASKED_STALE);
+        let mut o = MaskedStalePreservation::new();
+        o.record_masked("alice", "a.txt", MASKED_STALE);
+
+        pin_recovery(&root, "alice", MASKED_STALE);
+        std::fs::remove_dir_all(&ws_path).unwrap();
+        let v = o.check_step(
+            &root,
+            &Op::Destroy {
+                ws: ws("alice"),
+                force: true,
+            },
+        );
+        assert!(
+            v.is_empty(),
+            "a pinned destroy must read as preserved: {v:?}"
+        );
+        assert_eq!(o.overwrites_judged(), 1);
     }
 
     /// End-to-end plumbing sanity for the verifier's own git usage: clean →
