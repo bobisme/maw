@@ -5,8 +5,9 @@
 //! merge gate refuses to proceed and asks the user to run `maw epoch sync`.
 //!
 //! For a strict subset of those cases — where the divergence is a pure
-//! fast-forward AND no in-flight workspace touches any file changed in the
-//! FF range — advancing the epoch is provably safe. The diff3 base for every
+//! fast-forward AND no in-flight workspace path conflicts with a file changed
+//! in the FF range — advancing the epoch is provably safe. Conflicts include
+//! exact paths and directory/file prefix collisions. The diff3 base for every
 //! in-flight workspace's patches is unchanged for the paths each workspace
 //! has touched, so absorbing the FF leaves their merge interpretation
 //! identical.
@@ -25,9 +26,9 @@ use maw_git::{ChangeType, GitOid as MawGitOid, GitRepo as _, GixRepo};
 /// Outcome of the FF-absorb safety predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FfAbsorbDecision {
-    /// Safe to absorb: no in-flight workspace touches any FF path.
+    /// Safe to absorb: no in-flight workspace path conflicts with an FF path.
     Safe,
-    /// Unsafe: the listed workspaces touch at least one path in the FF range.
+    /// Unsafe: each listed workspace has a path conflict with the FF range.
     ///
     /// Names are sorted, deduplicated, and stable across calls.
     Blocked { affected_workspaces: Vec<String> },
@@ -48,13 +49,14 @@ pub struct WorkspaceTouchedPaths {
 
 /// Pure-function safety predicate.
 ///
-/// Returns [`FfAbsorbDecision::Safe`] iff `ff_paths ∩ ws_paths == ∅` for
-/// every workspace in `workspaces`. Otherwise returns
+/// Returns [`FfAbsorbDecision::Safe`] iff no FF path has a component-prefix
+/// collision with a workspace path. Exact equality is not sufficient here:
+/// `shape` and `shape/file.txt` cannot coexist in one Git tree, so either
+/// direction is a directory/file conflict. Otherwise returns
 /// [`FfAbsorbDecision::Blocked`] with the names of the workspaces that have
-/// at least one path in `ff_paths`.
+/// at least one conflicting path.
 ///
-/// A workspace with an empty touched-path set is trivially safe (cannot
-/// intersect anything).
+/// A workspace with an empty touched-path set is trivially safe.
 #[must_use]
 pub fn evaluate_ff_safety(
     ff_paths: &BTreeSet<PathBuf>,
@@ -66,7 +68,11 @@ pub fn evaluate_ff_safety(
 
     let mut affected: BTreeSet<String> = BTreeSet::new();
     for ws in workspaces {
-        if ws.paths.iter().any(|p| ff_paths.contains(p)) {
+        if ws.paths.iter().any(|ws_path| {
+            ff_paths
+                .iter()
+                .any(|ff_path| paths_conflict(ff_path, ws_path))
+        }) {
             affected.insert(ws.name.clone());
         }
     }
@@ -78,6 +84,15 @@ pub fn evaluate_ff_safety(
             affected_workspaces: affected.into_iter().collect(),
         }
     }
+}
+
+/// Whether two Git paths conflict by equality or directory/file ancestry.
+///
+/// [`Path::starts_with`] compares whole path components, so similar names such
+/// as `shape` and `shapely/file.txt` remain independent.
+#[must_use]
+pub fn paths_conflict(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Strict-ancestor predicate: returns `true` iff `epoch != branch` AND
@@ -192,6 +207,30 @@ mod tests {
     fn disjoint_paths_are_safe() {
         let ff = paths(["docs/README.md", "docs/HOWTO.md"]);
         let workspaces = vec![ws("alice", &["src/lib.rs", "src/main.rs"])];
+        assert_eq!(evaluate_ff_safety(&ff, &workspaces), FfAbsorbDecision::Safe);
+    }
+
+    #[test]
+    fn directory_file_prefix_collisions_are_blocked() {
+        let ff = paths(["shape/file.txt", "other"]);
+        let workspaces = vec![
+            ws("ancestor", &["shape"]),
+            ws("descendant", &["other/nested.txt"]),
+        ];
+
+        assert_eq!(
+            evaluate_ff_safety(&ff, &workspaces),
+            FfAbsorbDecision::Blocked {
+                affected_workspaces: vec!["ancestor".to_owned(), "descendant".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn similar_component_names_do_not_conflict() {
+        let ff = paths(["shape/file.txt"]);
+        let workspaces = vec![ws("alice", &["shapely/file.txt"]), ws("bob", &["shapes"])];
+
         assert_eq!(evaluate_ff_safety(&ff, &workspaces), FfAbsorbDecision::Safe);
     }
 

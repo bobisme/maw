@@ -459,3 +459,82 @@ fn ff_absorb_leaves_stale_dirty_sibling_untouched_no_silent_revert() {
         "FF-absorb skip must be recorded in ws history (naming the stale path); got:\n{history}"
     );
 }
+
+/// A stale descendant path conflicts with a dirty ancestor path. Exact set
+/// intersection misses this directory/file shape, which previously let the
+/// FF materializer follow an untracked symlink and write outside the sibling
+/// workspace before advancing its HEAD.
+#[cfg(unix)]
+#[test]
+fn ff_absorb_does_not_write_through_dirty_ancestor_symlink() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    setup(root);
+
+    maw(root, &["ws", "create", "victim", "--from", "main"]);
+    maw(root, &["ws", "create", "src", "--from", "main"]);
+    let victim = root.join(".maw/workspaces/victim");
+    let victim_head_a = git(&victim, &["rev-parse", "HEAD"]);
+
+    // B adds a descendant while the victim remains at A.
+    std::fs::create_dir(root.join("shape")).expect("create shape");
+    std::fs::write(root.join("shape/file.txt"), "from epoch B\n").expect("write shape file");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "B: add nested shape file"]);
+    maw(root, &["epoch", "sync"]);
+
+    // The victim has an uncommitted ancestor symlink. The stale path is
+    // `shape/file.txt`, so an equality-only check reports no overlap.
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).expect("create outside directory");
+    std::os::unix::fs::symlink(&outside, victim.join("shape"))
+        .expect("create dirty ancestor symlink");
+
+    // C creates the global FF range B..C on an unrelated path. That range is
+    // safe by itself; the victim's own A..C stale set must catch the prefix.
+    std::fs::write(root.join("f2.txt"), "f2-at-C\n").expect("write f2");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "C: unrelated trunk change"]);
+
+    let src_path = root.join(".maw/workspaces/src");
+    std::fs::write(src_path.join("src.txt"), "src work\n").expect("write source work");
+    maw(root, &["exec", "src", "--", "git", "add", "-A"]);
+    maw(
+        root,
+        &["exec", "src", "--", "git", "commit", "-m", "src work"],
+    );
+
+    let out = maw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "src",
+            "--into",
+            "default",
+            "--message",
+            "merge src",
+        ],
+    );
+
+    assert!(
+        out.contains("left stale (NOT fast-forwarded)"),
+        "merge must report the prefix-conflicting sibling as stale; got:\n{out}"
+    );
+    assert_eq!(
+        git(&victim, &["rev-parse", "HEAD"]),
+        victim_head_a,
+        "prefix-conflicting sibling HEAD must not advance"
+    );
+    assert!(
+        victim
+            .join("shape")
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink()),
+        "the dirty ancestor symlink must survive"
+    );
+    assert!(
+        !outside.join("file.txt").exists(),
+        "FF absorb must not materialize the stale descendant through the symlink"
+    );
+}

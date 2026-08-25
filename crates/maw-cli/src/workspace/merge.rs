@@ -3613,7 +3613,7 @@ enum FfReconcile {
 /// 2. Bails with the legacy "diverged" error (augmented with the affected
 ///    workspace list when relevant) if (a) `auto_absorb_ff` is disabled,
 ///    (b) the divergence is not a pure FF, or (c) a non-target workspace
-///    has touched paths that intersect the FF range.
+///    has paths that equal, contain, or sit below an FF path.
 /// 3. Otherwise advances `refs/manifold/epoch/current` from `epoch_oid` to
 ///    `branch_oid` and returns [`FfReconcile::Absorbed`] with the count of
 ///    upstream commits in the range.
@@ -4386,7 +4386,10 @@ fn sync_ff_paths_in_worktree(
             if ff_paths.contains(&rel) {
                 continue;
             }
-            if dirty.contains(&rel) {
+            if dirty
+                .iter()
+                .any(|dirty_path| super::ff_absorb::paths_conflict(&rel, dirty_path))
+            {
                 // A local edit outside the absorbed range. Never clobber it;
                 // the caller warns so the operator can run a real sync.
                 report.extra_skipped_dirty.push(rel);
@@ -4504,7 +4507,14 @@ fn ff_dirty_stale_conflict(ws_path: &Path, ws_name: &str, branch_oid: &GitOid) -
     // returning every dirty path so the caller never advances a dirty worktree
     // it cannot prove safe.
     ff_own_stale_paths(&ws_repo, ws_name, target_git).map_or_else(all_dirty, |stale| {
-        stale.into_iter().filter(|p| dirty.contains(p)).collect()
+        stale
+            .into_iter()
+            .filter(|stale_path| {
+                dirty
+                    .iter()
+                    .any(|dirty_path| super::ff_absorb::paths_conflict(stale_path, dirty_path))
+            })
+            .collect()
     })
 }
 
@@ -4701,8 +4711,8 @@ fn sync_target_worktree_to_epoch(
     let oid = target_oid.as_str();
 
     // Equivalent to `git reset --keep <oid>` in our setting: the caller has
-    // already proven that no locally modified path also changed between HEAD
-    // and `<oid>` (via `dirty_paths_in_workspace` ∩ FF-range = ∅), so
+    // already proven that no locally modified path conflicts with a path
+    // changed between HEAD and `<oid>`, including directory/file prefixes, so
     // materialising every (HEAD, target) diff path from the target tree is
     // safe and never clobbers user edits in disjoint paths. We then move
     // HEAD and reset the index. Failures are logged non-fatally.
@@ -9021,6 +9031,58 @@ mod tests {
         assert_eq!(
             std::fs::read(root.join("data.bin")).expect("read materialized path"),
             real_content
+        );
+    }
+
+    /// A dirty file or symlink at an ancestor path conflicts with a stale
+    /// descendant even though their path strings are not equal. Advancing the
+    /// sibling would otherwise write through the ancestor or strand its bytes
+    /// behind a HEAD that claims the descendant exists.
+    #[cfg(unix)]
+    #[test]
+    fn ff_dirty_stale_conflict_detects_directory_file_prefix_collision() {
+        use maw_git::GitRepo as _;
+
+        let (dir, root, base_text) = maw_git::test_support::init_test_repo_with_commit();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let base: maw_git::GitOid = base_text.parse().expect("parse base");
+        let base_tree = repo.read_commit(base).expect("read base").tree_oid;
+        let blob = repo.write_blob(b"incoming\n").expect("write blob");
+        let target_tree = repo
+            .edit_tree(
+                base_tree,
+                &[maw_git::TreeEdit::Upsert {
+                    path: "shape/file.txt".to_owned(),
+                    mode: maw_git::EntryMode::Blob,
+                    oid: blob,
+                }],
+            )
+            .expect("edit target tree");
+        let target = repo
+            .create_commit(target_tree, &[base], "target", None)
+            .expect("create target commit");
+
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        std::os::unix::fs::symlink(&outside, root.join("shape"))
+            .expect("create dirty ancestor symlink");
+        assert!(
+            dirty_paths_in_workspace(&root).contains(Path::new("shape")),
+            "fixture must expose the ancestor symlink as a dirty path"
+        );
+
+        let target_core = GitOid::new(&target.to_string()).expect("core target oid");
+        assert_eq!(
+            ff_dirty_stale_conflict(&root, "test-ws", &target_core),
+            vec![PathBuf::from("shape/file.txt")],
+            "a dirty ancestor must block a stale descendant path"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none(),
+            "classification must not materialize through the symlink"
         );
     }
 
