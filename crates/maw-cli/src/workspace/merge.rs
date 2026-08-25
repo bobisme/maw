@@ -1940,11 +1940,39 @@ fn check_merge_result_for_target(
 
             match build_result {
                 Ok(output) => {
-                    let conflicts: Vec<ConflictInfo> = output
+                    let mut conflicts: Vec<ConflictInfo> = output
                         .conflicts
                         .iter()
                         .map(conflict_record_to_info)
                         .collect();
+                    // Keep `--check` faithful to the real merge. The
+                    // append-only gate runs after BUILD against the candidate
+                    // tree, so a clean textual merge can still be blocked by
+                    // policy. Before this check, preflight reported ready and
+                    // the immediately following real merge refused.
+                    if conflicts.is_empty() {
+                        let policy_result = ManifoldConfig::load(&manifold_dir.join("config.toml"))
+                            .map_err(|error| anyhow::anyhow!("{error}"))
+                            .and_then(|config| {
+                                assert_append_only_preserved(
+                                    &root,
+                                    &config.merge.append_only,
+                                    &merge_base_epoch,
+                                    &output,
+                                    force,
+                                )
+                                .map(|_| ())
+                            });
+                        if let Err(error) = policy_result {
+                            conflicts.push(ConflictInfo {
+                                path: String::new(),
+                                reason: format!("append-only check failed: {error}"),
+                                sides: Vec::new(),
+                                line_start: None,
+                                line_end: None,
+                            });
+                        }
+                    }
                     let ready = conflicts.is_empty();
                     Ok(CheckResult {
                         ready,
@@ -2211,6 +2239,20 @@ pub fn plan_merge(
             bail!("BUILD phase failed: {e}");
         }
     };
+
+    // `--plan` also promises to describe what the real merge would do. A
+    // candidate that violates append-only policy cannot proceed to VALIDATE
+    // or COMMIT, so refuse the plan instead of publishing it as viable.
+    if let Err(error) = assert_append_only_preserved(
+        &root,
+        &manifold_config.merge.append_only,
+        &merge_base_epoch,
+        &build_output,
+        false,
+    ) {
+        let _ = cleanup_plan_merge_state(&manifold_dir);
+        bail!("append-only check failed: {error}");
+    }
 
     let merge_id = compute_merge_id(&merge_base_epoch, &sources, &frozen.heads);
     let conflict_paths: BTreeSet<PathBuf> = build_output
@@ -3285,15 +3327,18 @@ fn assert_append_only_preserved(
     build_output: &BuildPhaseOutput,
     force: bool,
 ) -> Result<Vec<String>> {
-    if append_only_globs.is_empty() || build_output.resolved_paths.is_empty() {
+    if append_only_globs.is_empty() {
         return Ok(Vec::new());
     }
 
     let patterns: Vec<glob::Pattern> = append_only_globs
         .iter()
-        .filter_map(|g| glob::Pattern::new(g).ok())
-        .collect();
-    if patterns.is_empty() {
+        .map(|glob| {
+            glob::Pattern::new(glob)
+                .map_err(|error| anyhow::anyhow!("invalid append-only glob {glob:?}: {error}"))
+        })
+        .collect::<Result<_>>()?;
+    if build_output.resolved_paths.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -4326,7 +4371,38 @@ fn sync_ff_paths_in_worktree(
         // absorbed range were proven un-edited by the pre-FF safety
         // predicate; paths outside it were filtered against the dirty set
         // above. Either way this cannot clobber a local edit.
-        for rel in &to_apply {
+        //
+        // Apply deletions deepest-first, then upserts shallowest-first. This
+        // order is required for directory/file transitions. For example, a
+        // target that replaces `shape/old.txt` with the file `shape` must
+        // remove the child before it can remove the now-empty directory and
+        // write the file. The opposite transition requires deleting the old
+        // `shape` file before creating `shape/new.txt` below it.
+        let mut deletions = Vec::new();
+        let mut upserts = Vec::new();
+        for rel in to_apply {
+            let target_is_blob = rel.to_str().is_some_and(|rel_str| {
+                matches!(ws_repo.read_blob_at_path(target_git, rel_str), Ok(Some(_)))
+            });
+            if target_is_blob {
+                upserts.push(rel);
+            } else {
+                deletions.push(rel);
+            }
+        }
+        deletions.sort_by(|a, b| {
+            b.components()
+                .count()
+                .cmp(&a.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        upserts.sort_by(|a, b| {
+            a.components()
+                .count()
+                .cmp(&b.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        for rel in deletions.iter().chain(&upserts) {
             ff_apply_one_path(&ws_repo, ws_name, ws_path, target_git, rel);
         }
     }

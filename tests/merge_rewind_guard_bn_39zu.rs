@@ -286,6 +286,15 @@ fn merge_refuses_append_only_violation_deleting_middle_line() {
     repo.maw_ok(&["ws", "create", "middle-deleter"]);
     repo.modify_file("middle-deleter", "journal.txt", "L1\nL3\nL4\n");
 
+    for mode in ["--check", "--plan"] {
+        let stderr = repo.maw_fails(&["ws", "merge", "middle-deleter", mode]);
+        assert!(
+            stderr.contains("journal.txt")
+                && (stderr.contains("append-only") || stderr.contains("append only")),
+            "{mode} must report the same append-only refusal as the real merge:\n{stderr}"
+        );
+    }
+
     let stderr = repo.maw_fails(&[
         "ws",
         "merge",
@@ -445,5 +454,44 @@ fn merge_allows_new_file_matching_append_only_glob() {
     assert_eq!(
         repo.read_file("default", "journal.txt").as_deref(),
         Some("first line\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. append_only: invalid patterns fail closed instead of disabling the guard.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_refuses_invalid_append_only_glob_instead_of_silently_ignoring_it() {
+    let repo = TestRepo::new();
+    set_append_only_config(&repo, &["["]);
+
+    repo.seed_files(&[("journal.txt", "L1\nL2\n")]);
+    repo.maw_ok(&["ws", "create", "rewriter"]);
+    repo.modify_file("rewriter", "journal.txt", "L2\n");
+
+    for mode in ["--check", "--plan"] {
+        let stderr = repo.maw_fails(&["ws", "merge", "rewriter", mode]);
+        assert!(
+            stderr.contains("invalid append-only glob") && stderr.contains('['),
+            "{mode} must identify the invalid safety pattern:\n{stderr}"
+        );
+    }
+
+    let stderr = repo.maw_fails(&[
+        "ws",
+        "merge",
+        "rewriter",
+        "--message",
+        "chore: rewrite protected journal",
+    ]);
+    assert!(
+        stderr.contains("invalid append-only glob") && stderr.contains('['),
+        "the refusal must identify the invalid safety pattern:\n{stderr}"
+    );
+    assert_eq!(
+        repo.read_file("default", "journal.txt").as_deref(),
+        Some("L1\nL2\n"),
+        "an invalid append-only policy must fail closed before trunk changes"
     );
 }

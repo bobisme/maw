@@ -869,23 +869,34 @@ pub fn materialize_blob_with_mode(
     use std::os::unix::fs::PermissionsExt as _;
     match mode {
         maw_git::EntryMode::Link => {
-            let target = std::str::from_utf8(content)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let target = std::ffi::OsStr::from_bytes(content);
             // symlink(2) fails with EEXIST if anything is already there
-            // (regular file from the old buggy write, or a stale link).
-            if full.symlink_metadata().is_ok() {
-                std::fs::remove_file(full)?;
+            // (regular file from the old buggy write, a stale link, or an
+            // empty directory left by a directory-to-link transition).
+            if let Ok(metadata) = full.symlink_metadata() {
+                if metadata.is_dir() {
+                    // Never recurse here. A non-empty directory may contain
+                    // untracked work and must fail safe instead of losing it.
+                    std::fs::remove_dir(full)?;
+                } else {
+                    std::fs::remove_file(full)?;
+                }
             }
             std::os::unix::fs::symlink(target, full)
         }
         maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable => {
-            // If the destination is currently a symlink, `fs::write` would
-            // follow it and clobber the link's target file. Replace it.
-            if full
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_symlink())
-            {
-                std::fs::remove_file(full)?;
+            // If the destination is a symlink, `fs::write` would follow it.
+            // An empty directory can remain after a directory-to-file
+            // transition. Replace either shape, but never recurse through a
+            // non-empty directory because it may contain untracked work.
+            if let Ok(metadata) = full.symlink_metadata() {
+                if metadata.is_dir() {
+                    std::fs::remove_dir(full)?;
+                } else if metadata.file_type().is_symlink() {
+                    std::fs::remove_file(full)?;
+                }
             }
             std::fs::write(full, content)?;
             let bits = if mode == maw_git::EntryMode::BlobExecutable {
@@ -911,6 +922,13 @@ pub fn materialize_blob_with_mode(
     _mode: maw_git::EntryMode,
     content: &[u8],
 ) -> std::io::Result<()> {
+    if let Ok(metadata) = full.symlink_metadata() {
+        if metadata.is_dir() {
+            std::fs::remove_dir(full)?;
+        } else if metadata.file_type().is_symlink() {
+            std::fs::remove_file(full)?;
+        }
+    }
     std::fs::write(full, content)
 }
 
@@ -1390,5 +1408,48 @@ mod tests {
         let s = dir.display().to_string();
         assert!(s.contains("artifacts"), "{s}");
         assert!(s.ends_with("ws/alice/materialize-repair"), "{s}");
+    }
+
+    /// Unix symlink targets are byte strings, not UTF-8 strings. The snapshot
+    /// and Git object paths already preserve those bytes, so materialization
+    /// must not reject a valid non-UTF-8 target while restoring the link.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_link_preserves_non_utf8_target_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let td = tempfile::tempdir().unwrap();
+        let link = td.path().join("link");
+        let target = b"target-\xff";
+
+        materialize_blob_with_mode(&link, maw_git::EntryMode::Link, target).unwrap();
+
+        let actual = std::fs::read_link(&link).unwrap();
+        assert_eq!(actual.as_os_str().as_bytes(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_file_replaces_empty_directory_but_preserves_nonempty_one() {
+        let td = tempfile::tempdir().unwrap();
+        let destination = td.path().join("shape");
+
+        std::fs::create_dir(&destination).unwrap();
+        materialize_blob_with_mode(&destination, maw_git::EntryMode::Blob, b"file\n").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"file\n");
+
+        std::fs::remove_file(&destination).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("untracked.txt"), b"keep me\n").unwrap();
+
+        let error =
+            materialize_blob_with_mode(&destination, maw_git::EntryMode::Blob, b"replacement\n")
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(
+            std::fs::read(destination.join("untracked.txt")).unwrap(),
+            b"keep me\n",
+            "a non-empty directory must fail safe without deleting its contents"
+        );
     }
 }

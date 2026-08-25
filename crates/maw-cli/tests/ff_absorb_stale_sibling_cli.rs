@@ -271,6 +271,70 @@ fn ff_absorb_refreshes_paths_a_doubly_stale_sibling_missed() {
     );
 }
 
+/// A directory-to-file transition must be applied child-first during an FF
+/// absorb. If the new file is written before the old tracked child is removed,
+/// the directory still occupies the destination and the write fails. The old
+/// code then moved HEAD and the index anyway, leaving the sibling dirty at a
+/// path that should have been cleanly materialized.
+#[test]
+fn ff_absorb_materializes_directory_to_file_transition_cleanly() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    setup(root);
+
+    std::fs::create_dir_all(root.join("shape")).expect("create shape directory");
+    std::fs::write(root.join("shape/old.txt"), "old child\n").expect("write old child");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "A: shape is a directory"]);
+    maw(root, &["epoch", "sync"]);
+
+    maw(root, &["ws", "create", "victim", "--from", "main"]);
+    maw(root, &["ws", "create", "src", "--from", "main"]);
+
+    // Advance trunk outside maw: the tracked directory becomes one file.
+    std::fs::remove_dir_all(root.join("shape")).expect("remove old shape directory");
+    std::fs::write(root.join("shape"), "shape is now a file\n").expect("write new shape file");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "B: shape becomes a file"]);
+
+    // Give the source real work. Its merge absorbs A..B and refreshes the
+    // clean victim workspace as a sibling.
+    let src_path = root.join(".maw/workspaces/src");
+    std::fs::write(src_path.join("src.txt"), "src work\n").expect("write src file");
+    maw(root, &["exec", "src", "--", "git", "add", "-A"]);
+    maw(
+        root,
+        &["exec", "src", "--", "git", "commit", "-m", "src work"],
+    );
+    maw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "src",
+            "--into",
+            "default",
+            "--message",
+            "merge src",
+        ],
+    );
+
+    let victim = root.join(".maw/workspaces/victim");
+    assert!(
+        victim.join("shape").is_file(),
+        "FF absorb must replace the old directory with the target file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("shape")).expect("read materialized shape"),
+        "shape is now a file\n"
+    );
+    let status = git(&victim, &["status", "--porcelain"]);
+    assert!(
+        status.is_empty(),
+        "directory-to-file FF absorb must leave the sibling clean, got:\n{status}"
+    );
+}
+
 /// bn-mq3b / bn-2fto: a dirty sibling whose uncommitted edit lands on a path
 /// that is STALE against the absorbed epoch must be left fully stale — HEAD is
 /// NOT advanced. The pre-fix code advanced the sibling's HEAD to the absorbed
