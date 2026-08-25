@@ -505,7 +505,9 @@ enum EpochCommands {
 }
 
 fn should_emit_migration_notice(repo_root: &Path) -> bool {
-    repo_root.join(".jj").is_dir() && !repo_root.join(".manifold").exists()
+    let has_manifold =
+        repo_root.join(".manifold").is_dir() || repo_root.join(".maw").join("manifold").is_dir();
+    repo_root.join(".jj").is_dir() && !has_manifold
 }
 
 fn emit_migration_notice_if_needed() {
@@ -727,6 +729,15 @@ mod tests {
         let dir = tempdir().expect("operation should succeed");
         fs::create_dir_all(dir.path().join(".jj")).expect("operation should succeed");
         fs::create_dir_all(dir.path().join(".manifold")).expect("operation should succeed");
+
+        assert!(!should_emit_migration_notice(dir.path()));
+    }
+
+    #[test]
+    fn does_not_emit_notice_for_consolidated_repo_with_residual_jj_dir() {
+        let dir = tempdir().expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".jj")).expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".maw/manifold")).expect("operation should succeed");
 
         assert!(!should_emit_migration_notice(dir.path()));
     }

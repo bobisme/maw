@@ -509,6 +509,17 @@ pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<Git
         })?
         .clone();
 
+    // The snapshot's tree must be internally consistent when it changes
+    // `.gitattributes`: paths in that same tree must be cleaned with the new
+    // rules, and deleted rules must stop applying. The general writer reads
+    // committed attributes from HEAD, so resolve the final worktree view once
+    // for this special case and reuse it for every captured path.
+    #[cfg(feature = "lfs")]
+    let worktree_attrs = status
+        .iter()
+        .any(|entry| entry.path.rsplit('/').next() == Some(".gitattributes"))
+        .then(|| crate::lfs_clean::attrs_from_workdir(repo));
+
     // 4. Walk status entries; hash content for upserts.
     let mut edits: Vec<TreeEdit> = Vec::new();
     for entry in status {
@@ -588,6 +599,14 @@ pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<Git
                 // plain `write_blob` when the "lfs" feature is disabled (via
                 // the trait's default method) or when the path has no
                 // matching filter rule.
+                #[cfg(feature = "lfs")]
+                let blob_oid = match worktree_attrs.as_ref() {
+                    Some(attrs) => {
+                        crate::lfs_clean::write_blob_with_attrs(repo, &data, &entry.path, attrs)?
+                    }
+                    None => repo.write_blob_with_path(&data, &entry.path)?,
+                };
+                #[cfg(not(feature = "lfs"))]
                 let blob_oid = repo.write_blob_with_path(&data, &entry.path)?;
                 edits.push(TreeEdit::Upsert {
                     path: entry.path.clone(),
@@ -827,5 +846,69 @@ mod tests {
             .read_to_end(&mut stored_bytes)
             .expect("reading lfs object should succeed");
         assert_eq!(stored_bytes, real_content);
+    }
+
+    /// A snapshot must apply the `.gitattributes` content that it captures,
+    /// not the older rules from `HEAD`. Otherwise a newly tracked LFS path is
+    /// stored as a raw git blob while the same commit says it is LFS-managed.
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn worktree_state_commit_uses_modified_worktree_gitattributes() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+
+        std::fs::write(root.join(".gitattributes"), "*.old filter=lfs -text\n")
+            .expect("test setup should succeed");
+        let _ = crate::test_support::commit_all(root, "add initial gitattributes");
+
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs -text\n")
+            .expect("test setup should succeed");
+        let real_content = b"newly tracked binary content\n";
+        std::fs::write(root.join("data.bin"), real_content).expect("test setup should succeed");
+
+        let commit_oid = worktree_state_commit(&repo, "snapshot")
+            .expect("worktree_state_commit should succeed")
+            .expect("snapshot should not be empty");
+        let (_mode, _oid, stored) = repo
+            .read_blob_at_path(commit_oid, "data.bin")
+            .expect("read_blob_at_path should succeed")
+            .expect("data.bin should be present in the snapshot commit");
+
+        assert!(
+            maw_lfs::looks_like_pointer(&stored),
+            "modified worktree attributes must clean data.bin; got: {:?}",
+            String::from_utf8_lossy(&stored)
+        );
+    }
+
+    /// Removing an LFS rule in the captured worktree must take effect in the
+    /// snapshot. Reading the deleted rule from `HEAD` would incorrectly wrap
+    /// the new file in an LFS pointer.
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn worktree_state_commit_honors_deleted_worktree_gitattributes() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs -text\n")
+            .expect("test setup should succeed");
+        let _ = crate::test_support::commit_all(root, "add initial gitattributes");
+
+        std::fs::remove_file(root.join(".gitattributes")).expect("test setup should succeed");
+        let real_content = b"ordinary binary content after attributes removal\n";
+        std::fs::write(root.join("data.bin"), real_content).expect("test setup should succeed");
+
+        let commit_oid = worktree_state_commit(&repo, "snapshot")
+            .expect("worktree_state_commit should succeed")
+            .expect("snapshot should not be empty");
+        let (_mode, _oid, stored) = repo
+            .read_blob_at_path(commit_oid, "data.bin")
+            .expect("read_blob_at_path should succeed")
+            .expect("data.bin should be present in the snapshot commit");
+
+        assert_eq!(
+            stored, real_content,
+            "deleted worktree attributes must stop cleaning data.bin"
+        );
     }
 }

@@ -172,7 +172,7 @@ fn build_attrs(repo: &GixRepo, key: &AttrsKey) -> maw_lfs::AttrsMatcher {
     }
 }
 
-fn attrs_from_workdir(repo: &GixRepo) -> maw_lfs::AttrsMatcher {
+pub fn attrs_from_workdir(repo: &GixRepo) -> maw_lfs::AttrsMatcher {
     let Some(workdir) = repo.repo.workdir() else {
         return maw_lfs::AttrsMatcher::empty();
     };
@@ -199,6 +199,21 @@ pub fn write_blob_with_path(
     // 2. HEAD tree (correct repo-relative paths; works for bare repos).
     // 3. Workdir fallback (fresh repo with no HEAD).
     let attrs = resolve_attrs(repo);
+    write_blob_with_attrs(repo, data, rel_path, &attrs)
+}
+
+/// Write `data` using an already-resolved attributes view.
+///
+/// Most callers use [`write_blob_with_path`]. Worktree snapshotting uses this
+/// entry point when `.gitattributes` changes in the snapshot itself. In that
+/// case, `HEAD` is intentionally stale and the final worktree rules must be
+/// loaded once, then shared across every captured path.
+pub fn write_blob_with_attrs(
+    repo: &GixRepo,
+    data: &[u8],
+    rel_path: &str,
+    attrs: &maw_lfs::AttrsMatcher,
+) -> Result<GitOid, GitError> {
     if !attrs.is_lfs(rel_path) {
         return crate::objects_impl::write_blob(repo, data);
     }
