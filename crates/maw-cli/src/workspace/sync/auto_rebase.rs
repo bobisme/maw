@@ -23,6 +23,9 @@
 //!   The rebase routine performs ONE more dirty re-check immediately before
 //!   the destructive checkout to close the small race window that follows
 //!   the under-lock skip check.
+//! * The lock remains held through post-materialization verification. The
+//!   verifier can snapshot and repair files, so releasing first would let a
+//!   second maw process race legitimate workspace changes into that repair.
 //! * Worktree-update failure (transient I/O, freshly-dirty file) NEVER
 //!   aborts the rebase — refs still advance and we report
 //!   `RebasedCleanRefsOnly` (or `RebasedWithConflictsRefsOnly`).
@@ -416,10 +419,9 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
         &trigger_str,
     );
 
-    drop(lock);
-
     let result = classify_outcome(outcome_res, overlap.clone());
     verify_sibling_materialization(root, name, &ws_path, &result);
+    drop(lock);
     record_rebase_notice(
         root,
         name,
@@ -449,6 +451,10 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
 ///   the worktree is dirty ON PURPOSE (repairing it would destroy real work).
 fn verify_sibling_materialization(root: &Path, name: &str, ws_path: &Path, result: &SiblingResult) {
     if matches!(result, SiblingResult::RebasedClean { .. }) {
+        // Test-only interleaving point for proving that the workspace lock
+        // spans this verifier. A sleep action widens the otherwise tiny window
+        // without changing production builds.
+        let _ = maw::fp!("FP_AUTO_REBASE_BEFORE_VERIFY");
         super::super::materialize_verify::verify_clean_materialization(
             root,
             name,

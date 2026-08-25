@@ -188,6 +188,7 @@ pub fn check(name: &str) -> Result<(), String> {
 //           canonical `KNOWN_FAILPOINTS` table at load time so `check()`
 //           stays an exact-match O(1) lookup with zero added overhead.
 //   action  off | error[:msg] | panic[:msg] | abort | sleep:<ms>
+//           | corrupt:<absolute-path>
 //
 // Whitespace around names/actions/`;`/`=` is trimmed. Empty segments and
 // segments without `=` are ignored (forgiving: a stray `;` never aborts the
@@ -208,6 +209,7 @@ pub fn check(name: &str) -> Result<(), String> {
 #[cfg(feature = "failpoints")]
 pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_AUTO_REBASE_BEFORE_REPLAY",
+    "FP_AUTO_REBASE_BEFORE_VERIFY",
     "FP_AUTO_SYNC_BEFORE_CHECKOUT",
     "FP_BUILD_AFTER_MERGE_COMPUTE",
     "FP_BUILD_AFTER_WORKTREE_ADD",
@@ -267,11 +269,13 @@ fn parse_action(token: &str) -> Option<FailpointAction> {
             Some(FailpointAction::Sleep(Duration::from_millis(ms)))
         }
         // bn-3gba: `corrupt:<abs-path>` — overwrite that file with
-        // `CORRUPT_BYTES` and continue. Requires a non-empty path; a bare
-        // `corrupt` is dropped like any other malformed segment.
+        // `CORRUPT_BYTES` and continue. Require an absolute target because
+        // failpoint call sites can run from different worktree directories;
+        // accepting a relative path could corrupt the wrong checkout.
         "corrupt" => {
             let path = rest.filter(|s| !s.is_empty())?;
-            Some(FailpointAction::Corrupt(std::path::PathBuf::from(path)))
+            let path = std::path::PathBuf::from(path);
+            path.is_absolute().then_some(FailpointAction::Corrupt(path))
         }
         _ => None,
     }
@@ -646,6 +650,10 @@ mod tests {
             // A bare `corrupt` (no path) is dropped like any malformed segment.
             assert!(parse_env_spec("FP_X=corrupt").is_empty());
             assert!(parse_env_spec("FP_X=corrupt:").is_empty());
+            assert!(
+                parse_env_spec("FP_X=corrupt:relative/path.txt").is_empty(),
+                "relative corruption targets must be rejected"
+            );
         }
 
         /// An unknown glob matches nothing (no panic, empty result).
