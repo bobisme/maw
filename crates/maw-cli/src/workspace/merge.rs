@@ -3690,7 +3690,12 @@ fn reconcile_epoch_with_branch(
             // in `sync_target_worktree_to_epoch`. Check only those.
             let target_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
                 .default_target_path(root, target_workspace_name);
-            let dirty = dirty_paths_in_workspace(&target_path);
+            let dirty = dirty_paths_in_workspace(&target_path).with_context(|| {
+                format!(
+                    "cannot inspect target workspace '{target_workspace_name}' for local edits; \
+                     refusing automatic FF absorb"
+                )
+            })?;
             if !dirty.is_empty() {
                 ws_touched.push(super::ff_absorb::WorkspaceTouchedPaths {
                     name: target_workspace_name.to_owned(),
@@ -3728,14 +3733,20 @@ fn reconcile_epoch_with_branch(
             // the epoch-sync guidance rather than half-moving anything.
             #[allow(clippy::items_after_statements)]
             enum SiblingPlan {
-                FastForward { dirty: bool },
-                Replay { base_epoch: String },
+                FastForward {
+                    dirty_paths: std::collections::BTreeSet<PathBuf>,
+                },
+                Replay {
+                    base_epoch: String,
+                },
                 // bn-mq3b: a dirty sibling whose uncommitted paths also changed
                 // between its HEAD and the absorb target. Advancing its HEAD
                 // would strand the stale worker content behind a HEAD that
                 // claims the new epoch — the next commit then silently reverts
                 // the epoch's hunks. Leave it stale (no ref/HEAD move) and warn.
-                SkipStaleDirty { stale_paths: Vec<PathBuf> },
+                SkipStaleDirty {
+                    stale_paths: Vec<PathBuf>,
+                },
             }
             #[allow(clippy::items_after_statements)]
             struct SiblingClass {
@@ -3780,7 +3791,14 @@ fn reconcile_epoch_with_branch(
                     .ok()
                     .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
                     .map(|h| h.to_string());
-                let dirty = !dirty_paths_in_workspace(&ws_path).is_empty();
+                let dirty_paths = dirty_paths_in_workspace(&ws_path).with_context(|| {
+                    format!(
+                        "cannot inspect sibling workspace '{}' for local edits; refusing \
+                         automatic FF absorb",
+                        ws.name
+                    )
+                })?;
+                let dirty = !dirty_paths.is_empty();
                 // bn-2fto: remembered for the op-log entry this absorb writes
                 // (`maw ws history <ws>` must show the FF-absorb advance/skip).
                 let head_before = head.clone().unwrap_or_else(|| base_epoch.clone());
@@ -3815,12 +3833,12 @@ fn reconcile_epoch_with_branch(
                         // stale instead of stranding the content behind a moved
                         // HEAD.
                         let stale_dirty = if dirty {
-                            ff_dirty_stale_conflict(&ws_path, &ws.name, branch_oid)
+                            ff_dirty_stale_conflict(&ws_path, &ws.name, branch_oid, &dirty_paths)
                         } else {
                             Vec::new()
                         };
                         let plan = if stale_dirty.is_empty() {
-                            SiblingPlan::FastForward { dirty }
+                            SiblingPlan::FastForward { dirty_paths }
                         } else {
                             SiblingPlan::SkipStaleDirty {
                                 stale_paths: stale_dirty,
@@ -3991,7 +4009,8 @@ fn reconcile_epoch_with_branch(
                     );
                     continue;
                 }
-                if let SiblingPlan::FastForward { dirty } = c.plan {
+                if let SiblingPlan::FastForward { ref dirty_paths } = c.plan {
+                    let dirty = !dirty_paths.is_empty();
                     let epoch_ref = maw_core::refs::workspace_epoch_ref(&c.name);
                     if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
                         tracing::warn!(
@@ -4000,8 +4019,13 @@ fn reconcile_epoch_with_branch(
                             "failed to advance workspace epoch ref after FF absorb"
                         );
                     }
-                    let ff_sync =
-                        sync_ff_paths_in_worktree(&c.ws_path, &c.name, branch_oid, &ff_paths);
+                    let ff_sync = sync_ff_paths_in_worktree(
+                        &c.ws_path,
+                        &c.name,
+                        branch_oid,
+                        &ff_paths,
+                        dirty_paths,
+                    );
                     // bn-3gba: a sibling that was CLEAN before the FF-absorb
                     // must be clean at the absorbed tip afterwards. Assert it;
                     // `sync_ff_paths_in_worktree` only materializes the paths
@@ -4133,19 +4157,23 @@ fn reconcile_epoch_with_branch(
 /// (modified, added, deleted, or untracked-but-not-ignored).
 ///
 /// Used by the FF-absorb safety check to identify paths that a hard checkout
-/// of the FF range would clobber. Returns an empty set on any git error so
-/// callers fail closed (treat as "no dirty paths to worry about" — the worst
-/// case is the absorb proceeds and a downstream PREPARE-phase dirty check
-/// catches genuinely dirty state).
-fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBuf> {
+/// of the FF range would clobber. Errors propagate so callers refuse the
+/// absorb before any epoch, workspace ref, HEAD, index, or worktree mutation.
+fn dirty_paths_in_workspace(ws_path: &Path) -> Result<std::collections::BTreeSet<PathBuf>> {
     use std::collections::BTreeSet;
 
-    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
-        return BTreeSet::new();
-    };
-    let Ok(entries) = repo.status() else {
-        return BTreeSet::new();
-    };
+    let repo = maw_git::GixRepo::open(ws_path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to open workspace at {} for dirty-path inspection: {error}",
+            ws_path.display()
+        )
+    })?;
+    let entries = repo.status().map_err(|error| {
+        anyhow::anyhow!(
+            "failed to inspect workspace status at {}: {error}",
+            ws_path.display()
+        )
+    })?;
     let mut paths = BTreeSet::new();
     for entry in entries {
         // Modified/Added/Deleted/Untracked/Renamed all flag the path as dirty
@@ -4156,7 +4184,7 @@ fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBu
         // the absorbed range.
         paths.insert(PathBuf::from(entry.path));
     }
-    paths
+    Ok(paths)
 }
 
 /// Materialize one tree blob into the worktree **preserving its git mode**.
@@ -4339,6 +4367,7 @@ fn sync_ff_paths_in_worktree(
     ws_name: &str,
     target_oid: &GitOid,
     ff_paths: &std::collections::BTreeSet<PathBuf>,
+    dirty_paths: &std::collections::BTreeSet<PathBuf>,
 ) -> FfWorktreeSync {
     let mut report = FfWorktreeSync::default();
     if !ws_path.exists() {
@@ -4381,12 +4410,11 @@ fn sync_ff_paths_in_worktree(
     let own_paths = ff_own_stale_paths(&ws_repo, ws_name, target_git);
     let mut to_apply: std::collections::BTreeSet<PathBuf> = ff_paths.clone();
     if let Some(own) = own_paths {
-        let dirty = dirty_paths_in_workspace(ws_path);
         for rel in own {
             if ff_paths.contains(&rel) {
                 continue;
             }
-            if dirty
+            if dirty_paths
                 .iter()
                 .any(|dirty_path| super::ff_absorb::paths_conflict(&rel, dirty_path))
             {
@@ -4491,8 +4519,12 @@ fn sync_ff_paths_in_worktree(
 /// every dirty path is returned so the caller never advances a dirty worktree
 /// it cannot prove safe. An empty result means the FF is provably safe — the
 /// dirty paths are disjoint from everything the absorb changes.
-fn ff_dirty_stale_conflict(ws_path: &Path, ws_name: &str, branch_oid: &GitOid) -> Vec<PathBuf> {
-    let dirty = dirty_paths_in_workspace(ws_path);
+fn ff_dirty_stale_conflict(
+    ws_path: &Path,
+    ws_name: &str,
+    branch_oid: &GitOid,
+    dirty: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
     if dirty.is_empty() {
         return Vec::new();
     }
@@ -9067,13 +9099,16 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("shape"))
             .expect("create dirty ancestor symlink");
         assert!(
-            dirty_paths_in_workspace(&root).contains(Path::new("shape")),
+            dirty_paths_in_workspace(&root)
+                .expect("inspect dirty paths")
+                .contains(Path::new("shape")),
             "fixture must expose the ancestor symlink as a dirty path"
         );
 
         let target_core = GitOid::new(&target.to_string()).expect("core target oid");
+        let dirty = dirty_paths_in_workspace(&root).expect("inspect dirty paths");
         assert_eq!(
-            ff_dirty_stale_conflict(&root, "test-ws", &target_core),
+            ff_dirty_stale_conflict(&root, "test-ws", &target_core, &dirty),
             vec![PathBuf::from("shape/file.txt")],
             "a dirty ancestor must block a stale descendant path"
         );
@@ -9083,6 +9118,22 @@ mod tests {
                 .next()
                 .is_none(),
             "classification must not materialize through the symlink"
+        );
+    }
+
+    /// Dirty-path inspection is a safety proof, not a best-effort diagnostic.
+    /// An unreadable workspace must stop FF absorb instead of looking clean.
+    #[test]
+    fn dirty_paths_in_workspace_fails_closed_when_repo_cannot_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing-workspace");
+
+        let error = dirty_paths_in_workspace(&missing)
+            .expect_err("an unreadable workspace must not be classified as clean");
+
+        assert!(
+            error.to_string().contains("failed to open workspace"),
+            "unexpected error: {error}"
         );
     }
 

@@ -50,7 +50,9 @@ fn write_index_with_retry(
         attempt += 1;
         match index_file.write(gix::index::write::Options::default()) {
             Ok(()) => return Ok(()),
-            Err(gix::index::file::write::Error::AcquireLock(lock_err)) => {
+            Err(gix::index::file::write::Error::AcquireLock(
+                lock_err @ gix::lock::acquire::Error::PermanentlyLocked { .. },
+            )) => {
                 if attempt >= INDEX_LOCK_MAX_ATTEMPTS {
                     return Err(GitError::BackendError {
                         message: format!(
@@ -63,6 +65,16 @@ fn write_index_with_retry(
                 }
                 let backoff = INDEX_LOCK_BASE_DELAY * 2u32.saturating_pow(attempt - 1);
                 std::thread::sleep(backoff);
+            }
+            Err(gix::index::file::write::Error::AcquireLock(gix::lock::acquire::Error::Io(
+                io_error,
+            ))) => {
+                return Err(GitError::BackendError {
+                    message: format!(
+                        "failed to acquire git index lock for worktree '{workspace_name}': \
+                         {io_error}"
+                    ),
+                });
             }
             Err(e) => {
                 return Err(GitError::BackendError {
@@ -752,6 +764,31 @@ mod tests {
         );
 
         holder.join().expect("lock-holding thread must not panic");
+    }
+
+    #[test]
+    fn index_lock_io_error_is_immediate_and_preserves_the_cause() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("missing-admin-dir").join("index");
+        let state = gix::index::State::new(gix::hash::Kind::Sha1);
+        let mut index_file = gix::index::File::from_state(state, index_path);
+
+        let error = write_index_with_retry(&mut index_file, "agent-io")
+            .expect_err("a missing admin directory must fail");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("agent-io"),
+            "error must name the affected workspace: {message}"
+        );
+        assert!(
+            message.contains("No such file") || message.contains("not found"),
+            "error must preserve the underlying I/O cause: {message}"
+        );
+        assert!(
+            !message.contains("another git or maw operation"),
+            "a permanent I/O error must not be misreported as lock contention: {message}"
+        );
     }
 
     // --- bn-2r7a: checkout outcome inspection -------------------------
