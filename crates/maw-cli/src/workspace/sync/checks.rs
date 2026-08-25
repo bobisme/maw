@@ -448,6 +448,19 @@ fn sync_worktree_to_epoch_inner(
                 format_divergent_pairs(&paths),
             );
         }
+        // The hash-based detector is the only check that can see through a
+        // forged index stat cache. If it cannot run, do not let the checkout
+        // convert "unknown" into permanent data loss.
+        PreOverwriteGuard::Unverified { error } => {
+            bail!(
+                "Refusing to sync workspace '{ws_name}': maw could not prove that its working \
+                 tree matches HEAD before the sync checkout would overwrite it.\n  \
+                 Authoritative tree comparison failed: {error}\n  \
+                 A status check is not a safe fallback because the index stat cache can hide \
+                 changed bytes. The worktree and HEAD remain untouched.\n  \
+                 Fix: repair the reported git/filter error, then re-run: maw ws sync {ws_name}"
+            );
+        }
     }
 
     let ws_repo_for_checkout = maw_git::GixRepo::open(&ws_path).map_err(|e| {

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use gix::bstr::ByteSlice;
+use gix::bstr::{BString, ByteSlice};
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
@@ -59,16 +59,10 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
             })?;
 
     // Collect all paths in the target tree so we can remove stale files after checkout.
-    let tree_paths: HashSet<String> = index_file
+    let tree_paths: HashSet<BString> = index_file
         .entries()
         .iter()
-        .filter_map(|entry| {
-            entry
-                .path(&index_file)
-                .to_str()
-                .ok()
-                .map(std::borrow::ToOwned::to_owned)
-        })
+        .map(|entry| entry.path(&index_file).to_owned())
         .collect();
 
     // Capture the paths tracked by the CURRENT (pre-checkout) on-disk index.
@@ -77,18 +71,12 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     // it is overwritten with the target index below. If no index is readable,
     // the tracked set is empty → we never delete a file we can't prove was
     // tracked, which is the safe (no-data-loss) default. (bn-29x0)
-    let old_tracked: HashSet<String> = repo.repo.open_index().map_or_else(
+    let old_tracked: HashSet<BString> = repo.repo.open_index().map_or_else(
         |_| HashSet::new(),
         |idx| {
             idx.entries()
                 .iter()
-                .filter_map(|entry| {
-                    entry
-                        .path(&idx)
-                        .to_str()
-                        .ok()
-                        .map(std::borrow::ToOwned::to_owned)
-                })
+                .map(|entry| entry.path(&idx).to_owned())
                 .collect()
         },
     );
@@ -542,8 +530,8 @@ fn smudge_lfs_pointers(
 fn remove_stale_files(
     workdir: &Path,
     dir: &Path,
-    tree_paths: &HashSet<String>,
-    tracked_paths: &HashSet<String>,
+    tree_paths: &HashSet<BString>,
+    tracked_paths: &HashSet<BString>,
 ) -> Result<(), GitError> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(());
@@ -566,15 +554,18 @@ fn remove_stale_files(
             // Remove directory if it became empty (ignore errors — may not be empty).
             let _ = std::fs::remove_dir(&path);
         } else {
-            let rel = path
-                .strip_prefix(workdir)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
+            let Some(rel) = path.strip_prefix(workdir).ok().and_then(|p| {
+                gix::path::try_into_bstr(p)
+                    .ok()
+                    .map(|p| gix::path::to_unix_separators_on_windows(p).into_owned())
+            }) else {
+                continue;
+            };
             // Only remove a file that was tracked AND is gone from the target
             // tree. Untracked files (absent from `tracked_paths`) are preserved.
             if !rel.is_empty() && tracked_paths.contains(&rel) && !tree_paths.contains(&rel) {
                 std::fs::remove_file(&path).map_err(|e| GitError::BackendError {
-                    message: format!("failed to remove stale file '{rel}': {e}"),
+                    message: format!("failed to remove stale file '{}': {e}", rel.to_str_lossy()),
                 })?;
             }
         }
@@ -1040,6 +1031,56 @@ mod tests {
         assert!(
             wt.join("file1.txt").exists(),
             "file from c1 must be present"
+        );
+    }
+
+    /// Git paths are byte strings on Unix. Stale-file cleanup must not retain
+    /// a deleted tracked file merely because its name is not valid UTF-8.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_detach_removes_non_utf8_stale_tracked_file() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+
+        let invalid_name = OsStr::from_bytes(b"stale-\xff.txt");
+        let invalid_path = root.join(invalid_name);
+        fs::write(&invalid_path, "stale tracked bytes\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "commit with non-utf8 path"]);
+        let with_path = git(&root, &["rev-parse", "HEAD"]);
+
+        fs::remove_file(&invalid_path).unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "delete non-utf8 path"]);
+        let without_path = git(&root, &["rev-parse", "HEAD"]);
+
+        let wt = root.join("wt");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt.to_str().unwrap(),
+                &with_path,
+            ],
+        );
+        assert!(wt.join(invalid_name).exists(), "fixture path must exist");
+
+        let repo = GixRepo::open(&wt).expect("open");
+        let target: GitOid = without_path.parse().expect("parse target");
+        super::checkout_detach(&repo, target, &wt).expect("checkout_detach");
+
+        assert!(
+            !wt.join(invalid_name).exists(),
+            "a tracked path deleted by the target commit must be removed"
         );
     }
 

@@ -739,8 +739,8 @@ pub fn verify_clean_materialization(
 /// What the caller of [`preserve_divergence_before_overwrite`] must do next.
 #[derive(Clone, Debug)]
 pub enum PreOverwriteGuard {
-    /// No hidden divergence — or the detector itself could not run. Proceed
-    /// with the overwrite. This is the fast path and says nothing.
+    /// The authoritative tree comparison proved there is no hidden
+    /// divergence. Proceed with the overwrite. This is the fast path.
     Proceed,
     /// Hidden divergence was found and **successfully pinned**. Proceed with
     /// the overwrite: it is the repair. The WARNING, artifact and oplog entry
@@ -753,6 +753,12 @@ pub enum PreOverwriteGuard {
         /// `(path, status letter)` pairs, sorted — for the refusal message.
         paths: Vec<(String, String)>,
         /// Why the snapshot failed.
+        error: String,
+    },
+    /// The authoritative tree comparison could not run, so maw cannot prove
+    /// that the overwrite is safe. The caller MUST NOT overwrite.
+    Unverified {
+        /// Why the authoritative comparison failed.
         error: String,
     },
 }
@@ -777,9 +783,9 @@ pub enum PreOverwriteGuard {
 /// divergence — which is *true* but useless, and the caller's own dirty-refusal
 /// is the right response.
 ///
-/// Never panics, never blocks on a detector failure: if the tree compare AND
-/// the status fallback both fail, this returns [`PreOverwriteGuard::Proceed`] —
-/// a guard that can break `ws sync` is worse than the bug it guards.
+/// Never panics. It fails closed when the authoritative tree comparison cannot
+/// run. A status fallback cannot prove safety here because the index stat cache
+/// can mask the exact divergence this guard exists to preserve.
 ///
 /// The overwhelmingly common (clean) path costs one content hash of the
 /// worktree — see [`divergent_paths_by_tree`] for the measured cost and why
@@ -802,12 +808,26 @@ pub fn preserve_divergence_before_overwrite(
                 error = %e,
                 "pre-overwrite divergence check: failed to open workspace repo"
             );
-            return PreOverwriteGuard::Proceed;
+            return PreOverwriteGuard::Unverified {
+                error: format!("failed to open workspace repo: {e}"),
+            };
         }
     };
 
-    let Some(divergent) = detect_divergence(&repo, ws_name, ws_path) else {
-        return PreOverwriteGuard::Proceed;
+    // Unlike the post-hoc verifier, this destructive boundary cannot fall back
+    // to a status-shaped query. A forged index stat entry can make that query
+    // report clean while bytes on disk disagree with HEAD. If hashing cannot
+    // prove the tree clean, refuse the overwrite.
+    let divergent = match divergent_paths_by_tree(ws_path) {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %error,
+                "pre-overwrite divergence check: authoritative tree comparison failed"
+            );
+            return PreOverwriteGuard::Unverified { error };
+        }
     };
     if divergent.is_empty() {
         // The fast path: no output, no artifact, no oplog entry, no ref.
@@ -1603,6 +1623,41 @@ mod tests {
             divergent_paths_by_tree(&root).unwrap(),
             vec![("data.bin".to_owned(), "M")],
             "a genuine LFS content edit must remain divergent"
+        );
+    }
+
+    /// The pre-overwrite guard is the last safety boundary before sync replaces
+    /// the whole worktree. A failed authoritative hash comparison must not be
+    /// downgraded to a stat-cache-based "clean" verdict.
+    #[test]
+    fn pre_overwrite_guard_blocks_when_tree_verification_fails() {
+        let (_dir, root) = maw_git::test_support::init_test_repo();
+        std::fs::write(root.join("victim.fail"), "committed bytes\n").unwrap();
+        let _ = maw_git::test_support::commit_all(&root, "add victim");
+
+        std::fs::write(root.join(".gitattributes"), "*.fail filter=explode -text\n").unwrap();
+        let _ = maw_git::test_support::commit_all(&root, "add failing filter attributes");
+
+        // The real index already has a valid stat entry for victim.fail, so a
+        // status-shaped fallback reports clean. The authoritative detector's
+        // fresh index has zeroed stat data and must run the required filter,
+        // which fails deterministically.
+        let _ =
+            maw_git::test_support::git_capture(&root, &["config", "filter.explode.clean", "false"]);
+        let _ = maw_git::test_support::git_capture(
+            &root,
+            &["config", "filter.explode.required", "true"],
+        );
+
+        let guard = preserve_divergence_before_overwrite(
+            &root,
+            "test-ws",
+            &root,
+            MaterializeOp::SyncFastForward,
+        );
+        assert!(
+            matches!(guard, PreOverwriteGuard::Unverified { .. }),
+            "an unverifiable worktree must block the overwrite, got: {guard:?}"
         );
     }
 
