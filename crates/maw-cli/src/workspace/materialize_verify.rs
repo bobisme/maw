@@ -303,6 +303,25 @@ pub fn divergent_entries(entries: &[StatusEntry]) -> Vec<(String, &'static str)>
     out
 }
 
+/// Whether raw real content at an LFS path cleans to the blob stored in HEAD.
+fn native_lfs_content_matches_head(
+    repo: &maw_git::GixRepo,
+    head: maw_git::GitOid,
+    ws_path: &Path,
+    path: &str,
+) -> bool {
+    let Ok(bytes) = std::fs::read(ws_path.join(path)) else {
+        return false;
+    };
+    matches!(
+        (
+            repo.write_blob_with_path(&bytes, path),
+            repo.blob_oid_at_commit(head, Path::new(path)),
+        ),
+        (Ok(actual), Ok(Some(expected))) if actual == expected
+    )
+}
+
 /// Compute the divergent path set by **comparing trees**, not by asking git
 /// whether the worktree is dirty.
 ///
@@ -368,7 +387,21 @@ pub(crate) fn divergent_paths_by_tree(
     };
 
     run(&["read-tree", "HEAD"])?;
-    if let Err(add_err) = run(&["add", "-A"]) {
+    // Do not invoke the external git-lfs filter here. Maw owns LFS clean and
+    // smudge semantics natively, and this verifier must work when git-lfs is
+    // absent or misconfigured. Hash raw worktree bytes into the temporary tree;
+    // the comparison below normalizes LFS `M` entries through maw's clean path.
+    let lfs_identity = [
+        "-c",
+        "filter.lfs.process=",
+        "-c",
+        "filter.lfs.clean=",
+        "-c",
+        "filter.lfs.required=false",
+    ];
+    let mut add_args = lfs_identity.to_vec();
+    add_args.extend(["add", "-A"]);
+    if let Err(add_err) = run(&add_args) {
         // An embedded git directory without a checked-out commit makes
         // `git add -A` fail outright — the same shape
         // `capture::stage_all_for_capture` already handles. Retry with those
@@ -379,15 +412,18 @@ pub(crate) fn divergent_paths_by_tree(
         if excluded.is_empty() {
             return Err(add_err);
         }
-        let mut args: Vec<String> = ["add", "-A", "--", "."]
+        let mut args: Vec<String> = lfs_identity
             .iter()
+            .chain(["add", "-A", "--", "."].iter())
             .map(|s| (*s).to_owned())
             .collect();
         args.extend(excluded.iter().map(|p| format!(":(exclude){p}")));
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         run(&borrowed)?;
     }
-    let worktree_tree = run(&["write-tree"])?.trim().to_owned();
+    let mut write_tree_args = lfs_identity.to_vec();
+    write_tree_args.push("write-tree");
+    let worktree_tree = run(&write_tree_args)?.trim().to_owned();
 
     let raw = run(&[
         "diff-tree",
@@ -402,6 +438,18 @@ pub(crate) fn divergent_paths_by_tree(
     // `-z` output is NUL-separated `status\0path\0status\0path…` — robust
     // against paths with spaces, quotes or newlines (which the default
     // c-quoting would mangle).
+    // The temporary tree contains raw real bytes for LFS paths because the
+    // `git add` above deliberately bypassed git-lfs. Prepare maw's native
+    // matcher once so an `M` entry whose real content cleans back to HEAD's
+    // pointer can be recognized as clean.
+    let native_repo = maw_git::GixRepo::open(ws_path).ok();
+    let native_head = native_repo
+        .as_ref()
+        .and_then(|repo| repo.rev_parse_opt("HEAD").ok().flatten());
+    let native_attrs = native_repo.as_ref().and_then(|repo| {
+        native_head.and_then(|head| repo.load_gitattributes_at_commit(&head.to_string()))
+    });
+
     let mut fields = raw.split('\0').filter(|f| !f.is_empty());
     let mut out: Vec<(String, &'static str)> = Vec::new();
     while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
@@ -413,7 +461,21 @@ pub(crate) fn divergent_paths_by_tree(
             // shape this repair can act on.
             _ => continue,
         };
-        out.push((path.to_owned(), letter));
+        let native_lfs_equal = letter == "M"
+            && native_attrs
+                .as_ref()
+                .is_some_and(|attrs| attrs.is_lfs(path))
+            && ws_path
+                .join(path)
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            && native_repo.as_ref().is_some_and(|repo| {
+                native_head
+                    .is_some_and(|head| native_lfs_content_matches_head(repo, head, ws_path, path))
+            });
+        if !native_lfs_equal {
+            out.push((path.to_owned(), letter));
+        }
     }
     out.sort();
     out.dedup();
@@ -592,6 +654,8 @@ pub fn verify_clean_materialization(
         return None;
     };
 
+    let head_attrs = repo.load_gitattributes_at_commit(&head_oid.to_string());
+
     // ---- Preserve BEFORE repairing (Prime Invariant, fail-safe). ----
     //
     // The divergent bytes are, by the operation's contract, not user work — but
@@ -607,7 +671,7 @@ pub fn verify_clean_materialization(
     let mut paths: Vec<DivergentPath> = Vec::with_capacity(divergent.len());
     for (rel, letter) in &divergent {
         let (repaired, detail) = preserve_error.as_deref().map_or_else(
-            || repair_one_path(&repo, ws_path, head_oid, rel),
+            || repair_one_path(&repo, head_attrs.as_ref(), ws_path, head_oid, rel),
             |reason| {
                 (
                     false,
@@ -820,6 +884,7 @@ pub fn preserve_divergence_before_overwrite(
 /// git entry mode. Returns `(repaired, detail)`.
 fn repair_one_path(
     repo: &maw_git::GixRepo,
+    head_attrs: Option<&maw_lfs::AttrsMatcher>,
     ws_path: &Path,
     head_oid: maw_git::GitOid,
     rel: &str,
@@ -827,6 +892,25 @@ fn repair_one_path(
     let full = ws_path.join(rel);
     match repo.read_blob_at_path(head_oid, rel) {
         Ok(Some((mode, _oid, content))) => {
+            let content = if matches!(
+                mode,
+                maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable
+            ) {
+                match super::lfs_materialize::smudge_content(repo, head_attrs, rel, &content) {
+                    Ok(Some(real_content)) => real_content,
+                    Ok(None) => content,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %rel,
+                            error = %error,
+                            "post-materialization repair: LFS smudge unavailable; retaining pointer"
+                        );
+                        content
+                    }
+                }
+            } else {
+                content
+            };
             if let Some(parent) = full.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
@@ -1450,6 +1534,103 @@ mod tests {
             std::fs::read(destination.join("untracked.txt")).unwrap(),
             b"keep me\n",
             "a non-empty directory must fail safe without deleting its contents"
+        );
+    }
+
+    /// Build a commit whose `data.bin` blob is an LFS pointer while the
+    /// worktree contains the corresponding real content. This is the clean
+    /// materialized state produced by maw's native checkout path.
+    fn repo_with_materialized_lfs_file() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        maw_git::GitOid,
+        Vec<u8>,
+    ) {
+        use maw_git::GitRepo as _;
+
+        let (dir, root) = maw_git::test_support::init_test_repo();
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs -text\n").unwrap();
+        let base = maw_git::test_support::commit_all(&root, "attrs");
+        let base_oid: maw_git::GitOid = base.parse().unwrap();
+
+        let repo = maw_git::GixRepo::open(&root).unwrap();
+        let content = b"native LFS materialization must stay as real bytes\n".to_vec();
+        let pointer_oid = repo.write_blob_with_path(&content, "data.bin").unwrap();
+        let base_tree = repo.read_commit(base_oid).unwrap().tree_oid;
+        let tree = repo
+            .edit_tree(
+                base_tree,
+                &[maw_git::TreeEdit::Upsert {
+                    path: "data.bin".to_owned(),
+                    mode: maw_git::EntryMode::Blob,
+                    oid: pointer_oid,
+                }],
+            )
+            .unwrap();
+        let commit = repo
+            .create_commit(tree, &[base_oid], "lfs data", None)
+            .unwrap();
+        repo.checkout_tree(commit, &root).unwrap();
+        repo.set_head_detached(commit).unwrap();
+        assert_eq!(std::fs::read(root.join("data.bin")).unwrap(), content);
+
+        (dir, root, commit, content)
+    }
+
+    /// The authoritative detector must use maw's native LFS clean semantics.
+    /// It cannot depend on an external git-lfs filter, and it must still catch
+    /// a genuine edit to the real content.
+    #[test]
+    fn tree_detector_is_native_lfs_aware() {
+        let (_dir, root, _commit, content) = repo_with_materialized_lfs_file();
+
+        // Simulate a machine whose configured external clean filter is broken.
+        // Maw materialized the file natively, so verification must remain
+        // correct without invoking that command.
+        let _ = maw_git::test_support::git_capture(&root, &["config", "filter.lfs.process", ""]);
+        let _ = maw_git::test_support::git_capture(&root, &["config", "filter.lfs.clean", "false"]);
+        let _ =
+            maw_git::test_support::git_capture(&root, &["config", "filter.lfs.required", "true"]);
+
+        let clean = divergent_paths_by_tree(&root)
+            .expect("tree verification must not depend on external git-lfs");
+        assert!(clean.is_empty(), "smudged LFS content is clean: {clean:?}");
+
+        let mut edited = content;
+        edited[0] = b'X';
+        std::fs::write(root.join("data.bin"), edited).unwrap();
+        assert_eq!(
+            divergent_paths_by_tree(&root).unwrap(),
+            vec![("data.bin".to_owned(), "M")],
+            "a genuine LFS content edit must remain divergent"
+        );
+    }
+
+    /// Repairing a divergent LFS path must put real content back on disk when
+    /// its object is present. Writing the committed pointer blob is not a
+    /// complete materialization.
+    #[test]
+    fn materialize_repair_smudges_lfs_pointer() {
+        let (_dir, root, _commit, content) = repo_with_materialized_lfs_file();
+
+        // Use an identity external filter so the pre-repair capture succeeds;
+        // the repair itself must still use maw's native smudge path.
+        let _ = maw_git::test_support::git_capture(&root, &["config", "filter.lfs.process", ""]);
+        let _ = maw_git::test_support::git_capture(&root, &["config", "filter.lfs.clean", "cat"]);
+        let _ =
+            maw_git::test_support::git_capture(&root, &["config", "filter.lfs.required", "false"]);
+        std::fs::create_dir_all(root.join(".maw/manifold")).unwrap();
+        std::fs::write(root.join("data.bin"), b"corrupt bytes\n").unwrap();
+
+        let record = verify_clean_materialization(&root, "test-ws", &root, MaterializeOp::Create)
+            .expect("divergence must be detected and repaired");
+
+        assert_eq!(record.repaired_count, 1);
+        assert!(record.residual_paths.is_empty(), "{record:?}");
+        assert_eq!(
+            std::fs::read(root.join("data.bin")).unwrap(),
+            content,
+            "repair must restore real LFS content, not pointer text"
         );
     }
 }

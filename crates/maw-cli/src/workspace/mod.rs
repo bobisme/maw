@@ -31,6 +31,7 @@ pub(crate) mod epoch_drift;
 pub(crate) mod ff_absorb;
 mod history;
 pub(crate) mod invariant_audit;
+mod lfs_materialize;
 pub(crate) mod lifecycle;
 mod list;
 // `pub` (not `pub(crate)`): the bn-3gba stat-cache regression test

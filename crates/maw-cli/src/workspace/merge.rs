@@ -4178,6 +4178,7 @@ fn ff_materialize_blob(
 /// is logged and swallowed (the merge re-snapshots before BUILD).
 fn ff_apply_one_path(
     ws_repo: &maw_git::GixRepo,
+    target_attrs: Option<&maw_lfs::AttrsMatcher>,
     ws_name: &str,
     ws_path: &Path,
     target_git: maw_git::GitOid,
@@ -4197,6 +4198,31 @@ fn ff_apply_one_path(
     // corrupts both (see `ff_materialize_blob`).
     match ws_repo.read_blob_at_path(target_git, rel_str) {
         Ok(Some((mode, _oid, content))) => {
+            let content = if matches!(
+                mode,
+                maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable
+            ) {
+                match super::lfs_materialize::smudge_content(
+                    ws_repo,
+                    target_attrs,
+                    rel_str,
+                    &content,
+                ) {
+                    Ok(Some(real_content)) => real_content,
+                    Ok(None) => content,
+                    Err(error) => {
+                        tracing::warn!(
+                            workspace = %ws_name,
+                            path = %rel.display(),
+                            error = %error,
+                            "FF absorb: LFS smudge unavailable; retaining pointer"
+                        );
+                        content
+                    }
+                }
+            } else {
+                content
+            };
             if let Some(parent) = full.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
@@ -4304,6 +4330,10 @@ struct FfWorktreeSync {
 /// Failures are logged but non-fatal; the merge re-snapshots before BUILD
 /// and any drift will surface as a normal merge artefact rather than data
 /// loss.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered FF materialization and HEAD/index realignment sequence"
+)]
 fn sync_ff_paths_in_worktree(
     ws_path: &Path,
     ws_name: &str,
@@ -4342,6 +4372,7 @@ fn sync_ff_paths_in_worktree(
             return report;
         }
     };
+    let target_attrs = ws_repo.load_gitattributes_at_commit(oid);
 
     // bn-p3m9: the authoritative path set is this workspace's own
     // HEAD-tree → target-tree diff. `ff_paths` is kept as the floor (and as
@@ -4403,7 +4434,14 @@ fn sync_ff_paths_in_worktree(
                 .then_with(|| a.cmp(b))
         });
         for rel in deletions.iter().chain(&upserts) {
-            ff_apply_one_path(&ws_repo, ws_name, ws_path, target_git, rel);
+            ff_apply_one_path(
+                &ws_repo,
+                target_attrs.as_ref(),
+                ws_name,
+                ws_path,
+                target_git,
+                rel,
+            );
         }
     }
 
@@ -4703,6 +4741,7 @@ fn sync_target_worktree_to_epoch(
             return;
         }
     };
+    let target_attrs = ws_repo.load_gitattributes_at_commit(oid);
     // Resolve commit OIDs to tree OIDs so diff_trees compares the trees, not
     // the commit headers.
     let head_tree = head_oid.and_then(|h| ws_repo.read_commit(h).ok().map(|c| c.tree_oid));
@@ -4736,6 +4775,31 @@ fn sync_target_worktree_to_epoch(
         // symlinks and drops the executable bit (see `ff_materialize_blob`).
         match ws_repo.read_blob_at_path(target_git, &entry.path) {
             Ok(Some((mode, _oid, content))) => {
+                let content = if matches!(
+                    mode,
+                    maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable
+                ) {
+                    match super::lfs_materialize::smudge_content(
+                        &ws_repo,
+                        target_attrs.as_ref(),
+                        &entry.path,
+                        &content,
+                    ) {
+                        Ok(Some(real_content)) => real_content,
+                        Ok(None) => content,
+                        Err(error) => {
+                            tracing::warn!(
+                                workspace = %target_workspace_name,
+                                path = %rel.display(),
+                                error = %error,
+                                "FF absorb (target): LFS smudge unavailable; retaining pointer"
+                            );
+                            content
+                        }
+                    }
+                } else {
+                    content
+                };
                 if let Some(parent) = full.parent()
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
@@ -8903,6 +8967,7 @@ mod tests {
 
         ff_apply_one_path(
             &repo,
+            None,
             "test-ws",
             &root,
             target_git,
@@ -8912,6 +8977,50 @@ mod tests {
         assert!(
             link.symlink_metadata().is_err(),
             "dangling symlink at an epoch-deleted path must be removed",
+        );
+    }
+
+    /// FF-absorb writes raw blobs directly and therefore bypasses
+    /// `checkout_tree`'s LFS post-pass. It must smudge a target-commit pointer
+    /// before materializing the path.
+    #[test]
+    fn ff_apply_one_path_smudges_lfs_pointer() {
+        use maw_git::GitRepo as _;
+
+        let (_dir, root, repo) = repo_with_lfs_attrs();
+        let base = repo.rev_parse("HEAD").expect("resolve HEAD");
+        let base_tree = repo.read_commit(base).expect("read HEAD").tree_oid;
+        let real_content = b"FF absorb should materialize real LFS bytes\n".to_vec();
+        let pointer = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write LFS pointer");
+        let tree = repo
+            .edit_tree(
+                base_tree,
+                &[maw_git::TreeEdit::Upsert {
+                    path: "data.bin".to_owned(),
+                    mode: maw_git::EntryMode::Blob,
+                    oid: pointer,
+                }],
+            )
+            .expect("edit target tree");
+        let target = repo
+            .create_commit(tree, &[base], "target", None)
+            .expect("create target commit");
+        let attrs = repo.load_gitattributes_at_commit(&target.to_string());
+
+        ff_apply_one_path(
+            &repo,
+            attrs.as_ref(),
+            "test-ws",
+            &root,
+            target,
+            std::path::Path::new("data.bin"),
+        );
+
+        assert_eq!(
+            std::fs::read(root.join("data.bin")).expect("read materialized path"),
+            real_content
         );
     }
 

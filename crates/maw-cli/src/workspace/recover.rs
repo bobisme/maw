@@ -1356,51 +1356,101 @@ fn cat_file_blob(git_cwd: &Path, blob_oid: &str) -> Result<Vec<u8>> {
 /// itself can't be opened), so recovery never silently claims success while
 /// producing a stub file.
 #[cfg(feature = "lfs")]
-fn maybe_smudge(git_cwd: &Path, path: &str, content: Vec<u8>) -> Vec<u8> {
-    if !maw_lfs::looks_like_pointer(&content) {
+fn maybe_smudge(
+    git_cwd: &Path,
+    snapshot_oid: &str,
+    path: &str,
+    mode: &str,
+    content: Vec<u8>,
+) -> Vec<u8> {
+    if mode == "120000" || !maw_lfs::looks_like_pointer(&content) {
         return content;
     }
-    let Ok(pointer) = maw_lfs::Pointer::parse(&content) else {
-        // Pointer-shaped but not a valid pointer — leave it exactly as read.
-        return content;
-    };
-
-    let warn_and_keep_pointer = |reason: &str| {
-        eprintln!(
-            "WARNING: lfs object for '{path}' (oid {}) {reason} — restoring pointer text \
-             instead of content.\n  Fetch the object into the local store, then re-run recover.",
-            pointer.oid_hex()
-        );
-        content.clone()
-    };
 
     let Ok(repo) = open_repo(git_cwd) else {
-        return warn_and_keep_pointer("could not be resolved: failed to open repo");
+        return content;
     };
-    let Ok(store) = maw_lfs::Store::open(repo.common_dir()) else {
-        return warn_and_keep_pointer("could not be resolved: failed to open local LFS store");
-    };
-
-    match store.open_object(&pointer.oid) {
-        Ok(Some(mut reader)) => {
-            // `size` is only a capacity hint; a value that doesn't fit
-            // `usize` (32-bit targets) just means a few extra reallocations.
-            let mut buf = Vec::with_capacity(usize::try_from(pointer.size).unwrap_or(0));
-            match std::io::Read::read_to_end(&mut reader, &mut buf) {
-                Ok(_) => buf,
-                Err(_) => warn_and_keep_pointer("failed to read from the local LFS store"),
-            }
+    // A pointer-shaped regular file is still a regular file. Only smudge when
+    // the snapshot's own attributes mark this exact path as LFS-tracked.
+    let attrs = repo.load_gitattributes_at_commit(snapshot_oid);
+    match super::lfs_materialize::smudge_content(&repo, attrs.as_ref(), path, &content) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => content,
+        Err(reason) => {
+            eprintln!(
+                "WARNING: {reason} for '{path}' — restoring pointer text instead of content.\n  \
+                 Fetch the object into the local store, then re-run recover."
+            );
+            content
         }
-        Ok(None) => warn_and_keep_pointer("is not present in the local LFS store"),
-        Err(_) => warn_and_keep_pointer("could not be read from the local LFS store"),
     }
 }
 
 /// Non-LFS builds: no smudge path exists, so restore verbatim (identity),
 /// matching `GitRepo::write_blob_with_path`'s default (non-LFS) behavior.
 #[cfg(not(feature = "lfs"))]
-fn maybe_smudge(_git_cwd: &Path, _path: &str, content: Vec<u8>) -> Vec<u8> {
+fn maybe_smudge(
+    _git_cwd: &Path,
+    _snapshot_oid: &str,
+    _path: &str,
+    _mode: &str,
+    content: Vec<u8>,
+) -> Vec<u8> {
     content
+}
+
+/// Resolve a restore destination without following any parent symlink.
+///
+/// `validate_show_path` blocks lexical traversal. This check contains the
+/// filesystem path too: an untracked `dir -> /outside` symlink must not turn
+/// `--restore-file dir/file` into an out-of-workspace write.
+fn checked_restore_destination(default_ws: &Path, path: &str) -> Result<std::path::PathBuf> {
+    use std::path::Component;
+
+    let mut destination = default_ws.to_path_buf();
+    let components: Vec<_> = Path::new(path)
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .collect();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("Refusing unsafe restore path '{path}': path must stay inside the default workspace");
+    }
+
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            unreachable!("validated above")
+        };
+        destination.push(name);
+        if index + 1 == components.len() {
+            break;
+        }
+        match destination.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "Refusing restore path '{path}': parent '{}' is a symlink. No files were changed.",
+                    destination.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                bail!(
+                    "Refusing restore path '{path}': parent '{}' is not a directory. No files were changed.",
+                    destination.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect restore parent {}", destination.display()));
+            }
+        }
+    }
+
+    Ok(destination)
 }
 
 /// List blob/symlink paths reachable from `oid`. Used for the
@@ -1439,11 +1489,14 @@ fn dest_has_uncommitted(default_ws: &Path, path: &str) -> Result<bool> {
 
 #[cfg(unix)]
 fn write_with_mode(dest: &Path, content: &[u8], mode: &str) -> Result<()> {
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     if mode == "120000" {
         // Symlink: blob content is the target path.
-        let target = std::str::from_utf8(content).context("symlink target is not valid UTF-8")?;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let target = std::ffi::OsStr::from_bytes(content);
         if dest.exists() || dest.symlink_metadata().is_ok() {
             std::fs::remove_file(dest)
                 .with_context(|| format!("remove existing {}", dest.display()))?;
@@ -1453,18 +1506,44 @@ fn write_with_mode(dest: &Path, content: &[u8], mode: &str) -> Result<()> {
         return Ok(());
     }
 
-    std::fs::write(dest, content).with_context(|| format!("write to {}", dest.display()))?;
+    // Replace the directory entry before opening it. Truncating an existing
+    // regular file would also follow a hardlink and overwrite its other name.
+    // `create_new` makes the final absent-check and creation atomic, so a
+    // concurrently inserted symlink or hardlink fails closed with EEXIST.
+    if dest.symlink_metadata().is_ok() {
+        std::fs::remove_file(dest)
+            .with_context(|| format!("remove existing file {}", dest.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .with_context(|| format!("create {} without following links", dest.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("write to {}", dest.display()))?;
 
     let perm_bits: u32 = if mode == "100755" { 0o755 } else { 0o644 };
     let perms = std::fs::Permissions::from_mode(perm_bits);
-    std::fs::set_permissions(dest, perms)
+    file.set_permissions(perms)
         .with_context(|| format!("set permissions on {}", dest.display()))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_with_mode(dest: &Path, content: &[u8], _mode: &str) -> Result<()> {
-    std::fs::write(dest, content).with_context(|| format!("write to {}", dest.display()))?;
+    use std::io::Write as _;
+
+    if dest.symlink_metadata().is_ok() {
+        std::fs::remove_file(dest)
+            .with_context(|| format!("remove existing file {}", dest.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .with_context(|| format!("create {} without following links", dest.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("write to {}", dest.display()))?;
     Ok(())
 }
 
@@ -1511,9 +1590,9 @@ fn restore_file_at_oid(
     }
 
     let content = cat_file_blob(git_cwd, &entry.oid)?;
-    let content = maybe_smudge(git_cwd, path, content);
+    let content = maybe_smudge(git_cwd, oid, path, &entry.mode, content);
 
-    let dest = default_ws.join(path);
+    let dest = checked_restore_destination(default_ws, path)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create parent dir for {}", dest.display()))?;
@@ -2788,8 +2867,9 @@ three
             .expect("write_blob_with_path");
         let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
         assert!(maw_lfs::looks_like_pointer(&pointer_bytes));
+        let snapshot = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
 
-        let result = maybe_smudge(&root, "data.bin", pointer_bytes);
+        let result = maybe_smudge(&root, &snapshot, "data.bin", "100644", pointer_bytes);
         assert_eq!(
             result, real_content,
             "maybe_smudge should resolve the pointer to real content"
@@ -2813,8 +2893,15 @@ three
 
         std::fs::remove_dir_all(root.join(".git").join("lfs").join("objects"))
             .expect("remove lfs objects dir");
+        let snapshot = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
 
-        let result = maybe_smudge(&root, "data.bin", pointer_bytes.clone());
+        let result = maybe_smudge(
+            &root,
+            &snapshot,
+            "data.bin",
+            "100644",
+            pointer_bytes.clone(),
+        );
         assert_eq!(
             result, pointer_bytes,
             "with the object missing, maybe_smudge must return the pointer bytes unchanged"
@@ -2827,7 +2914,162 @@ three
     fn maybe_smudge_passthrough_for_non_pointer_content() {
         let (_dir, root) = repo_with_lfs_attrs();
         let content = b"just a regular text file, not a pointer\n".to_vec();
-        let result = maybe_smudge(&root, "notes.txt", content.clone());
+        let snapshot = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
+        let result = maybe_smudge(&root, &snapshot, "notes.txt", "100644", content.clone());
         assert_eq!(result, content);
+    }
+
+    /// Pointer-shaped bytes are not sufficient evidence that a path is LFS
+    /// tracked. A regular file can intentionally contain a valid pointer, and
+    /// recovery must restore its exact committed bytes.
+    #[test]
+    fn maybe_smudge_preserves_pointer_shaped_non_lfs_file() {
+        use maw_git::GitRepo as _;
+
+        let (_dir, root) = repo_with_lfs_attrs();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let real_content = b"object that must not replace literal.txt\n".to_vec();
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+        let snapshot = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
+
+        let result = maybe_smudge(
+            &root,
+            &snapshot,
+            "literal.txt",
+            "100644",
+            pointer_bytes.clone(),
+        );
+        assert_eq!(
+            result, pointer_bytes,
+            "a non-LFS path must retain pointer-shaped content verbatim"
+        );
+    }
+
+    /// Git never applies clean or smudge filters to symlink entries, even when
+    /// the path matches an LFS attribute pattern.
+    #[test]
+    fn maybe_smudge_preserves_pointer_shaped_symlink_target() {
+        use maw_git::GitRepo as _;
+
+        let (_dir, root) = repo_with_lfs_attrs();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let real_content = b"object that must not replace a symlink target\n".to_vec();
+        let pointer_oid = repo
+            .write_blob_with_path(&real_content, "data.bin")
+            .expect("write_blob_with_path");
+        let pointer_bytes = repo.read_blob(pointer_oid).expect("read pointer blob");
+        let snapshot = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
+
+        let result = maybe_smudge(
+            &root,
+            &snapshot,
+            "data.bin",
+            "120000",
+            pointer_bytes.clone(),
+        );
+        assert_eq!(result, pointer_bytes);
+    }
+
+    /// `--restore-file` must not follow an untracked parent symlink out of the
+    /// default workspace. The lexical `..` check alone does not contain the
+    /// destination.
+    #[cfg(unix)]
+    #[test]
+    fn restore_file_at_oid_rejects_parent_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create test root");
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).expect("create workspace");
+        maw_git::test_support::init_test_repo_at(&root);
+        fs::create_dir(root.join("escape")).expect("create committed directory");
+        fs::write(root.join("escape/target.txt"), b"snapshot bytes\n")
+            .expect("write committed file");
+        let oid = maw_git::test_support::commit_all(&root, "snapshot");
+
+        fs::remove_file(root.join("escape/target.txt")).expect("remove worktree file");
+        fs::remove_dir(root.join("escape")).expect("remove worktree directory");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).expect("create outside directory");
+        symlink(&outside, root.join("escape")).expect("create escaping symlink");
+
+        let error = restore_file_at_oid(
+            &root,
+            &root,
+            &oid,
+            "escape/target.txt",
+            true,
+            "refs/manifold/recovery/test/snapshot",
+        )
+        .expect_err("restore through an escaping parent symlink must fail");
+
+        assert!(error.to_string().contains("symlink"), "{error:#}");
+        assert!(
+            !outside.join("target.txt").exists(),
+            "restore must not write outside the default workspace"
+        );
+    }
+
+    /// Git symlink blobs are byte strings on Unix. Recovery must preserve a
+    /// valid non-UTF-8 target instead of rejecting it.
+    #[cfg(unix)]
+    #[test]
+    fn write_with_mode_preserves_non_utf8_symlink_target() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let destination = temp.path().join("link");
+        let target = b"target-\xff";
+
+        write_with_mode(&destination, target, "120000").expect("restore symlink");
+
+        let restored = fs::read_link(&destination).expect("read restored symlink");
+        assert_eq!(restored.as_os_str().as_bytes(), target);
+    }
+
+    /// A direct destination symlink is safe to replace, but it must never be
+    /// followed while restoring a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn write_with_mode_replaces_destination_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = temp.path().join("outside.txt");
+        let destination = temp.path().join("destination.txt");
+        fs::write(&outside, b"outside stays unchanged\n").expect("write outside file");
+        symlink(&outside, &destination).expect("create destination symlink");
+
+        write_with_mode(&destination, b"restored bytes\n", "100644").expect("restore regular file");
+
+        assert!(
+            !destination
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"restored bytes\n");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside stays unchanged\n");
+    }
+
+    /// Recovery must replace a hardlink directory entry instead of truncating
+    /// the shared inode and changing the file outside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn write_with_mode_replaces_destination_hardlink_without_following() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = temp.path().join("outside.txt");
+        let destination = temp.path().join("destination.txt");
+        fs::write(&outside, b"outside stays unchanged\n").expect("write outside file");
+        fs::hard_link(&outside, &destination).expect("create destination hardlink");
+
+        write_with_mode(&destination, b"restored bytes\n", "100644").expect("restore regular file");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"restored bytes\n");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside stays unchanged\n");
     }
 }
