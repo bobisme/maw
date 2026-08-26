@@ -2,6 +2,36 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.14 (2026-08-26)
+
+Fourteenth dogfood pre-release. Three data-loss-class defects closed in the FF-absorb path (the third and fourth since pre.11), a destroy-time stat-cache-blindness fix that closes the last known window in that class, a new opt-in DST corruption primitive, and two fresh-eyes sweeps that found and fixed eleven further substantiated defects across sync, checkout, recovery, and LFS materialization.
+
+**FF-absorb data-loss fixes (third and fourth in this class, after bn-p3m9 and bn-286g)**
+- **Stale dirty siblings no longer silently revert an epoch's hunks (bn-mq3b, bn-2fto).** FF-absorb could advance a dirty sibling's HEAD to the target epoch even when the sibling was more than one epoch behind with an uncommitted edit on a path that changed in an *earlier* epoch — the `dirty ∩ ff_paths` check missed it because the path wasn't in the global fast-forward set. The worktree kept the stale blob behind a HEAD claiming the new epoch, so the sibling's next commit silently reverted the epoch's changes. A new `ff_dirty_stale_conflict()` predicate (fails closed on unreadable HEAD/tree) now leaves such a sibling untouched instead of moving it, and `maw ws history` records the skip and any zero-replay FF-absorb advance so both are visible after the fact.
+- **Directory/file prefix collisions are now caught (bn-26wt).** The FF-absorb safety predicate only checked exact-path overlap; a directory replacing a file (or vice versa) at a shared prefix slipped past it. The central safety predicate, the stale-dirty classifier, and the sibling materializer filter now all reason about prefix collisions, not just exact paths.
+- **Dirty-path inspection fails closed (bn-vzj1).** A repo/status error during FF-absorb's dirty-path check used to return an empty set — treated as "nothing dirty" — which could let a mutation proceed against unverified state. Errors now propagate, and all call sites reuse one verified dirty-path snapshot instead of re-querying (and re-risking silent failure) mid-operation.
+- **Index-write retries no longer blame the wrong failure (bn-vzj1).** Index I/O retried on any error, including non-contention I/O failures it misattributed to "another process holds the lock." Retries are now scoped to the actual `PermanentlyLocked` case.
+
+**Destroy-time stat-cache blindness closed (bn-2k9e)**
+- `maw ws destroy`'s recovery snapshot was blind to stat-cache-masked stale worktree bytes in two places: `list_dirty_paths` (whether to snapshot at all) and `capture_dirty_worktree`'s `git add -A` (which bytes actually get staged — git's own add trusts the stat cache too). A masked file could be destroyed with its recovery snapshot silently pinning the wrong (HEAD) blob instead of the real on-disk content.
+- Fix reuses bn-154g's tree-diff-based hidden-divergence detector plus a chunked force-rehash pass before staging. Detector failure now widens the rehash to every tracked file (or refuses outright on the non-force path) rather than trusting the stat cache; pin failure aborts the destroy before any record or removal happens. The `MaskedStalePreservation` DST oracle now judges destroy operations directly — previously carved out as "unjudged."
+
+**New DST corruption primitive (bn-22jy)**
+- A new opt-in fault class injects stat-cache-masked worktree corruption during DST runs (`corrupt_weight`, 0 by default — byte-identical to prior runs, pinned by op-stream digest tests), verified by a new `MaskedStalePreservation` oracle and a regression plan that turns RED when the bn-154g guard is neutered.
+
+**Fresh-eyes sweeps (two rounds, eleven substantiated defects)**
+- **Append-only merge-driver gate hardened (bn-3vvm).** Invalid `[merge].append_only` glob patterns were silently ignored instead of erroring; `--check`/`--plan` skipped the append-only gate entirely; FF-absorb applied directory/file-swap paths in lexical order, leaving directory-to-file siblings dirty; materialization rejected non-UTF-8 Unix symlink targets it should have preserved verbatim.
+- **`.gitattributes` and migration detection (bn-1b0t).** `worktree_state_commit` ignored a modified or deleted `.gitattributes` when computing LFS/clean-filter behavior; the brownfield-migration notice failed to account for an existing `.maw/manifold` directory.
+- **Recovery containment and LFS materialization (bn-1b3n).** `maw ws recover --restore-file` followed parent symlinks outside the intended destination; pointer-shaped files that weren't actually LFS pointers were smudged anyway; materialization verification depended on an external `git-lfs` binary being present; repair and FF-absorb paths could write raw LFS pointer stubs into the worktree instead of smudged content.
+- **Auto-rebase verification race (bn-jhd7).** Materialization verification after auto-rebase ran outside the sibling lock, and corruption failpoint targets accepted relative paths that could resolve outside the intended scope; both are now scoped correctly, with cross-process and parser regressions added.
+- **Destructive checkout paths (bn-3s8u).** The sync pre-overwrite guard failed *open* when authoritative content hashing errored, and native checkout could leave deleted non-UTF-8 tracked paths behind instead of removing them.
+
+**Other**
+- Ref-update errors from push/release are now classified by a typed `GitError::RefConflict` instead of matching a `"lock"` substring in the error text (bn-2gbv); this deliberately drops generic lock-contention messages down to a plain retry hint rather than misreporting them as ref conflicts.
+- `AttrsMatcher` is now memoized per HEAD tree OID during blob writes instead of re-walking the HEAD tree per file — 10-38x faster on 300-2000-file snapshots (bn-2fps).
+- `checkout_detach_removes_stale_tracked_files` no longer assumes a git behavior that was never guaranteed; it now checks out in place instead of reusing a populated worktree directory (bn-24xy — not a regression in the underlying git version).
+- Severity wording, config-path messages, and timestamp formatting cleaned up across `doctor`/`fsck` output (bn-34wr).
+
 ## v1.0.0-pre.13 (2026-08-02)
 
 Thirteenth dogfood pre-release, focused on preserving user decisions during conflict resolution, hardening working-copy recovery, and making release automation reliable across maw's workspace layouts.
