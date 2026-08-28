@@ -6967,7 +6967,7 @@ fn guard_unbound_sources_against_active_change_ancestry(
     clippy::too_many_lines,
     reason = "cleanup step preserves failure-handling order after merge commit"
 )]
-fn update_default_workspace(
+pub fn update_default_workspace(
     default_ws_path: &Path,
     ws_name: &str,
     branch: &str,

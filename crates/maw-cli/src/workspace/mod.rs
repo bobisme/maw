@@ -40,7 +40,7 @@ mod list;
 // hand-built index-stat-cache mask without needing a `--features failpoints`
 // binary — i.e. so that regression runs in the DEFAULT `just check` lane.
 pub mod materialize_verify;
-mod merge;
+pub(crate) mod merge;
 pub(crate) mod metadata;
 mod names;
 pub(crate) mod oplog_runtime;

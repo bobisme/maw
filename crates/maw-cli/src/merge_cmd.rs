@@ -228,6 +228,12 @@ fn promote(merge_id: &str) -> Result<()> {
         let config_skip = maw_core::config::ValidationConfig::default();
         match promote_quarantine(&root, &manifold_dir, merge_id, &config_skip) {
             Ok(PromoteResult::Committed { new_epoch }) => {
+                refresh_default_after_promote(
+                    &root,
+                    &state.branch,
+                    state.epoch_before.as_str(),
+                    new_epoch.as_str(),
+                );
                 print_promote_success(merge_id, &new_epoch.as_str()[..12], &state.branch);
                 return Ok(());
             }
@@ -242,6 +248,12 @@ fn promote(merge_id: &str) -> Result<()> {
 
     match promote_quarantine(&root, &manifold_dir, merge_id, validation_config) {
         Ok(PromoteResult::Committed { new_epoch }) => {
+            refresh_default_after_promote(
+                &root,
+                &state.branch,
+                state.epoch_before.as_str(),
+                new_epoch.as_str(),
+            );
             print_promote_success(merge_id, &new_epoch.as_str()[..12], &state.branch);
             Ok(())
         }
@@ -267,6 +279,61 @@ fn promote(merge_id: &str) -> Result<()> {
             bail!("Quarantine promotion failed: validation still failing.")
         }
         Err(e) => bail!("Promote failed: {e}"),
+    }
+}
+
+/// Refresh the default/root worktree to the promoted epoch, preserving any
+/// dirty state.
+///
+/// `promote_quarantine` advances the epoch and branch refs but does NOT touch
+/// the default worktree. Without this step the root stays at `epoch_before`
+/// (detached, possibly dirty) while the branch and epoch point at the promoted
+/// commit — and no other command refreshes it: `maw ws advance default` refuses
+/// ("updated automatically during merge") and `maw ws sync` skips default. This
+/// reuses the same snapshot/checkout/replay path that a normal `maw ws merge`
+/// uses for the default target, so dirty managed state (e.g. `.bones`) rides
+/// forward and is pinned to a recovery ref rather than lost.
+///
+/// Best-effort: the epoch and branch refs are already advanced when this runs,
+/// so a failure here must not fail the promote. It surfaces a warning with the
+/// manual recovery path instead of bailing.
+fn refresh_default_after_promote(
+    root: &std::path::Path,
+    branch: &str,
+    epoch_before: &str,
+    new_epoch: &str,
+) {
+    let default_ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .workspace_path(root, "default");
+    if !default_ws_path.exists() {
+        return;
+    }
+
+    if let Err(e) = crate::workspace::merge::update_default_workspace(
+        &default_ws_path,
+        "default",
+        branch,
+        epoch_before,
+        new_epoch,
+        None,
+        root,
+        true, // target_updates_epoch — promote advanced the epoch
+        true, // text_mode
+        &[],  // no conflict resolutions
+        &[],  // no source workspaces to record
+    ) {
+        eprintln!(
+            "  WARNING: promote advanced the epoch, but refreshing the default \
+             worktree failed: {e:#}"
+        );
+        eprintln!(
+            "  The root worktree may still sit at the previous epoch ({}).",
+            epoch_before.get(..12).unwrap_or(epoch_before)
+        );
+        eprintln!("  Recover manually (preserves dirty state):");
+        eprintln!("    git -C {} stash push -u", default_ws_path.display());
+        eprintln!("    git -C {} switch {branch}", default_ws_path.display());
+        eprintln!("    git -C {} stash pop", default_ws_path.display());
     }
 }
 
