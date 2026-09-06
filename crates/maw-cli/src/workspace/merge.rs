@@ -1805,7 +1805,12 @@ fn check_merge_result_for_target(
     }
 
     if target_updates_epoch {
-        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
+        guard_unbound_sources_against_active_change_ancestry(
+            &root,
+            target_branch,
+            workspaces,
+            &workspace_dirs,
+        )?;
     }
 
     // Check staleness
@@ -2195,19 +2200,20 @@ pub fn plan_merge(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let sources = parse_workspace_ids(workspaces)?;
     validate_workspace_dirs(&sources, &backend)?;
+    let workspace_dirs = workspace_dirs_map(&sources, &backend);
 
     if target_updates_epoch {
-        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
+        guard_unbound_sources_against_active_change_ancestry(
+            &root,
+            target_branch,
+            workspaces,
+            &workspace_dirs,
+        )?;
     }
 
     // PREPARE → COLLECT → PARTITION → BUILD
-    let frozen = run_prepare_phase(
-        &root,
-        &manifold_dir,
-        &sources,
-        &workspace_dirs_map(&sources, &backend),
-    )
-    .map_err(|e| anyhow::anyhow!("PREPARE failed: {e}"))?;
+    let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
+        .map_err(|e| anyhow::anyhow!("PREPARE failed: {e}"))?;
     let patch_sets = collect_snapshots(&root, &backend, &sources)
         .map_err(|e| anyhow::anyhow!("COLLECT failed: {e}"))?;
     let partition = partition_by_path(&patch_sets);
@@ -5184,7 +5190,12 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     )?;
 
     if target_updates_epoch {
-        guard_unbound_sources_against_active_change_ancestry(&root, branch, &ws_to_merge)?;
+        guard_unbound_sources_against_active_change_ancestry(
+            &root,
+            branch,
+            &ws_to_merge,
+            &workspace_dirs,
+        )?;
     }
 
     // -----------------------------------------------------------------------
@@ -6871,6 +6882,7 @@ fn guard_unbound_sources_against_active_change_ancestry(
     root: &Path,
     target_branch: &str,
     source_workspaces: &[String],
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
 ) -> Result<()> {
     let risky_change_heads = active_change_heads_not_on_branch(root, target_branch)?;
     if risky_change_heads.is_empty() {
@@ -6886,8 +6898,12 @@ fn guard_unbound_sources_against_active_change_ancestry(
             continue;
         }
 
-        let ws_path = root.join("ws").join(ws_name);
-        let ws_head = resolve_workspace_head_oid(&ws_path)?;
+        let ws_id = WorkspaceId::new(ws_name)
+            .map_err(|e| anyhow::anyhow!("invalid workspace name '{ws_name}': {e}"))?;
+        let ws_path = workspace_dirs.get(&ws_id).ok_or_else(|| {
+            anyhow::anyhow!("authoritative path is missing for workspace '{ws_name}'")
+        })?;
+        let ws_head = resolve_workspace_head_oid(ws_path)?;
 
         for change in &risky_change_heads {
             if is_ancestor_commit(root, &change.head_oid, &ws_head)? {
