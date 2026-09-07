@@ -174,14 +174,7 @@ fn task_battery_from_plan(plan: &ScenarioPlan) -> Vec<String> {
                 recovery_snapshots,
                 older_than_days,
             } => {
-                if *recovery_snapshots {
-                    tasks.push(format!(
-                        "Run garbage collection including the recovery-snapshot sweep \
-                         (removing snapshots older than {older_than_days} day(s))."
-                    ));
-                } else {
-                    tasks.push("Run routine garbage collection on the repository.".to_owned());
-                }
+                tasks.push(gc_task(*recovery_snapshots, *older_than_days));
             }
             Op::CorruptWorktreeStatMasked { ws, path, .. } => {
                 // SG2 drives real agents, which cannot be asked to forge an
@@ -199,6 +192,17 @@ fn task_battery_from_plan(plan: &ScenarioPlan) -> Vec<String> {
         }
     }
     tasks
+}
+
+fn gc_task(recovery_snapshots: bool, older_than_days: u64) -> String {
+    if recovery_snapshots {
+        format!(
+            "Run garbage collection including the recovery-snapshot sweep \
+             (removing snapshots older than {older_than_days} day(s))."
+        )
+    } else {
+        "Run routine garbage collection on the repository.".to_owned()
+    }
 }
 
 /// SHA-256 of the prompt bytes (the `prompt_hash` field of §6.4).
@@ -325,10 +329,10 @@ fn sha256(message: &[u8]) -> [u8; 32] {
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     // Process each 512-bit chunk.
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word_bytes) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
+        for (i, word_bytes) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word_bytes);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.15 (2026-09-07)
+
+Fifteenth dogfood pre-release, focused on merge validation and quarantine recovery.
+
+- **Verbose validation no longer deadlocks (bn-15tj).** Merge and quarantine promotion drain stdout and stderr while validation commands run. Each stream retains its last 1 MiB, with explicit truncation notices. Timeouts preserve partial diagnostics and terminate the command's process group on Unix. Output collection also has a deadline when descendants retain pipe handles.
+- **Consolidated-layout merges use the correct workspace path (bn-1uif).** The active-change ancestry guard uses backend-resolved paths for merge, `--check`, and `--plan`. Unbound workspaces with unmerged active-change ancestry still cannot promote those commits to trunk.
+- **Quarantine promotion refreshes the default worktree (bn-emj1).** A successful `maw merge promote` checks out the promoted epoch and preserves uncommitted edits. The default worktree now agrees with the advanced branch and epoch refs.
+- **Maintenance.** Updated repository security-review instructions, corrected expressions rejected by Rust 1.98 Clippy, and pointed the manual formal-check recipe at the relocated model tests.
+
 ## v1.0.0-pre.14 (2026-08-26)
 
 Fourteenth dogfood pre-release. Three data-loss-class defects closed in the FF-absorb path (the third and fourth since pre.11), a destroy-time stat-cache-blindness fix that closes the last known window in that class, a new opt-in DST corruption primitive, and two fresh-eyes sweeps that found and fixed eleven further substantiated defects across sync, checkout, recovery, and LFS materialization.

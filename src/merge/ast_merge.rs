@@ -1174,7 +1174,7 @@ fn leading_trivia<'a>(source: &'a [u8], item: &TopLevelItem) -> &'a [u8] {
 }
 
 /// Skip trailing whitespace (spaces, tabs, newlines) after a byte position.
-fn skip_trailing_whitespace(source: &[u8], from: usize) -> usize {
+const fn skip_trailing_whitespace(source: &[u8], from: usize) -> usize {
     let mut pos = from;
     while pos < source.len() && matches!(source[pos], b' ' | b'\t' | b'\n' | b'\r') {
         pos += 1;

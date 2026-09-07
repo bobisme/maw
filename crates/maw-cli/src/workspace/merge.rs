@@ -2397,9 +2397,8 @@ fn build_driver_infos(
     let mut infos = Vec::new();
     for path in overlaps {
         for driver in &effective_drivers {
-            let matches = glob::Pattern::new(&driver.match_glob)
-                .ok()
-                .is_some_and(|p| p.matches_path(path));
+            let matches =
+                glob::Pattern::new(&driver.match_glob).is_ok_and(|p| p.matches_path(path));
             if !matches {
                 continue;
             }

@@ -95,7 +95,7 @@ dst-fast:
 # notes/assurance/completion-summary.md ("just formal-check | pre-release").
 # formal-check: Stateright model checking (pre-release)
 formal-check:
-  cargo test --features assurance --test formal_model -- --ignored
+  cargo test -p maw-assurance --features stateright --test formal_model -- --ignored
 
 # contract-drift: doc/code consistency checks
 contract-drift:

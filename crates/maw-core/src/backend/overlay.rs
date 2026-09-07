@@ -249,9 +249,8 @@ impl OverlayBackend {
 
         // Already populated: snapshot dir exists and has content (not just .refcount).
         if snapshot_dir.exists() {
-            let has_content = fs::read_dir(&snapshot_dir).is_ok_and(|mut rd| {
-                rd.any(|e| e.ok().is_some_and(|e| e.file_name() != ".refcount"))
-            });
+            let has_content = fs::read_dir(&snapshot_dir)
+                .is_ok_and(|mut rd| rd.any(|e| e.is_ok_and(|e| e.file_name() != ".refcount")));
             if has_content {
                 return Ok(snapshot_dir);
             }

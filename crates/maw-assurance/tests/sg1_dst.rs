@@ -153,9 +153,7 @@ fn plant_and_fail() -> bool {
 }
 
 fn env_bool(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+    std::env::var(key).is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
