@@ -31,11 +31,17 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 
 use maw_git::{GitRepo as _, GixRepo};
 
@@ -483,7 +489,115 @@ fn run_commands_pipeline(
     })
 }
 
-/// Run a single shell command with timeout, capturing all output.
+/// Maximum retained bytes for each validation output stream.
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// Maximum wait for pipe readers after the command tree has been terminated.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct BoundedCapture {
+    bytes: VecDeque<u8>,
+    omitted: usize,
+}
+
+impl BoundedCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend(chunk);
+        while self.bytes.len() > MAX_CAPTURE_BYTES {
+            let _ = self.bytes.pop_front();
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+
+    fn render(&self, incomplete_reason: Option<&str>) -> String {
+        let retained: Vec<u8> = self.bytes.iter().copied().collect();
+        let mut output = String::from_utf8_lossy(&retained).into_owned();
+        if self.omitted > 0 {
+            output = format!(
+                "[output truncated: {} leading bytes omitted]\n{output}",
+                self.omitted
+            );
+        }
+        if let Some(reason) = incomplete_reason {
+            let _ = write!(output, "\n[output capture incomplete: {reason}]");
+        }
+        output
+    }
+}
+
+fn lock_capture(capture: &Mutex<BoundedCapture>) -> std::sync::MutexGuard<'_, BoundedCapture> {
+    capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn spawn_pipe_drain(
+    mut pipe: impl Read + Send + 'static,
+) -> (
+    Arc<Mutex<BoundedCapture>>,
+    mpsc::Receiver<Result<(), String>>,
+) {
+    let capture = Arc::new(Mutex::new(BoundedCapture::default()));
+    let writer = Arc::clone(&capture);
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => {
+                    let _ = done_tx.send(Ok(()));
+                    return;
+                }
+                Ok(read) => lock_capture(&writer).push(&chunk[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    let _ = done_tx.send(Err(error.to_string()));
+                    return;
+                }
+            }
+        }
+    });
+    (capture, done_rx)
+}
+
+fn finish_pipe_drain(
+    capture: &Mutex<BoundedCapture>,
+    done: &mpsc::Receiver<Result<(), String>>,
+    deadline: Instant,
+) -> String {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let incomplete_reason = match done.recv_timeout(remaining) {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("pipe read failed: {error}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Some("pipe remained open after process cleanup".to_owned())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Some("pipe reader stopped without a result".to_owned())
+        }
+    };
+    lock_capture(capture).render(incomplete_reason.as_deref())
+}
+
+fn kill_command_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let killed = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if killed {
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Run a single shell command with timeout, draining and bounding both streams.
 fn run_single_command(
     command: &str,
     working_dir: &Path,
@@ -492,37 +606,41 @@ fn run_single_command(
     let timeout = Duration::from_secs(timeout_seconds.into());
     let start = Instant::now();
 
-    let mut child = Command::new("sh")
+    let mut process = Command::new("sh");
+    process
         .args(["-c", command])
         .current_dir(working_dir)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    process.process_group(0);
+
+    let mut child = process
         .spawn()
         .map_err(|e| ValidateError::CommandSpawn(format!("sh -c {command:?}: {e}")))?;
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ValidateError::CommandSpawn("validation stdout pipe was not created".to_owned())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ValidateError::CommandSpawn("validation stderr pipe was not created".to_owned())
+    })?;
+    let (stdout_capture, stdout_done) = spawn_pipe_drain(stdout);
+    let (stderr_capture, stderr_done) = spawn_pipe_drain(stderr);
 
     // Wait with timeout
     let result = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // A successful shell can leave background descendants holding
+                // its pipe handles. Terminate that command tree before the
+                // bounded reader wait so collection cannot hang indefinitely.
+                kill_command_tree(&mut child);
+                let drain_deadline = Instant::now() + PIPE_DRAIN_GRACE;
+                let stdout = finish_pipe_drain(&stdout_capture, &stdout_done, drain_deadline);
+                let stderr = finish_pipe_drain(&stderr_capture, &stderr_done, drain_deadline);
                 let duration = start.elapsed();
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).unwrap_or(0);
-                        buf
-                    })
-                    .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).unwrap_or(0);
-                        buf
-                    })
-                    .unwrap_or_default();
 
                 let exit_code = status.code();
                 let passed = exit_code == Some(0);
@@ -539,21 +657,32 @@ fn run_single_command(
             Ok(None) => {
                 // Still running — check timeout
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
+                    kill_command_tree(&mut child);
                     let _ = child.wait();
+
+                    let drain_deadline = Instant::now() + PIPE_DRAIN_GRACE;
+                    let stdout = finish_pipe_drain(&stdout_capture, &stdout_done, drain_deadline);
+                    let mut stderr =
+                        finish_pipe_drain(&stderr_capture, &stderr_done, drain_deadline);
+                    if !stderr.is_empty() {
+                        stderr.push('\n');
+                    }
+                    let _ = write!(stderr, "killed by timeout after {timeout_seconds}s");
 
                     break CommandResult {
                         command: command.to_owned(),
                         passed: false,
                         exit_code: None,
-                        stdout: String::new(),
-                        stderr: format!("killed by timeout after {timeout_seconds}s"),
+                        stdout,
+                        stderr,
                         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     };
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
+                kill_command_tree(&mut child);
+                let _ = child.wait();
                 return Err(ValidateError::CommandSpawn(format!(
                     "wait for command: {e}"
                 )));
@@ -753,6 +882,116 @@ mod tests {
         assert!(result.passed);
         assert!(result.stdout.contains("out-text"));
         assert!(result.stderr.contains("err-text"));
+    }
+
+    #[test]
+    fn validate_drains_large_stdout_and_stderr_and_retains_bounded_tails() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir(
+            "yes stdout-data | head -c 1200000; echo STDOUT-END; \
+             yes stderr-data | head -c 1200000 >&2; echo STDERR-END >&2",
+            dir.path(),
+            10,
+            &OnFailure::Block,
+        )
+        .expect("verbose validation must not deadlock");
+        let result = outcome.result().expect("validation result");
+        assert!(result.passed);
+        assert!(result.stdout.contains("STDOUT-END"));
+        assert!(result.stderr.contains("STDERR-END"));
+        assert!(result.stdout.contains("leading bytes omitted"));
+        assert!(result.stderr.contains("leading bytes omitted"));
+        assert!(result.stdout.len() <= MAX_CAPTURE_BYTES + 100);
+        assert!(result.stderr.len() <= MAX_CAPTURE_BYTES + 100);
+    }
+
+    #[test]
+    fn validate_verbose_failure_preserves_exit_code_and_final_diagnostics() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir(
+            "yes noise | head -c 1200000 >&2; echo FINAL-DIAGNOSTIC >&2; exit 37",
+            dir.path(),
+            10,
+            &OnFailure::Block,
+        )
+        .expect("verbose failing validation must complete");
+        let result = outcome.result().expect("validation result");
+        assert!(!result.passed);
+        assert_eq!(result.exit_code, Some(37));
+        assert!(result.stderr.contains("FINAL-DIAGNOSTIC"));
+        assert!(result.stderr.contains("leading bytes omitted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_timeout_preserves_partial_output_and_kills_descendants() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir(
+            "echo partial-out; echo partial-err >&2; sleep 60 & echo $! > child.pid; wait",
+            dir.path(),
+            1,
+            &OnFailure::Block,
+        )
+        .expect("timed out validation must return");
+        let result = outcome.result().expect("validation result");
+        assert!(!result.passed);
+        assert_eq!(result.exit_code, None);
+        assert!(result.stdout.contains("partial-out"));
+        assert!(result.stderr.contains("partial-err"));
+        assert!(result.stderr.contains("killed by timeout after 1s"));
+
+        #[cfg(target_os = "linux")]
+        {
+            let pid = std::fs::read_to_string(dir.path().join("child.pid"))
+                .expect("read descendant pid")
+                .trim()
+                .to_owned();
+            let stat_path = Path::new("/proc").join(pid).join("stat");
+            let state = std::fs::read_to_string(stat_path)
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
+                .and_then(|rest| rest.chars().next());
+            assert!(
+                state.is_none_or(|state| state == 'Z'),
+                "validation descendant remained live after timeout: {state:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_success_does_not_wait_for_descendant_held_pipes() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let started = Instant::now();
+        let outcome = run_validate_in_dir(
+            "sleep 60 & echo $! > child.pid; echo parent-done; exit 0",
+            dir.path(),
+            10,
+            &OnFailure::Block,
+        )
+        .expect("successful parent must not wait for descendant pipes");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let result = outcome.result().expect("validation result");
+        assert!(result.passed);
+        assert!(result.stdout.contains("parent-done"));
+        assert!(result.duration_ms < 5000);
+
+        #[cfg(target_os = "linux")]
+        {
+            let pid = std::fs::read_to_string(dir.path().join("child.pid"))
+                .expect("read descendant pid")
+                .trim()
+                .to_owned();
+            let stat_path = Path::new("/proc").join(pid).join("stat");
+            let state = std::fs::read_to_string(stat_path)
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
+                .and_then(|rest| rest.chars().next());
+            assert!(
+                state.is_none_or(|state| state == 'Z'),
+                "validation descendant remained live after parent exit: {state:?}"
+            );
+        }
     }
 
     #[test]
