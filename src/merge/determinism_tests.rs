@@ -858,7 +858,8 @@ fn run_full_merge(
         }
     }
 
-    build_merge_commit(root, epoch, &ws_ids, &result.resolved, &modes, None)
+    let repo = maw_git::GixRepo::open(root).expect("open test repo");
+    build_merge_commit(&repo, epoch, &ws_ids, &result.resolved, &modes, None)
         .expect("build should succeed")
 }
 

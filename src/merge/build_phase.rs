@@ -61,9 +61,6 @@ use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, Merge
 use crate::merge::build::{BuildError, ResolvedChange, build_merge_commit};
 use crate::merge::collect::{CollectError, collect_snapshots};
 use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
-#[cfg(not(feature = "ast-merge"))]
-use crate::merge::resolve::resolve_partition;
-#[cfg(feature = "ast-merge")]
 use crate::merge::resolve::{ConflictReason, ConflictRecord, ResolveError, ResolveResult};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};

@@ -1,0 +1,85 @@
+name: Verify (Kani + Stateright + proptests)
+
+# Formal/property verification gates (bn-86hd, goal bn-2ws4).
+#
+# These gates rotted silently because nothing ran them:
+#   - `cargo check --no-default-features` had 13 errors, so `just kani-fast`
+#     (which needs --no-default-features) did not compile.
+#   - the `proptests` feature (src/merge/determinism_tests.rs,
+#     pushout_tests.rs) was never enabled by any recipe.
+#   - `just formal-check` (Stateright) was #[ignore] + local-only.
+#
+# This workflow runs them on every PR + push to main so they cannot rot
+# again. kani-fast is ~1 min of proving (13 root harnesses + any maw-core /
+# maw-lfs harnesses); the ~49 min `kani-full` tier is NOT run here.
+#
+# To add Kani harnesses to another crate: add a `cargo kani -p <crate>` line
+# to the `kani-fast` (and `kani-full`) Justfile recipes; this workflow picks
+# it up automatically.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KANI_VERSION: 0.68.0
+
+jobs:
+  feature-matrix-and-proptests:
+    name: No-default-features clippy + proptests + Stateright
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (--no-default-features)
+        run: just nodefault-check
+
+      - name: Merge proptests (--features proptests)
+        run: just proptests
+
+      - name: Stateright model check
+        run: just formal-check
+
+  kani-fast:
+    name: Kani (fast tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kani-${{ env.KANI_VERSION }}
+
+      # Kani installs its own pinned nightly toolchain + CBMC into ~/.kani.
+      - name: Cache Kani toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.kani
+          key: kani-home-${{ runner.os }}-${{ env.KANI_VERSION }}
+
+      - name: Install Kani
+        run: |
+          if ! cargo kani --version 2>/dev/null | grep -q "${KANI_VERSION}"; then
+            cargo install --locked kani-verifier --version "${KANI_VERSION}"
+          fi
+          if [ ! -d "${HOME}/.kani/kani-${KANI_VERSION}" ]; then
+            cargo kani setup
+          fi
+
+      - name: Kani proofs (just kani-fast)
+        run: just kani-fast

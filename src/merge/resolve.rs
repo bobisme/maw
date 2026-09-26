@@ -668,6 +668,8 @@ enum SharedOutcome {
 /// A strategy for merging shared paths, derived from `.gitattributes`
 /// merge drivers on a per-path basis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Under Kani `path_merge_strategy` is stubbed to always return `Diff3`.
+#[cfg_attr(kani, allow(dead_code))]
 enum PathMergeStrategy {
     /// Default: 3-way diff3 merge with fallback to shifted-alignment retry,
     /// producing diff3 conflict markers on irreconcilable overlap.
@@ -1289,6 +1291,7 @@ fn recover_diff3_atoms(entries: &[PathEntry], base: Option<&[u8]>) -> Vec<Confli
     recover_diff3_atoms_with_participants(entries, base).0
 }
 
+#[cfg(feature = "ast-merge")]
 fn all_equal(contents: &[Vec<u8>]) -> bool {
     contents
         .split_first()

@@ -49,10 +49,9 @@
 
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
-use crate::merge::resolve::{
-    ConflictReason, Diff3Result, MergeOutcome, SharedClassification, classify_shared_path,
-    resolve_entries,
-};
+#[cfg(feature = "kani-slow")]
+use crate::merge::resolve::{ConflictReason, Diff3Result, MergeOutcome, resolve_entries};
+use crate::merge::resolve::{SharedClassification, classify_shared_path};
 use crate::merge::types::ChangeKind;
 
 // ---------------------------------------------------------------------------
@@ -82,6 +81,7 @@ fn is_delete(k: &ChangeKind) -> bool {
 ///
 /// This is richer than `ours == theirs → clean, else conflict` because it
 /// captures the "one-side-changed" rule that real diff3 implements.
+#[cfg(feature = "kani-slow")]
 fn stub_diff3(base: &u8, ours: &u8, theirs: &u8) -> Result<Diff3Result<u8>, ()> {
     if ours == theirs {
         Ok(Diff3Result::Clean(*ours))
@@ -100,6 +100,7 @@ fn stub_diff3(base: &u8, ours: &u8, theirs: &u8) -> Result<Diff3Result<u8>, ()> 
 /// Build a content slice from kinds and symbolic values.
 ///
 /// Deleted entries get `None`, non-deleted get `Some(value)`.
+#[cfg(feature = "kani-slow")]
 fn make_contents(kinds: &[ChangeKind], values: &[u8]) -> Vec<Option<u8>> {
     kinds
         .iter()

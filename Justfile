@@ -90,10 +90,9 @@ install:
 dst-fast:
   cargo test --features assurance --test dst_harness -- --ignored dst_g1 dst_g2 dst_g3 dst_g4 dst_determinism
 
-# ci: local-only — pre-release manual gate (run by the release checklist, not
-# per-commit/PR automation); no workflow invokes it today. See
-# notes/assurance/completion-summary.md ("just formal-check | pre-release").
-# formal-check: Stateright model checking (pre-release)
+# formal-check: Stateright model checking. Wired into .github/workflows/verify.yml
+# (bn-86hd) and the local `just verify` recipe; still part of the pre-release
+# checklist (notes/assurance/completion-summary.md).
 formal-check:
   cargo test -p maw-assurance --features stateright --test formal_model -- --ignored
 
@@ -109,16 +108,47 @@ dst-nightly:
 incident-replay:
   cargo test --features assurance --test dst_harness -- --ignored incident_replay
 
-# kani-fast: classify_shared_path proofs only (~seconds)
+# kani-fast: every Kani harness except the kani-slow resolve_entries proofs
+# (~1 min total). Root crate: classify_shared_path merge-algebra proofs (needs
+# --no-default-features: tree-sitter/otel C deps do not build under Kani).
+# maw-core / maw-lfs: path-predicate and codec harnesses (bn-2ws4 children).
+# A crate with zero #[kani::proof] harnesses exits 0 ("No proof harnesses"),
+# so the per-crate lines are safe before those harnesses land. When adding
+# Kani harnesses to another crate, add a `cargo kani -p <crate>` line here
+# AND to kani-full.
+# Wired into .github/workflows/verify.yml (bn-86hd).
 kani-fast:
   cargo kani --no-default-features
+  cargo kani -p maw-core
+  cargo kani -p maw-lfs
 
 # kani-full: all Kani proofs including resolve_entries (~49 min)
 kani-full:
   cargo kani --no-default-features --features kani-slow
+  cargo kani -p maw-core
+  cargo kani -p maw-lfs
+
+# nodefault-check: the root crate must build + lint cleanly with
+# --no-default-features (no ast-merge, no otel). kani-fast depends on this
+# build; it rotted silently once (bn-86hd: 13 errors in build_phase.rs), so
+# it is part of `just check` and wired into verify.yml.
+nodefault-check:
+  cargo clippy --no-default-features --all-targets -- -D warnings
+
+# proptests: merge determinism + pushout property tests (src/merge/
+# determinism_tests.rs, pushout_tests.rs), gated behind the `proptests`
+# feature so the default `cargo test` stays fast. Part of `just check`
+# (bn-86hd: previously nothing enabled the feature, so they never ran).
+proptests:
+  cargo test --lib --features proptests -- merge::determinism_tests merge::pushout_tests
+
+# verify: formal/property gates — proptests + Kani (fast tier) + Stateright.
+# Needs `cargo kani` installed (cargo install --locked kani-verifier &&
+# cargo kani setup). CI runs the same set in .github/workflows/verify.yml.
+verify: proptests kani-fast formal-check
 
 # All assurance gates combined
-check: fmt-check clippy test dst-fast contract-drift
+check: fmt-check clippy nodefault-check test proptests dst-fast contract-drift
 
 coverage:
   cargo llvm-cov
