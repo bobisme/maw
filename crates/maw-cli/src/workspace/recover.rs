@@ -1899,6 +1899,10 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
 /// Equivalent to `git checkout --detach <oid>`: writes the snapshot tree into
 /// the worktree (and index), then points HEAD at the snapshot commit so the
 /// workspace is detached at the exact recovered revision.
+///
+/// bn-3ppf lock audit: runs without the epoch lock, but only ever on the
+/// workspace `maw ws recover --to` has just created (the name must not already
+/// exist), so no other maw process holds or CASes this HEAD.
 fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
     let repo = open_repo(ws_path)?;
     let target = parse_oid(oid)?;
@@ -2053,6 +2057,12 @@ pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
 /// superseded refs (preserving the most recent ref per workspace).
 ///
 /// Returns the list of refs that were deleted.
+///
+/// bn-3ppf lock audit: no epoch lock. It deletes only
+/// `refs/manifold/recovery/*` refs (never epoch, branch or workspace refs), so
+/// it cannot race a merge/sync CAS; recovery-ref creation uses fresh unique
+/// names, so a concurrent capture is never selected for deletion unless an
+/// older listing already contained it.
 pub fn cleanup_dangling_snapshots(root: &Path, all: bool) -> Result<Vec<DanglingSnapshot>> {
     let dangling = find_dangling_snapshots(root)?;
 

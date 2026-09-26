@@ -997,6 +997,11 @@ fn delete_change_branch_if_requested(
             );
         }
     }
+    // bn-3ppf lock audit — narrow race: the merged-into-HEAD check above and
+    // this delete are not one CAS (the delete does not pin `branch_oid`), and
+    // no epoch lock is held. A `ws merge --into <change>` that CAS-advances the
+    // branch in between gets its merge commit unreferenced by the branch (the
+    // source workspace HEAD still reaches its content unless it is destroyed).
     repo.delete_ref(&ref_name)
         .with_context(|| format!("Failed to delete local branch '{branch}'"))?;
 
@@ -1526,6 +1531,10 @@ fn has_ref(cwd: &Path, git_ref: &str) -> Result<bool> {
         .is_some())
 }
 
+/// bn-3ppf lock audit: no epoch lock, but a true CAS (`atomic_ref_update`
+/// with the expected old OID). The only other writer of a change branch is
+/// `ws merge --into <change>`, which is also a CAS (`write_ref_cas`), so a
+/// concurrent pair cannot silently clobber: the loser's CAS fails.
 fn update_ref_cas(cwd: &Path, git_ref: &str, new_oid: &str, old_oid: &str) -> Result<()> {
     let repo = maw_git::GixRepo::open(cwd)
         .with_context(|| format!("Failed to open repo at {}", cwd.display()))?;

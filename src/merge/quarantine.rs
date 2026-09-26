@@ -398,6 +398,17 @@ pub fn promote_quarantine(
         | ValidateOutcome::Passed(_)
         | ValidateOutcome::PassedWithWarnings(_) => {
             // 4a. Advance epoch refs
+            //
+            // bn-3ppf lock audit: `maw merge promote` takes NO epoch lock and
+            // moves the two refs with two separate CASes (epoch, then branch),
+            // unlike `ws merge`'s single `update_refs_atomic`. Each CAS alone
+            // cannot clobber a concurrent writer, but (a) a failed branch CAS
+            // after a successful epoch CAS leaves epoch/branch split (the
+            // Stateright `SplitCommitCas` mutation shows this breaks G3), and
+            // (b) a concurrent `ws merge` FF-absorb uses a PLAIN
+            // `write_epoch_current` under the epoch lock and can overwrite the
+            // promoted epoch. Neither loses content (the quarantine worktree
+            // still holds the commit) but both leave refs incoherent.
             let epoch_before_oid = state.epoch_before.clone();
             crate::refs::advance_epoch(repo_root, &epoch_before_oid, &commit_oid)
                 .map_err(|e| QuarantineError::Commit(format!("advance epoch: {e}")))?;

@@ -90,11 +90,19 @@ install:
 dst-fast:
   cargo test --features assurance --test dst_harness -- --ignored dst_g1 dst_g2 dst_g3 dst_g4 dst_determinism
 
-# formal-check: Stateright model checking. Wired into .github/workflows/verify.yml
-# (bn-86hd) and the local `just verify` recipe; still part of the pre-release
-# checklist (notes/assurance/completion-summary.md).
+# formal-check: Stateright model checking — every config, including the
+# #[ignore]d deep ones (release build; ~40M states, ~7s). Wired into
+# .github/workflows/verify.yml (bn-86hd) and `just verify`; still part of the
+# pre-release checklist (notes/assurance/completion-summary.md).
 formal-check:
-  cargo test -p maw-assurance --features stateright --test formal_model -- --ignored
+  cargo test --release -p maw-assurance --features stateright --lib --test formal_model -- --include-ignored
+
+# formal-fast: gate-sized Stateright protocol model check (bn-3ppf). Runs the
+# fast green configs, every mutation test (each property must still catch its
+# bug class) and the pinned residual races. ~30s CPU total, <2s wall on a
+# many-core box. Intended for the `verify` gate; not part of `check`.
+formal-fast:
+  cargo test -p maw-assurance --features stateright --lib --test formal_model
 
 # contract-drift: doc/code consistency checks
 contract-drift:
@@ -148,7 +156,7 @@ proptests:
 verify: proptests kani-fast formal-check
 
 # All assurance gates combined
-check: fmt-check clippy nodefault-check test proptests dst-fast contract-drift
+check: fmt-check clippy nodefault-check test proptests dst-fast formal-fast contract-drift
 
 coverage:
   cargo llvm-cov

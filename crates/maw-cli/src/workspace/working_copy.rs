@@ -564,6 +564,11 @@ pub fn snapshot_working_copy(
     };
 
     // Step 4: Pin to durable ref (crash-safe).
+    //
+    // bn-3ppf lock audit: the per-workspace snapshot ref has a fixed name, so
+    // concurrent writers would clobber each other. Its callers
+    // (`update_default_workspace` in `ws merge`, and `ws advance`) both hold
+    // the repo epoch lock, which serializes them.
     let oid = GitOid::new(&stash_oid)
         .map_err(|e| anyhow::anyhow!("invalid stash OID '{stash_oid}': {e}"))?;
     manifold_refs::write_ref(repo_root, &ref_name, &oid)

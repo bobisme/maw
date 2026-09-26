@@ -56,7 +56,7 @@ The practical effect: merge cost and conflict analysis scale with touched paths/
 The merge algebra and protocol aren't just specified -- they're machine-checked:
 
 - **Kani bounded proofs** (`src/merge/kani_proofs.rs`): 13 harnesses verify `classify_shared_path` correctness -- every pair of file operations produces the right merge action. An additional 11 harnesses verify `resolve_entries` algebra properties (commutativity, associativity, idempotence) behind the `kani-slow` feature gate.
-- **Stateright model checking** (`tests/formal_model.rs`): the merge protocol state machine (PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP → DESTROY) is explored exhaustively for deadlock freedom, liveness, and safety invariants.
+- **Stateright model checking** (`crates/maw-assurance/tests/formal_model.rs`): a content-tracking model of the multi-process protocol — `ws merge` (FF-absorb, PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP, sibling auto-rebase), `ws sync`, `ws destroy`, auto-sync, `doctor --repair`, concurrent agent edits/commits, crashes and the epoch/workspace locks — is explored exhaustively for no-lost-work, no-silent-revert, workspace coherence, commit atomicity, journal coherence, epoch monotonicity and deadlock freedom. Every property has a mutation test proving it catches its bug class (`just formal-fast`; deep configs via `just formal-check`).
 - **Deterministic simulation testing**: seeded DST harness replays multi-agent merge traces with invariant oracles checking guarantees G1-G6 (epoch monotonicity, rewrite no-loss, no phantom files, destructive gate, merge atomicity, recovery completeness) on every step.
 
 ### Running deterministic simulation

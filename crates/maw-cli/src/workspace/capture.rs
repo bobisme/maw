@@ -632,6 +632,14 @@ pub fn resolve_head(ws_path: &Path) -> Result<GitOid> {
 }
 
 /// Pin HEAD (committed-only, no dirty files) under a recovery ref.
+///
+/// bn-3ppf lock audit (applies to every recovery-ref writer in this file):
+/// recovery refs are create-only under unique timestamped names
+/// (`refs/manifold/recovery/<ws>/<ts>`). No merge/sync/destroy CAS reads or
+/// writes them, so writing one without the epoch lock (e.g. from the
+/// lock-free auto-sync pre-overwrite pin) cannot race a protocol ref. The only
+/// deleters are `maw gc --recovery-snapshots` (epoch lock held) and
+/// `maw ws recover --gc` (keeps the newest pin per workspace).
 fn pin_head_only(
     ws_path: &Path,
     ws_name: &str,

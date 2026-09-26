@@ -319,6 +319,14 @@ where
         .map_err(|e| anyhow!("failed to re-read branch ref '{branch_ref}': {e}"))?
         .ok_or_else(|| anyhow!("branch ref '{branch_ref}' vanished mid-advance"))?;
 
+    // bn-3ppf lock audit — KNOWN RACE: this is a plain (non-CAS) write of
+    // `refs/manifold/epoch/current` made WITHOUT the repo epoch lock (the
+    // `maw doctor --repair` caller does not take it). A `ws merge` that
+    // FF-absorbs and commits between the branch re-read above and this write
+    // is un-done from the epoch (epoch regresses to `new_epoch`, branch stays
+    // at the merge commit). Reproduced by the Stateright model:
+    // `residual_doctor_repair_unlocked_regresses_epoch`; holding the epoch lock
+    // (`fast_doctor_repair_locked_is_safe`) closes it.
     manifold_refs::write_epoch_current(root, &new_epoch)
         .map_err(|e| anyhow!("failed to advance epoch ref: {e}"))?;
 

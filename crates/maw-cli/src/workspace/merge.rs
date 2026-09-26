@@ -4015,6 +4015,20 @@ fn reconcile_epoch_with_branch(
                     continue;
                 }
                 if let SiblingPlan::FastForward { ref dirty_paths } = c.plan {
+                    // bn-3ppf (Stateright residuals, see
+                    // crates/maw-assurance/tests/formal_model.rs):
+                    // * this loop holds the epoch lock but NOT the sibling's
+                    //   rebase lock, and `dirty_paths` is the classification-
+                    //   time snapshot: an agent edit to an FF path, or a commit,
+                    //   landing after classification is overwritten / has HEAD
+                    //   moved off it (`residual_ff_absorb_races_concurrent_agent`);
+                    // * the sibling epoch ref is written BEFORE materialization
+                    //   and `set_head`; a crash (or the early-return warn paths
+                    //   in `sync_ff_paths_in_worktree`) in between leaves the
+                    //   epoch ref AHEAD of HEAD, and the next merge of that
+                    //   sibling diffs its stale tree against the new base and
+                    //   silently reverts the absorbed hunks
+                    //   (`residual_ff_absorb_crash_then_merge_reverts`).
                     let dirty = !dirty_paths.is_empty();
                     let epoch_ref = maw_core::refs::workspace_epoch_ref(&c.name);
                     if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
@@ -5778,7 +5792,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
 
     // bn-38vw: record `epoch_after` into the merge-state journal BEFORE the
-    // ref-advancing CAS — not after. The candidate (= the new epoch commit
+    // ref-advancing CAS — not after.
+    //
+    // bn-3ppf: this is a SECOND atomic write after `advance_merge_state(Commit)`
+    // above, so a crash between the two still leaves phase=commit with no
+    // `epoch_after` (refs not yet moved) — the shape Oracle B flags. Harmless
+    // for data (recovery sees NotCommitted) but the "coherent at every
+    // post-build crash point" claim below is off by that one window
+    // (Stateright `residual_oracle_b_commit_phase_without_epoch_after`). The candidate (= the new epoch commit
     // OID) was already built in BUILD and validated in VALIDATE, so it is a
     // durable commit object regardless of where the refs currently point.
     //

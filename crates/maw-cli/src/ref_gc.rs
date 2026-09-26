@@ -112,6 +112,10 @@ fn live_merge_source_names(root: &Path) -> std::collections::HashSet<String> {
     names
 }
 
+/// bn-3ppf lock audit: every deleting caller (`maw gc`, with or without
+/// `--recovery-snapshots`) holds the repo epoch lock (main.rs); `--dry-run`
+/// is lock-free but read-only.
+///
 /// Prune dangling oplog head refs: `refs/manifold/head/<name>` (and the
 /// other refs owned by that workspace) when `ws/<name>/` no longer exists
 /// and the workspace is not a source of a *live* in-flight merge.
