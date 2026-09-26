@@ -380,7 +380,7 @@ pub fn remove_record(root: &Path, workspace_name: &str, filename: &str) -> Resul
 /// Timestamps are always emitted by [`super::now_timestamp_iso8601_precise`]
 /// in this exact zero-padded UTC form, so a bespoke parser avoids pulling in
 /// a date-time dependency.
-fn parse_iso8601_utc_secs(ts: &str) -> Option<u64> {
+pub fn parse_iso8601_utc_secs(ts: &str) -> Option<u64> {
     let bytes = ts.as_bytes();
     if bytes.len() < 19 {
         return None;

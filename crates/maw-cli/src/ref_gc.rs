@@ -13,9 +13,14 @@
 //! # Recovery refs
 //!
 //! Recovery refs are deleted if they are older than a configurable threshold
-//! (default: 30 days), based on the commit timestamp of the referenced commit.
+//! (default: 30 days), based on when the recovery pin was *created*: the
+//! timestamp embedded in the ref name (`refs/manifold/recovery/<ws>/[<kind>-]<ts>`),
+//! else the destroy record that claims the ref, else (legacy refs only) the
+//! committer time of the pinned commit. The pinned commit's own age is not
+//! the pin's age: `destroy --force` of a clean workspace pins an existing,
+//! possibly months-old commit (bn-3maj).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +29,7 @@ use maw_git::GitRepo as _;
 
 use maw_core::refs;
 
+use crate::workspace::capture::RECOVERY_PREFIX;
 use crate::workspace::destroy_record;
 
 /// Result of a ref GC pass.
@@ -223,8 +229,10 @@ pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
 /// records coherent with the recovery refs they claim (bn-3uou).
 ///
 /// - Head refs are deleted if `ws/<name>/` does not exist.
-/// - Recovery refs are deleted if the commit they reference is older than
-///   `older_than_days` days (default: 30).
+/// - Recovery refs are deleted if the pin was created more than
+///   `older_than_days` days ago (default: 30). Pin creation time comes from
+///   the ref-name timestamp, else the claiming destroy record, else the
+///   pinned commit's committer time (bn-3maj).
 /// - Destroy records (the `maw ws recover` audit trail under
 ///   `.maw/manifold/artifacts/ws/<name>/destroy/`) are pruned in lockstep so
 ///   the system never lands in the incoherent "record claims a snapshot whose
@@ -266,9 +274,21 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
         .as_secs();
     let cutoff = now.saturating_sub(older_than_days.saturating_mul(86_400));
 
+    // bn-3maj: age each pin by when the PIN was created, not by the pinned
+    // commit's committer time. A `destroy --force` of a clean workspace pins
+    // its existing (possibly months-old) HEAD; aging by commit time would let
+    // the next sweep delete a recovery point created minutes ago.
+    // Evidence, in order: timestamp in the ref name (every production
+    // writer embeds one), then the destroy record claiming the ref, then —
+    // last resort for legacy/hand-made refs — the commit time. With no
+    // evidence at all the ref is kept.
+    let record_claim_times = destroy_record_claim_times(root)?;
+
     for (ref_name, oid) in &recovery_refs {
-        let commit_ts = get_commit_timestamp(&repo, *oid);
-        match commit_ts {
+        let pin_ts = pin_created_at_from_ref_name(ref_name.as_str())
+            .or_else(|| record_claim_times.get(ref_name.as_str()).copied())
+            .or_else(|| get_commit_timestamp(&repo, *oid));
+        match pin_ts {
             Some(ts) if ts <= cutoff => {
                 report
                     .deleted_recovery_refs
@@ -281,7 +301,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
                 report.recovery_refs_deleted += 1;
             }
             Some(_) | None => {
-                // Recent enough or unknown commit time — keep conservatively.
+                // Recent enough or unknown pin age — keep conservatively.
                 report.recovery_refs_kept += 1;
             }
         }
@@ -365,6 +385,65 @@ fn prune_desynced_destroy_records(
         }
     }
     Ok(())
+}
+
+/// Creation time (unix seconds) of a recovery pin, parsed from its ref name.
+///
+/// Every production writer names pins
+/// `refs/manifold/recovery/<ws>/[<kind>-]<YYYY-MM-DD>T<HH-MM-SS>[.<frac>]Z`
+/// (the ISO-8601 capture time with `:` replaced by `-`; `<kind>` is e.g.
+/// `clean`, `materialize`, `invariant`). Returns `None` for any other shape
+/// (legacy or hand-made names), in which case the caller falls back to other
+/// evidence of pin age.
+fn pin_created_at_from_ref_name(ref_name: &str) -> Option<u64> {
+    let rest = ref_name.strip_prefix(RECOVERY_PREFIX)?;
+    let (_ws, leaf) = rest.rsplit_once('/')?;
+    let bytes = leaf.as_bytes();
+    // The timestamp is either the whole leaf or follows a `<kind>-` prefix.
+    (0..bytes.len())
+        .filter(|&i| i == 0 || bytes[i - 1] == b'-')
+        .find_map(|i| parse_ref_safe_timestamp(&leaf[i..]))
+}
+
+/// Parse `YYYY-MM-DDTHH-MM-SS[.digits]Z` (a ref-safe ISO-8601 UTC timestamp).
+fn parse_ref_safe_timestamp(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b[13] != b'-' || b[16] != b'-' {
+        return None;
+    }
+    let tail = s.get(19..)?;
+    let tail_ok = tail == "Z"
+        || tail
+            .strip_prefix('.')
+            .and_then(|t| t.strip_suffix('Z'))
+            .is_some_and(|frac| !frac.is_empty() && frac.bytes().all(|c| c.is_ascii_digit()));
+    if !tail_ok {
+        return None;
+    }
+    let iso = format!("{}:{}:{}", &s[..13], &s[14..16], &s[17..]);
+    destroy_record::parse_iso8601_utc_secs(&iso)
+}
+
+/// Map each recovery ref claimed by a destroy record to the (latest) time a
+/// record claiming it was written. Used as the fallback pin-creation time for
+/// recovery refs whose names carry no parseable timestamp.
+fn destroy_record_claim_times(root: &Path) -> Result<HashMap<String, u64>> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for ws in destroy_record::list_destroyed_workspaces(root)? {
+        for filename in destroy_record::list_record_files(root, &ws)? {
+            let Ok(record) = destroy_record::read_record(root, &ws, &filename) else {
+                continue;
+            };
+            let (Some(claimed), Some(ts)) =
+                (record.recovery_ref(), record.destroyed_at_epoch_secs())
+            else {
+                continue;
+            };
+            let slot = out.entry(claimed.to_string()).or_insert(ts);
+            *slot = (*slot).max(ts);
+        }
+    }
+    Ok(out)
 }
 
 /// Get the commit timestamp (committer date as unix epoch seconds) for a given OID.
@@ -936,5 +1015,148 @@ mod tests {
             1,
             "dry run must not delete records"
         );
+    }
+
+    // --- bn-3maj: recovery pins are aged by pin creation time ---
+
+    /// Commit a new file with both author and committer dates set to
+    /// `days_ago` days in the past. Returns the new commit's OID.
+    fn commit_backdated(root: &Path, days_ago: u64) -> String {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_secs()
+            - days_ago * 86_400;
+        let date = format!("@{secs} +0000");
+        fs::write(root.join("old.txt"), "old work\n").expect("write");
+        let add = Command::new("git")
+            .args(["add", "old.txt"])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args(["commit", "-m", "old work"])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "{commit:?}");
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn fresh_pin_of_old_commit_is_kept() {
+        // Acceptance (bn-3maj): `destroy --force` of a clean workspace pins
+        // its (possibly months-old) HEAD commit. The pin was created just
+        // now, so a 30-day GC must keep it even though the commit is 60
+        // days old.
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let old = commit_backdated(root, 60);
+        let git_oid = maw_core::model::types::GitOid::new(&old).expect("oid");
+
+        let ref_name = crate::workspace::capture::recovery_ref(
+            "clean-ws",
+            &crate::workspace::now_timestamp_iso8601_precise(),
+        );
+        refs::write_ref(root, &ref_name, &git_oid).expect("write ref");
+
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(
+            report.recovery_refs_deleted, 0,
+            "a pin created just now must not be swept because its commit is old"
+        );
+        assert_eq!(report.recovery_refs_kept, 1);
+        assert!(refs::read_ref(root, &ref_name).expect("read").is_some());
+    }
+
+    #[test]
+    fn fresh_prefixed_pins_of_old_commit_are_kept() {
+        // clean-/materialize-/invariant- pins embed the same timestamp after
+        // a kind prefix.
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let old = commit_backdated(root, 60);
+        let git_oid = maw_core::model::types::GitOid::new(&old).expect("oid");
+        let ts = crate::workspace::now_timestamp_iso8601_precise();
+        let names = [
+            crate::workspace::capture::clean_recovery_ref("w", &ts),
+            crate::workspace::capture::materialize_recovery_ref("w", &ts),
+            format!(
+                "refs/manifold/recovery/w/invariant-{}",
+                ts.replace(':', "-")
+            ),
+        ];
+        for n in &names {
+            refs::write_ref(root, n, &git_oid).expect("write ref");
+        }
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(report.recovery_refs_deleted, 0);
+        assert_eq!(report.recovery_refs_kept, 3);
+    }
+
+    #[test]
+    fn old_pin_name_is_swept_even_if_commit_is_fresh() {
+        // Pin age, not commit age, decides: a pin created 60 days ago of a
+        // commit dated "now" is past a 30-day threshold.
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("oid");
+        let ref_name = "refs/manifold/recovery/w/2020-01-01T00-00-00.000000000Z";
+        refs::write_ref(root, ref_name, &git_oid).expect("write ref");
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert!(refs::read_ref(root, ref_name).expect("read").is_none());
+    }
+
+    #[test]
+    fn unparseable_pin_name_falls_back_to_destroy_record_time() {
+        // Ref name has no parseable timestamp; the destroy record that claims
+        // it was written just now, so the pin is fresh even though the
+        // commit is 60 days old.
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let old = commit_backdated(root, 60);
+        let ref_name = seed_destroyed_with_ref(root, "legacy", &old, "20250101-000000");
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(report.recovery_refs_deleted, 0);
+        assert_eq!(report.destroy_records_deleted, 0);
+        assert!(refs::read_ref(root, &ref_name).expect("read").is_some());
+    }
+
+    #[test]
+    fn pin_created_at_parses_known_shapes() {
+        assert_eq!(
+            pin_created_at_from_ref_name("refs/manifold/recovery/a/1970-01-02T00-00-01.5Z"),
+            Some(86_401)
+        );
+        assert_eq!(
+            pin_created_at_from_ref_name("refs/manifold/recovery/a/clean-1970-01-01T00-01-00Z"),
+            Some(60)
+        );
+        assert_eq!(
+            pin_created_at_from_ref_name("refs/manifold/recovery/a/20250101-000000"),
+            None
+        );
+        // Multi-byte char straddling byte 19 must not panic.
+        assert_eq!(
+            pin_created_at_from_ref_name("refs/manifold/recovery/a/1970-01-01T00-00-0\u{e9}Z"),
+            None
+        );
+        assert_eq!(
+            pin_created_at_from_ref_name("refs/manifold/recovery/a/dst-3"),
+            None
+        );
+        assert_eq!(pin_created_at_from_ref_name("refs/heads/main"), None);
     }
 }
