@@ -95,6 +95,15 @@ fn fast_ff_absorb() {
     check_green(configs::fast_ff_absorb());
 }
 
+/// bn-32g8 fix: `maw doctor --repair` takes the epoch lock and CAS-advances
+/// the epoch from the classified value, so racing `ws merge` (FF-absorb +
+/// commit) and a direct trunk commit never regresses the epoch, and the
+/// doctor still gets to advance (non-vacuity).
+#[test]
+fn fast_doctor_repair_vs_merge() {
+    check_green(configs::doctor_vs_merge());
+}
+
 // ---------------------------------------------------------------------------
 // Mutations: every property catches a real bug class
 // ---------------------------------------------------------------------------
@@ -197,6 +206,17 @@ fn mutation_sync_ignores_dirty_loses_work() {
     );
 }
 
+/// Pre-bn-32g8 `doctor --repair` (no epoch lock, branch re-read, plain epoch
+/// write): a merge that commits between the doctor's read and its write is
+/// un-done from the epoch — the epoch regresses behind the branch.
+#[test]
+fn mutation_pre_bn_32g8_doctor_repair_unlocked_regresses_epoch() {
+    expect_counterexample(
+        mutated(configs::doctor_vs_merge(), Mutation::DoctorRepairUnlocked),
+        P_EPOCH_MONOTONE,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Residuals: real races in the faithful model under weaker assumptions
 // ---------------------------------------------------------------------------
@@ -230,21 +250,6 @@ fn residual_ff_absorb_crash_then_merge_reverts() {
 #[test]
 fn residual_oracle_b_commit_phase_without_epoch_after() {
     expect_counterexample(configs::residual_oracle_b_strict(), P_ORACLE_B_JOURNAL);
-}
-
-/// `maw doctor --repair` writes `refs/manifold/epoch/current` with a plain
-/// write and no epoch lock, after re-reading the branch: a merge that commits
-/// in between is un-done from the epoch (the epoch regresses).
-#[test]
-fn residual_doctor_repair_unlocked_regresses_epoch() {
-    expect_counterexample(configs::doctor_vs_merge(false), P_EPOCH_MONOTONE);
-}
-
-/// Control / proposed fix: the same race with the doctor holding the epoch
-/// lock is clean.
-#[test]
-fn fast_doctor_repair_locked_is_safe() {
-    check_green(configs::doctor_vs_merge(true));
 }
 
 // ---------------------------------------------------------------------------

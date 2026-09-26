@@ -318,9 +318,12 @@ pub enum Pc {
     AEpochRef,
 
     // --- doctor --repair --------------------------------------------------
-    /// `classify_drift` + FF safety predicate + re-read branch.
+    /// `classify_drift` + FF safety predicate, under the epoch lock (bn-32g8);
+    /// records the classified epoch and branch OIDs.
     XClassify,
-    /// Plain `write_epoch_current(branch_read)`.
+    /// `advance_epoch` CAS from the classified epoch to the classified branch
+    /// (a no-op on mismatch). Under [`Mutation::DoctorRepairUnlocked`]: the
+    /// pre-bn-32g8 plain `write_epoch_current(branch_reread)`.
     XWrite,
 }
 
@@ -339,7 +342,8 @@ pub struct Proc {
     pub frozen_wt: Tree,
     pub frozen_base: Oid,
     pub frozen_head: Oid,
-    /// Epoch/branch before the COMMIT (merge only).
+    /// Epoch/branch before the COMMIT (merge only). Doctor: the epoch its
+    /// classification judged (the CAS expected value).
     pub epoch_before: Oid,
     pub branch_before: Oid,
     /// Build candidate (merge only).
@@ -520,11 +524,11 @@ pub enum ProcSpec {
     Destroy { ws: u8, force: bool },
     /// `auto_sync_if_stale(<ws>)` (runs before `maw exec <ws>`).
     AutoSync { ws: u8 },
-    /// `maw doctor --repair` → `epoch_drift::auto_advance_if_safe`: classify
-    /// FF-absorbable drift, re-read the branch, plain `write_epoch_current`.
-    /// The real code takes NO epoch lock (`locked: false`); `locked: true`
-    /// models the proposed fix.
-    DoctorRepair { locked: bool },
+    /// `maw doctor --repair` → `epoch_drift::auto_advance_if_safe`: take the
+    /// epoch lock, classify FF-absorbable drift, CAS the epoch from the
+    /// classified epoch to the classified branch tip (bn-32g8). The pre-fix
+    /// shape (no lock, plain write) is [`Mutation::DoctorRepairUnlocked`].
+    DoctorRepair,
 }
 
 /// Initial repository shape.
@@ -594,6 +598,9 @@ pub enum Mutation {
     AutoSyncNoHeadCas,
     /// `ws sync` without the dirty-worktree refusal.
     SyncIgnoresDirty,
+    /// Pre-bn-32g8 `doctor --repair`: no epoch lock, re-read the branch after
+    /// classification, plain (non-CAS) `write_epoch_current`.
+    DoctorRepairUnlocked,
 }
 
 /// The protocol model.
@@ -731,7 +738,7 @@ impl ProtocolModel {
             ProcSpec::Sync { ws } => self.step_sync(s, pid, ws as usize),
             ProcSpec::Destroy { ws, force } => self.step_destroy(s, pid, ws as usize, force),
             ProcSpec::AutoSync { ws } => self.step_autosync(s, pid, ws as usize),
-            ProcSpec::DoctorRepair { locked } => Self::step_doctor(s, pid, locked),
+            ProcSpec::DoctorRepair => self.step_doctor(s, pid),
         }
     }
 
@@ -1227,11 +1234,12 @@ impl ProtocolModel {
         true
     }
 
-    fn step_doctor(s: &mut State, pid: Pid, locked: bool) -> bool {
+    fn step_doctor(&self, s: &mut State, pid: Pid) -> bool {
         let i = pid as usize;
+        let unlocked = self.mutation == Mutation::DoctorRepairUnlocked;
         match s.procs[i].pc {
             Pc::Start => {
-                if locked {
+                if !unlocked {
                     if s.epoch_lock.is_some() {
                         return false;
                     }
@@ -1258,12 +1266,23 @@ impl ProtocolModel {
                     s.finish(pid); // FfBlocked
                     return true;
                 }
-                s.procs[i].target = branch; // "re-read the OIDs fresh"
+                // Faithful: the classified OIDs. Mutation: "re-read the OIDs
+                // fresh" — same value at this step, the damage is the missing
+                // lock + plain write below.
+                s.procs[i].epoch_before = s.epoch;
+                s.procs[i].target = branch;
                 s.procs[i].pc = Pc::XWrite;
             }
             Pc::XWrite => {
-                s.epoch = s.procs[i].target;
-                s.events |= ev::DOCTOR_ADVANCED;
+                if unlocked {
+                    s.epoch = s.procs[i].target;
+                    s.events |= ev::DOCTOR_ADVANCED;
+                } else if s.epoch == s.procs[i].epoch_before {
+                    // `advance_epoch` CAS succeeded.
+                    s.epoch = s.procs[i].target;
+                    s.events |= ev::DOCTOR_ADVANCED;
+                }
+                // else: CasMismatch → error, nothing written.
                 s.finish(pid);
             }
             pc => unreachable!("doctor pc {pc:?}"),
@@ -1315,7 +1334,8 @@ impl ProtocolModel {
         match (self.procs[pid], p.pc) {
             (ProcSpec::Sync { ws }, Pc::Start) if reversed => other(s.ws_lock[ws as usize]),
             (ProcSpec::Sync { .. }, Pc::SEpochLock) => other(s.epoch_lock),
-            (ProcSpec::AutoSync { .. } | ProcSpec::DoctorRepair { locked: false }, _) => None,
+            (ProcSpec::AutoSync { .. }, _) => None,
+            (ProcSpec::DoctorRepair, _) if self.mutation == Mutation::DoctorRepairUnlocked => None,
             (_, Pc::Start) => other(s.epoch_lock),
             (ProcSpec::Merge { .. }, Pc::MReplay(w) | Pc::MAutoRebase(w)) if reversed => {
                 other(s.ws_lock[w as usize])
@@ -1841,20 +1861,18 @@ pub mod configs {
         }
     }
 
-    /// `maw doctor --repair` racing `ws merge` (FF-absorb + commit). With
-    /// `locked` the doctor takes the epoch lock (proposed fix).
-    pub fn doctor_vs_merge(locked: bool) -> ProtocolModel {
+    /// `maw doctor --repair` racing `ws merge` and a direct trunk commit.
+    ///
+    /// Faithful = the bn-32g8 fix (epoch lock + CAS); the pre-fix shape is
+    /// [`Mutation::DoctorRepairUnlocked`].
+    pub fn doctor_vs_merge() -> ProtocolModel {
         ProtocolModel {
-            procs: vec![merge(0), ProcSpec::DoctorRepair { locked }],
+            procs: vec![merge(0), ProcSpec::DoctorRepair],
             agent_edits: 1,
             agent_commits: 0,
             trunk_commits: 1,
             crashes: 0,
-            expect: if locked {
-                ev::MERGE_COMMITTED | ev::FF_ABSORBED | ev::DOCTOR_ADVANCED
-            } else {
-                0
-            },
+            expect: ev::MERGE_COMMITTED | ev::FF_ABSORBED | ev::DOCTOR_ADVANCED,
             ..ProtocolModel::new(1)
         }
     }

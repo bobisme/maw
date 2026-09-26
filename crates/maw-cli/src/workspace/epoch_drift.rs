@@ -157,6 +157,29 @@ where
     B: maw_core::backend::WorkspaceBackend,
     B::Error: std::fmt::Display,
 {
+    Ok(classify_drift_with_oids(root, branch, backend)?.map(|c| c.report))
+}
+
+/// A drift classification together with the exact full OIDs it judged.
+///
+/// `auto_advance_if_safe` needs these so the epoch write is a CAS from the
+/// epoch the safety predicate saw to the branch tip it saw (bn-32g8), never a
+/// re-read that could describe a different state than the one classified.
+struct ClassifiedDrift {
+    report: EpochDriftReport,
+    epoch_oid: maw_core::model::types::GitOid,
+    branch_oid: maw_core::model::types::GitOid,
+}
+
+fn classify_drift_with_oids<B>(
+    root: &Path,
+    branch: &str,
+    backend: &B,
+) -> Result<Option<ClassifiedDrift>>
+where
+    B: maw_core::backend::WorkspaceBackend,
+    B::Error: std::fmt::Display,
+{
     let Some(epoch_oid) = manifold_refs::read_epoch_current(root)
         .map_err(|e| anyhow!("failed to read epoch ref: {e}"))?
     else {
@@ -176,14 +199,18 @@ where
     let branch_short = short_oid(branch_oid.as_str());
 
     if epoch_oid.as_str() == branch_oid.as_str() {
-        return Ok(Some(EpochDriftReport {
-            kind: EpochDriftKind::InSync,
-            epoch_short,
-            branch_short,
-            branch: branch.to_owned(),
-            ff_commit_count: 0,
-            blocking_workspaces: Vec::new(),
-        }));
+        return Ok(Some(ClassifiedDrift::new(
+            epoch_oid,
+            branch_oid,
+            EpochDriftReport {
+                kind: EpochDriftKind::InSync,
+                epoch_short,
+                branch_short,
+                branch: branch.to_owned(),
+                ff_commit_count: 0,
+                blocking_workspaces: Vec::new(),
+            },
+        )));
     }
 
     // Open the gix repo via the shared FF-absorb helper so doctor/status
@@ -200,14 +227,18 @@ where
 
     let epoch_is_ancestor = super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git)?;
     if !epoch_is_ancestor {
-        return Ok(Some(EpochDriftReport {
-            kind: EpochDriftKind::Diverged,
-            epoch_short,
-            branch_short,
-            branch: branch.to_owned(),
-            ff_commit_count: 0,
-            blocking_workspaces: Vec::new(),
-        }));
+        return Ok(Some(ClassifiedDrift::new(
+            epoch_oid,
+            branch_oid,
+            EpochDriftReport {
+                kind: EpochDriftKind::Diverged,
+                epoch_short,
+                branch_short,
+                branch: branch.to_owned(),
+                ff_commit_count: 0,
+                blocking_workspaces: Vec::new(),
+            },
+        )));
     }
 
     // Pure FF: count commits + run the safety predicate over the current
@@ -264,7 +295,21 @@ where
             blocking_workspaces: affected_workspaces,
         },
     };
-    Ok(Some(report))
+    Ok(Some(ClassifiedDrift::new(epoch_oid, branch_oid, report)))
+}
+
+impl ClassifiedDrift {
+    const fn new(
+        epoch_oid: maw_core::model::types::GitOid,
+        branch_oid: maw_core::model::types::GitOid,
+        report: EpochDriftReport,
+    ) -> Self {
+        Self {
+            report,
+            epoch_oid,
+            branch_oid,
+        }
+    }
 }
 
 /// Auto-advance the epoch when `classify_drift` returns
@@ -281,8 +326,21 @@ where
 /// rebase path, which is the correct behavior (they need to know the
 /// epoch moved).
 ///
+/// # Concurrency (bn-32g8)
+///
+/// The whole classify → write sequence runs under the repo-level epoch lock
+/// (the same lock `maw epoch sync` and `maw ws merge` hold), and the epoch
+/// write is a CAS from the exact epoch OID the safety predicate judged to the
+/// exact branch OID it judged. Previously this re-read the branch and did a
+/// plain write with no lock, so a `ws merge` that committed in between had its
+/// epoch advance overwritten (epoch regressed behind the branch). Modelled in
+/// `maw-assurance`'s Stateright model (`DoctorRepairUnlocked` mutation).
+///
 /// # Errors
-/// Returns an error if classification or ref writes fail.
+/// Returns an error if the epoch lock is busy
+/// ([`crate::epoch_lock::EpochLockBusy`]), if classification or ref writes
+/// fail, or if the epoch moved after classification (CAS mismatch — nothing
+/// is written; re-run the repair).
 pub fn auto_advance_if_safe<B>(
     root: &Path,
     branch: &str,
@@ -293,11 +351,49 @@ where
     B: maw_core::backend::WorkspaceBackend,
     B::Error: std::fmt::Display,
 {
-    let Some(report) = classify_drift(root, branch, backend)? else {
+    auto_advance_if_safe_with(
+        root,
+        branch,
+        default_workspace,
+        backend,
+        crate::epoch_lock::WaitPolicy::resolve(root),
+    )
+}
+
+/// [`auto_advance_if_safe`] with an explicit epoch-lock [`WaitPolicy`]
+/// (tests use a no-wait policy to observe contention deterministically).
+///
+/// [`WaitPolicy`]: crate::epoch_lock::WaitPolicy
+///
+/// # Errors
+/// See [`auto_advance_if_safe`].
+pub fn auto_advance_if_safe_with<B>(
+    root: &Path,
+    branch: &str,
+    default_workspace: &str,
+    backend: &B,
+    policy: crate::epoch_lock::WaitPolicy,
+) -> Result<AutoAdvanceOutcome>
+where
+    B: maw_core::backend::WorkspaceBackend,
+    B::Error: std::fmt::Display,
+{
+    // bn-32g8: serialize against every other epoch mutator (ws merge's atomic
+    // epoch+branch commit, epoch sync, ws advance, …). Classification MUST run
+    // under the lock too, so the FF-absorb safety predicate judges the state we
+    // are about to write over.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire_with(root, "doctor --repair", policy)?;
+
+    let Some(classified) = classify_drift_with_oids(root, branch, backend)? else {
         return Ok(AutoAdvanceOutcome::NoOp {
             reason: AutoAdvanceSkip::EpochUnset,
         });
     };
+    let ClassifiedDrift {
+        report,
+        epoch_oid: old_epoch,
+        branch_oid: new_epoch,
+    } = classified;
 
     if !report.kind.is_auto_advanceable() {
         return Ok(AutoAdvanceOutcome::NoOp {
@@ -310,28 +406,28 @@ where
         });
     }
 
-    // Re-read the OIDs fresh for the actual write (avoid TOCTOU with the
-    // classify above; classify ran the safety predicate against the same
-    // OIDs we now write, and the worst case if a race happens is the
-    // next merge does the same check again).
-    let branch_ref = format!("refs/heads/{branch}");
-    let new_epoch = manifold_refs::read_ref(root, &branch_ref)
-        .map_err(|e| anyhow!("failed to re-read branch ref '{branch_ref}': {e}"))?
-        .ok_or_else(|| anyhow!("branch ref '{branch_ref}' vanished mid-advance"))?;
+    // Interleaving hook for the bn-32g8 regression test: a writer that
+    // bypasses the lock moves the epoch between classification and the write.
+    maw::fp!("FP_DOCTOR_ADVANCE_BEFORE_WRITE")?;
 
-    // bn-3ppf lock audit — KNOWN RACE: this is a plain (non-CAS) write of
-    // `refs/manifold/epoch/current` made WITHOUT the repo epoch lock (the
-    // `maw doctor --repair` caller does not take it). A `ws merge` that
-    // FF-absorbs and commits between the branch re-read above and this write
-    // is un-done from the epoch (epoch regresses to `new_epoch`, branch stays
-    // at the merge commit). Reproduced by the Stateright model:
-    // `residual_doctor_repair_unlocked_regresses_epoch`; holding the epoch lock
-    // (`fast_doctor_repair_locked_is_safe`) closes it.
-    manifold_refs::write_epoch_current(root, &new_epoch)
-        .map_err(|e| anyhow!("failed to advance epoch ref: {e}"))?;
+    // CAS from the classified epoch to the classified branch tip. Under the
+    // epoch lock no maw mutator can move the epoch here; the CAS is the
+    // belt-and-braces guard against a lock-bypassing writer. On mismatch
+    // nothing is written — the epoch is never regressed.
+    match manifold_refs::advance_epoch(root, &old_epoch, &new_epoch) {
+        Ok(()) => {}
+        Err(maw_core::refs::RefError::CasMismatch { .. }) => {
+            return Err(anyhow!(
+                "epoch moved concurrently since it was classified (expected {}); \
+                 nothing written — re-run `maw doctor --repair`",
+                short_oid(old_epoch.as_str())
+            ));
+        }
+        Err(e) => return Err(anyhow!("failed to advance epoch ref: {e}")),
+    }
 
     // Default workspace baseline must follow the epoch (see epoch.rs
-    // sync()'s bn-3r8s comment for why).
+    // sync()'s bn-3r8s comment for why). Still under the epoch lock.
     let default_ws_ref = manifold_refs::workspace_epoch_ref(default_workspace);
     if let Err(e) = manifold_refs::write_ref(root, &default_ws_ref, &new_epoch) {
         // Surface as a warning, not a failure: the epoch advanced
@@ -715,5 +811,106 @@ mod integration_tests {
             .expect("read")
             .expect("set");
         assert_eq!(after.as_str(), later);
+    }
+
+    /// bn-32g8: the repair must hold the repo epoch lock. With another holder
+    /// present (a `ws merge` mid-commit, say) and a no-wait policy, the repair
+    /// must report busy and write NOTHING. Before the fix it never took the
+    /// lock and wrote the (possibly stale) branch tip regardless.
+    #[test]
+    fn auto_advance_takes_epoch_lock_and_writes_nothing_when_busy() {
+        let (dir, root, epoch0) = setup();
+        let _ = dir;
+        let _tip = advance_branch(&root, 2, "busy");
+        let backend = GitWorktreeBackend::new(root.clone());
+
+        let no_wait = crate::epoch_lock::WaitPolicy {
+            wait: false,
+            timeout: std::time::Duration::ZERO,
+        };
+        let holder = crate::epoch_lock::EpochLock::acquire_with(&root, "test: ws merge", no_wait)
+            .expect("test takes the epoch lock first");
+
+        let res = auto_advance_if_safe_with(&root, "main", "default", &backend, no_wait);
+        let err = res.expect_err("repair must not proceed while the epoch lock is held");
+        assert!(
+            err.downcast_ref::<crate::epoch_lock::EpochLockBusy>()
+                .is_some(),
+            "expected EpochLockBusy, got: {err:#}"
+        );
+        let after = manifold_refs::read_epoch_current(&root)
+            .expect("read")
+            .expect("set");
+        assert_eq!(after.as_str(), epoch0, "epoch must be untouched while busy");
+
+        // Once the holder releases, the repair proceeds normally. Wait a
+        // little: a sibling test's fork() can transiently inherit the flock'd
+        // fd until its exec (the bn-1d22 fd-inheritance window).
+        drop(holder);
+        let short_wait = crate::epoch_lock::WaitPolicy {
+            wait: true,
+            timeout: std::time::Duration::from_secs(10),
+        };
+        let outcome = auto_advance_if_safe_with(&root, "main", "default", &backend, short_wait)
+            .expect("repair after release");
+        assert!(matches!(outcome, AutoAdvanceOutcome::Advanced { .. }));
+    }
+
+    /// bn-32g8 interleaving test (needs `--features failpoints`; run by
+    /// `just sg1-faithful-test`): a writer that bypasses the epoch lock lands a
+    /// merge commit (epoch + branch both advance to M) between the repair's
+    /// classification and its write. The repair must CAS-fail and leave the
+    /// epoch at M — never regress it to the classified branch tip.
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn auto_advance_never_regresses_epoch_past_concurrent_merge() {
+        let (dir, root, _epoch0) = setup();
+        let _ = dir;
+        let classified_tip = advance_branch(&root, 2, "drift");
+        let backend = GitWorktreeBackend::new(root.clone());
+
+        let root_cb = root.clone();
+        let merged = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let merged_cb = std::sync::Arc::clone(&merged);
+        // The failpoint registry is process-global and sibling tests run in
+        // parallel through the same site: only perturb THIS test's thread.
+        let me = std::thread::current().id();
+        maw_core::failpoints::set_callback("FP_DOCTOR_ADVANCE_BEFORE_WRITE", move || {
+            if std::thread::current().id() != me {
+                return;
+            }
+            // The concurrent merge's atomic epoch+branch commit.
+            let m = commit(&root_cb, "merge.txt", "merged work");
+            let oid = maw_core::model::types::GitOid::new(&m).expect("oid");
+            manifold_refs::write_epoch_current(&root_cb, &oid).expect("merge epoch write");
+            *merged_cb.lock().expect("lock") = m;
+        });
+        let no_wait = crate::epoch_lock::WaitPolicy {
+            wait: false,
+            timeout: std::time::Duration::ZERO,
+        };
+        let res = auto_advance_if_safe_with(&root, "main", "default", &backend, no_wait);
+        maw_core::failpoints::clear("FP_DOCTOR_ADVANCE_BEFORE_WRITE");
+
+        let merged = merged.lock().expect("lock").clone();
+        assert!(!merged.is_empty(), "failpoint callback must have fired");
+        let err = res.expect_err("repair must detect the concurrent epoch move");
+        assert!(
+            err.to_string().contains("epoch moved concurrently"),
+            "unexpected error: {err:#}"
+        );
+        let after = manifold_refs::read_epoch_current(&root)
+            .expect("read")
+            .expect("set");
+        assert_ne!(
+            after.as_str(),
+            classified_tip,
+            "epoch regressed to the pre-merge branch tip (bn-32g8)"
+        );
+        assert_eq!(
+            after.as_str(),
+            merged,
+            "epoch must stay at the merge commit"
+        );
     }
 }
