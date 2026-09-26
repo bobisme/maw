@@ -2,6 +2,10 @@
 
 All notable changes to maw.
 
+## Unreleased
+
+- **K-way conflicts list every overlapping workspace (bn-1lwk, Prime-Invariant class; shipped since pre.10 / bn-ztu6).** When three or more workspaces edited the same region of a file, the conflict record listed only the pair at the first conflicting fold step. Later overlapping workspaces were missing from `sides`, `maw ws conflicts` JSON, `maw merge last-conflict` and the materialized markers, and `--resolve cf-X=<ws>` rejected them, so every available resolution silently discarded their committed edits. Participants are now every workspace whose edits pairwise-conflict with another workspace's (order-independent; disjoint workspaces are still excluded per bn-ztu6), on both the plain and AST merge paths. Line atoms now carry an edit for every participant (or one whole-file atom when regions do not align). A workspace/content index misalignment in the same attribution code was also fixed. The four pushout property tests disabled in bn-86hd are re-enabled.
+
 ## v1.0.0-pre.15 (2026-09-07)
 
 Fifteenth dogfood pre-release, focused on merge validation and quarantine recovery.

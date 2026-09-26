@@ -1018,55 +1018,43 @@ fn resolve_shared_path_with_ast(
         )));
     };
 
-    // Try diff3 first.
+    // Try diff3 first: k-way fold. Any conflicting step makes the whole path
+    // a conflict; participants are then computed over ALL variants below.
     let mut merged = variants[0].clone();
-    // bn-ztu6: track folded members (workspace, ORIGINAL content) so the
-    // exclusion probe can decide which of them are party to a conflict.
-    let mut ours_members: Vec<(WorkspaceId, &[u8])> =
-        vec![(entries[0].workspace_id.clone(), variants[0].as_slice())];
-    // (marker_output, index of the trigger workspace in entries/variants)
-    let mut diff3_conflict: Option<(Vec<u8>, usize)> = None;
-
-    for (i, next) in variants[1..].iter().enumerate() {
+    let mut diff3_conflicted = false;
+    for next in &variants[1..] {
         if merged == *next {
-            ours_members.push((entries[i + 1].workspace_id.clone(), next.as_slice()));
             continue;
         }
-
         match diff3_merge_bytes(base_bytes, &merged, next)? {
-            Diff3Outcome::Clean(out) => {
-                merged = out;
-                ours_members.push((entries[i + 1].workspace_id.clone(), next.as_slice()));
-            }
-            Diff3Outcome::Conflict { marker_output } => {
-                diff3_conflict = Some((marker_output, i + 1));
+            Diff3Outcome::Clean(out) => merged = out,
+            Diff3Outcome::Conflict { .. } => {
+                diff3_conflicted = true;
                 break;
             }
         }
     }
 
     // If diff3 succeeded, return the merge.
-    let Some((marker_output, trigger_idx)) = diff3_conflict else {
+    if !diff3_conflicted {
         return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
             path: path.to_path_buf(),
             content: merged,
         }));
-    };
+    }
 
-    // bn-ztu6: participants = folded members whose edits intersect the
-    // conflicted region (pairwise exclusion probe) + the trigger workspace.
-    // Order-independent: a disjoint workspace that sorts first and folds
-    // cleanly into `ours` must not be attributed.
-    let trigger_ws = entries[trigger_idx].workspace_id.clone();
-    let trigger_content = variants[trigger_idx].as_slice();
-    let mut participants = probe_folded_participants(base_bytes, &ours_members, trigger_content);
-    let ours_label = participants
+    // bn-ztu6 + bn-1lwk: participants = every workspace whose ORIGINAL edits
+    // pairwise-conflict with another workspace's — not just the pair at the
+    // first conflicting fold step, and not a disjoint workspace that happened
+    // to fold cleanly. Order-independent. `entries` and `variants` are
+    // aligned here (content-less entries returned MissingContent above).
+    let members: Vec<(WorkspaceId, &[u8])> = entries
         .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("+");
-    let theirs_label = trigger_ws.to_string();
-    participants.push(trigger_ws);
+        .zip(variants.iter())
+        .map(|(e, v)| (e.workspace_id.clone(), v.as_slice()))
+        .collect();
+    // Computed lazily: the AST merge below may resolve cleanly.
+    let probe_participants = || kway_conflict_participants(base_bytes, &members);
 
     // diff3 failed. Try AST merge if enabled for this language.
     if let Some(lang) = ast_config.is_enabled_for(path) {
@@ -1103,7 +1091,7 @@ fn resolve_shared_path_with_ast(
                 let chosen = if ast_participants.len() >= 2 {
                     ast_participants
                 } else {
-                    participants
+                    probe_participants()
                 };
                 let participant_entries: Vec<PathEntry> = entries
                     .iter()
@@ -1124,8 +1112,15 @@ fn resolve_shared_path_with_ast(
         }
     }
 
-    // Fall back to diff3 conflict, restricted to the probed participants.
-    let atoms = parse_diff3_atoms(&marker_output, &ours_label, &theirs_label);
+    // Fall back to diff3 conflict, restricted to the probed participants,
+    // with atoms carrying an edit for every participant.
+    let participants = probe_participants();
+    let participant_members: Vec<(WorkspaceId, &[u8])> = members
+        .iter()
+        .filter(|(w, _)| participants.contains(w))
+        .cloned()
+        .collect();
+    let atoms = kway_conflict_atoms(base_bytes, &participant_members);
     let participant_entries: Vec<PathEntry> = entries
         .iter()
         .filter(|e| participants.contains(&e.workspace_id))
@@ -1140,147 +1135,198 @@ fn resolve_shared_path_with_ast(
     )))
 }
 
-/// bn-ztu6: pairwise exclusion probe.
+/// bn-ztu6 + bn-1lwk: k-way conflict participant attribution.
 ///
-/// Of the workspaces folded cleanly into the `ours` composite before the
-/// conflicting step, return only those whose OWN edits pairwise-conflict with
-/// the trigger workspace's content — i.e. whose edits intersect the conflicted
-/// region.  A member whose pairwise `diff3(base, member, trigger)` is clean
-/// has edits disjoint from the trigger's, and is therefore not a participant.
+/// Given every content-bearing workspace variant of a conflicted path, return
+/// exactly the workspaces whose edits are party to a conflict: a workspace is
+/// a participant iff its ORIGINAL content pairwise-conflicts
+/// (`diff3(base, w, w')`) with at least one other workspace's original
+/// content.
 ///
-/// If no member individually conflicts (composite-only conflict, e.g.
-/// hunk-boundary artifacts), all folded members are returned as a conservative
-/// fallback — over-attribution is safer than dropping a genuine participant.
-fn probe_folded_participants(
+/// - **Complete (bn-1lwk)**: every pair is tested, so a workspace sorted after
+///   the first conflicting fold step — or one fighting over a second region
+///   with a workspace that folded cleanly — is never dropped. An omitted
+///   workspace cannot be seen or chosen with `--resolve`, so every available
+///   resolution would silently discard its committed edit.
+/// - **Minimal (bn-ztu6)**: a workspace whose edits are disjoint from every
+///   other workspace's (pairwise clean against all) is not attributed.
+/// - **Order-independent**: pairwise diff3 conflict is symmetric and the set
+///   does not depend on fold order; the result keeps `members` order.
+///
+/// Byte-identical variants are grouped so each distinct content is probed
+/// once. A probe error marks both sides (conservative). If no pair conflicts
+/// at all (composite-only conflict, e.g. hunk-boundary artifacts), every
+/// member is returned — over-attribution is safer than dropping a genuine
+/// participant.
+fn kway_conflict_participants(
     base_bytes: &[u8],
-    ours_members: &[(WorkspaceId, &[u8])],
-    trigger_content: &[u8],
+    members: &[(WorkspaceId, &[u8])],
 ) -> Vec<WorkspaceId> {
-    let mut folded: Vec<WorkspaceId> = Vec::new();
-    for (wid, content) in ours_members {
-        match diff3_merge_bytes(base_bytes, content, trigger_content) {
-            // Pairwise clean → this member's edits are disjoint from the
-            // trigger's; it is not a participant.
-            Ok(Diff3Outcome::Clean(_)) => {}
-            // Pairwise conflict → genuine region overlap.
-            // Probe error → keep the member (conservative).
-            Ok(Diff3Outcome::Conflict { .. }) | Err(_) => folded.push(wid.clone()),
+    // Distinct contents, each with the member indices that carry it.
+    let mut groups: Vec<(&[u8], Vec<usize>)> = Vec::new();
+    for (idx, (_, content)) in members.iter().enumerate() {
+        if let Some(group) = groups.iter_mut().find(|(c, _)| c == content) {
+            group.1.push(idx);
+        } else {
+            groups.push((content, vec![idx]));
         }
     }
-    if folded.is_empty() {
-        ours_members.iter().map(|(w, _)| w.clone()).collect()
-    } else {
-        folded
+
+    let mut hit = vec![false; groups.len()];
+    for i in 0..groups.len() {
+        for j in (i + 1)..groups.len() {
+            match diff3_merge_bytes(base_bytes, groups[i].0, groups[j].0) {
+                // Pairwise clean → these two variants' edits are disjoint.
+                Ok(Diff3Outcome::Clean(_)) => {}
+                // Pairwise conflict → genuine region overlap.
+                // Probe error → keep both (conservative).
+                Ok(Diff3Outcome::Conflict { .. }) | Err(_) => {
+                    hit[i] = true;
+                    hit[j] = true;
+                }
+            }
+        }
     }
+
+    if !hit.iter().any(|h| *h) {
+        return members.iter().map(|(w, _)| w.clone()).collect();
+    }
+    let mut chosen = vec![false; members.len()];
+    for (g, (_, idxs)) in groups.iter().enumerate() {
+        if hit[g] {
+            for &idx in idxs {
+                chosen[idx] = true;
+            }
+        }
+    }
+    members
+        .iter()
+        .zip(chosen)
+        .filter(|(_, c)| *c)
+        .map(|((w, _), _)| w.clone())
+        .collect()
 }
 
-/// Re-run the k-way diff3 fold to recover conflict markers, atoms, and the
-/// exact set of workspace IDs that are party to the conflict.
+/// bn-1lwk: build line-level conflict atoms that carry an edit for EVERY
+/// participant, so atom-level `--resolve cf-X.N=<ws>` can select any side.
+///
+/// - Two participants: the atoms of `diff3(base, p0, p1)` (as before).
+/// - More: the atoms of `diff3(base, p0, pk)` for every `k`, merged per
+///   region when all pairs report the same base regions and agree on `p0`'s
+///   text (the common "everyone edited the same lines" case).
+/// - Otherwise (regions do not align, or some pair is clean): one
+///   whole-file atom whose edits are each participant's full content. Coarse
+///   but never lossy — choosing any side yields exactly that side's file.
+fn kway_conflict_atoms(
+    base_bytes: &[u8],
+    participants: &[(WorkspaceId, &[u8])],
+) -> Vec<ConflictAtom> {
+    if participants.len() < 2 {
+        return vec![];
+    }
+    let (p0_id, p0_content) = &participants[0];
+    let p0_label = p0_id.to_string();
+
+    let mut merged: Option<Vec<ConflictAtom>> = None;
+    for (pk_id, pk_content) in &participants[1..] {
+        let pair_atoms = match diff3_merge_bytes(base_bytes, p0_content, pk_content) {
+            Ok(Diff3Outcome::Conflict { marker_output }) => {
+                parse_diff3_atoms(&marker_output, &p0_label, pk_id.as_str())
+            }
+            Ok(Diff3Outcome::Clean(_)) | Err(_) => vec![],
+        };
+        if pair_atoms.is_empty() {
+            merged = None;
+            break;
+        }
+        merged = match merged {
+            None => Some(pair_atoms),
+            Some(mut acc) => {
+                let aligned = acc.len() == pair_atoms.len()
+                    && acc.iter().zip(&pair_atoms).all(|(a, b)| {
+                        a.base_region == b.base_region && a.edits.first() == b.edits.first()
+                    });
+                if !aligned {
+                    merged = None;
+                    break;
+                }
+                for (a, b) in acc.iter_mut().zip(pair_atoms) {
+                    a.edits.extend(b.edits.into_iter().skip(1));
+                }
+                Some(acc)
+            }
+        };
+    }
+
+    merged.unwrap_or_else(|| {
+        let edits = participants
+            .iter()
+            .map(|(w, content)| {
+                AtomEdit::new(
+                    w.as_str(),
+                    Region::WholeFile,
+                    String::from_utf8_lossy(content).into_owned(),
+                )
+            })
+            .collect();
+        vec![ConflictAtom::new(
+            Region::WholeFile,
+            edits,
+            ModelConflictReason::OverlappingLineEdits {
+                description: format!("{} workspaces made overlapping edits", participants.len()),
+            },
+        )]
+    })
+}
+
+/// Recover conflict atoms and the exact set of workspace IDs that are party
+/// to a diff3 conflict.
 ///
 /// Called only on the conflict path when `resolve_entries` returns
 /// `MergeOutcome::Conflict(Diff3Conflict)`. The generic function doesn't
-/// carry marker output or participant info, so we re-run diff3 here to
-/// recover both.
+/// carry marker output or participant info, so we recompute both here.
 ///
-/// # bn-ztu6: participant attribution
+/// Participants are decided by [`kway_conflict_participants`] over ALL
+/// content-bearing entries (bn-1lwk: the previous fold returned at the first
+/// conflicting step, silently omitting later overlapping workspaces).
+/// Content-less entries cannot be diff3'd; they are kept as participants
+/// (conservative) and — unlike the previous `filter_map` + `entries[i + 1]`
+/// indexing — never shift attribution of the other entries.
 ///
-/// The k-way fold processes workspaces in sorted order: ws-0, ws-1, …, ws-N.
-/// When step `i` conflicts, the trigger workspace (`theirs`) is always a
-/// participant.  Of the workspaces already folded into the `ours` composite,
-/// only those whose edits actually intersect the conflicted region are
-/// participants — fold order must not matter.  A workspace that sorts first
-/// but edits a disjoint region (e.g. `a-disjoint` editing line 11 while `z1`
-/// and `z2` fight over line 2) folds cleanly into `ours` yet is NOT party to
-/// the conflict.
-///
-/// Region intersection is decided by a **pairwise exclusion probe**: for each
-/// folded workspace `w`, run `diff3(base, w_content, theirs_content)` using
-/// `w`'s ORIGINAL content (not the composite).  If that pairwise merge is
-/// clean, `w`'s edits are disjoint from the trigger's edits — and therefore
-/// from the conflicted region — so `w` is excluded.  If it conflicts, `w`'s
-/// edits overlap the same region and `w` is a participant.  `n` is small and
-/// this only runs on the (already-failed) conflict path, so the extra diff3
-/// calls are negligible.
-///
-/// If the probe finds NO folded participant (composite-only conflict, e.g.
-/// hunk-boundary artifacts), all folded workspaces are kept as a conservative
-/// fallback — over-attribution is safer than dropping a genuine participant.
-///
-/// Workspaces that would have been folded in *after* the conflicting step are
-/// never participants (the fold stops at the first conflict).
-///
-/// Returns `(atoms, participant_ids)`.
+/// Returns `(atoms, participant_ids)` with participants in `entries` order.
 fn recover_diff3_atoms_with_participants(
     entries: &[PathEntry],
     base: Option<&[u8]>,
 ) -> (Vec<ConflictAtom>, Vec<WorkspaceId>) {
+    let all_ids = || entries.iter().map(|e| e.workspace_id.clone()).collect();
     let Some(base_bytes) = base else {
         // No base — can't do diff3.  Return all entries as participants (caller
         // will decide based on reason).
-        let ids = entries.iter().map(|e| e.workspace_id.clone()).collect();
-        return (vec![], ids);
+        return (vec![], all_ids());
     };
-    let variants: Vec<&[u8]> = entries
+    // Keep workspace id and content paired (bn-1lwk alignment fix).
+    let members: Vec<(WorkspaceId, &[u8])> = entries
         .iter()
-        .filter_map(|e| e.content.as_deref())
+        .filter_map(|e| e.content.as_deref().map(|c| (e.workspace_id.clone(), c)))
         .collect();
-    if variants.len() < 2 {
-        let ids = entries.iter().map(|e| e.workspace_id.clone()).collect();
-        return (vec![], ids);
+    if members.len() < 2 {
+        return (vec![], all_ids());
     }
 
-    let mut merged = variants[0].to_vec();
-    // Track which workspaces have been folded into `ours` so far, with their
-    // ORIGINAL content so the exclusion probe can test each one pairwise
-    // against the trigger.
-    let mut ours_members: Vec<(WorkspaceId, &[u8])> =
-        vec![(entries[0].workspace_id.clone(), variants[0])];
+    let content_participants = kway_conflict_participants(base_bytes, &members);
+    let participant_members: Vec<(WorkspaceId, &[u8])> = members
+        .iter()
+        .filter(|(w, _)| content_participants.contains(w))
+        .cloned()
+        .collect();
+    let atoms = kway_conflict_atoms(base_bytes, &participant_members);
 
-    for (i, next) in variants[1..].iter().enumerate() {
-        let theirs_ws = &entries[i + 1].workspace_id;
-
-        if merged == *next {
-            ours_members.push((theirs_ws.clone(), next));
-            continue;
-        }
-
-        match diff3_merge_bytes(base_bytes, &merged, next) {
-            Ok(Diff3Outcome::Clean(out)) => {
-                merged = out;
-                ours_members.push((theirs_ws.clone(), next));
-            }
-            Ok(Diff3Outcome::Conflict { marker_output }) => {
-                // The accumulated `ours` composite conflicted with `theirs`
-                // (entries[i+1]).  Determine which folded members are actually
-                // party to the conflict via the pairwise exclusion probe.
-                let folded_participants =
-                    probe_folded_participants(base_bytes, &ours_members, next);
-
-                // Label the "ours" side of the atoms with the participating
-                // members only, so atom edits don't misattribute either.
-                let ours_label = folded_participants
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("+");
-                let theirs_label = theirs_ws.to_string();
-
-                let mut participants = folded_participants;
-                participants.push(theirs_ws.clone());
-                let atoms = parse_diff3_atoms(&marker_output, &ours_label, &theirs_label);
-                return (atoms, participants);
-            }
-            Err(_) => {
-                // Can't determine the exact pair; fall back to all entries.
-                let ids = entries.iter().map(|e| e.workspace_id.clone()).collect();
-                return (vec![], ids);
-            }
-        }
-    }
-    // Fold completed without finding a conflict (shouldn't happen on the conflict
-    // path, but be safe: return all entries).
-    let ids = entries.iter().map(|e| e.workspace_id.clone()).collect();
-    (vec![], ids)
+    let participants = entries
+        .iter()
+        .filter(|e| e.content.is_none() || content_participants.contains(&e.workspace_id))
+        .map(|e| e.workspace_id.clone())
+        .collect();
+    (atoms, participants)
 }
 
 /// Compatibility shim: calls [`recover_diff3_atoms_with_participants`] and
@@ -2992,9 +3038,10 @@ mod tests {
 
         let result = resolve_partition(&partition, &base_map).expect("operation should succeed");
 
-        // m1 vs m2 conflicts immediately on the first fold step.
-        // Sides must include m1 and m2 (and possibly only those two since the
-        // fold stops at the first conflict — m3 was never folded in).
+        // bn-1lwk: m3 edits the same line as m1 and m2, so it is a genuine
+        // participant even though the k-way fold already conflicted at the
+        // m1-vs-m2 step.  (This test previously asserted m3 was ABSENT,
+        // pinning the bug: m3's edit was invisible and unselectable.)
         assert_eq!(result.conflicts.len(), 1);
         let record = &result.conflicts[0];
         assert_eq!(record.reason, ConflictReason::Diff3Conflict);
@@ -3004,13 +3051,10 @@ mod tests {
             .iter()
             .map(|s| s.workspace_id.as_str())
             .collect();
-        // At minimum m1 and m2 must be present (they are the first conflicting pair).
-        assert!(sides.contains(&"m1"), "m1 must be in sides; got: {sides:?}");
-        assert!(sides.contains(&"m2"), "m2 must be in sides; got: {sides:?}");
-        // m3 is not folded in (fold stops at first conflict), so it should NOT appear.
-        assert!(
-            !sides.contains(&"m3"),
-            "m3 is not part of the m1-vs-m2 conflict and must not appear; got: {sides:?}"
+        assert_eq!(
+            sides,
+            vec!["m1", "m2", "m3"],
+            "all three overlapping workspaces must be sides"
         );
     }
 
@@ -3024,11 +3068,16 @@ mod tests {
     fn bn_ztu6_two_region_conflict_both_from_same_pair_listed_correctly() {
         // Two separate conflict regions in one file; m1 and m2 both touch
         // both regions, so the record must list exactly [m1, m2].
-        let base = b"line1\nshared_region_a\nline3\nline4\nline5\nshared_region_b\nline7\n";
-        let m1 = b"line1\nm1_region_a\nline3\nline4\nline5\nm1_region_b\nline7\n";
-        let m2 = b"line1\nm2_region_a\nline3\nline4\nline5\nm2_region_b\nline7\n";
-        // m3 is disjoint (no changes at all to the conflicting regions).
-        let m3 = b"line1\nshared_region_a\nline3\nline4\nline5\nshared_region_b\nm3_extra\n";
+        let base =
+            b"line1\nshared_region_a\nline3\nline4\nline5\nshared_region_b\nline7\nline8\nline9\n";
+        let m1 = b"line1\nm1_region_a\nline3\nline4\nline5\nm1_region_b\nline7\nline8\nline9\n";
+        let m2 = b"line1\nm2_region_a\nline3\nline4\nline5\nm2_region_b\nline7\nline8\nline9\n";
+        // m3 is disjoint: it edits line 9, with unchanged context between it
+        // and region b.  (bn-1lwk: this fixture used to edit line 7, directly
+        // ADJACENT to region b — git diff3 treats that as a pairwise conflict
+        // with m1/m2, so m3 was a genuine participant that the truncated fold
+        // merely never examined.)
+        let m3 = b"line1\nshared_region_a\nline3\nline4\nline5\nshared_region_b\nline7\nline8\nm3_extra\n";
 
         let partition = shared_only(
             "two_regions.txt",
@@ -3253,5 +3302,257 @@ mod tests {
             2,
             "both paths should resolve cleanly"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1lwk: k-way conflict must list EVERY overlapping workspace, not just
+    // the pair that triggered the first conflicting fold step.
+    // -----------------------------------------------------------------------
+    mod bn_1lwk_tests {
+        use super::*;
+
+        const BASE12: &[u8] = b"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n";
+
+        /// Replace 1-indexed `line` of BASE12 with `text`.
+        fn edit12(line: usize, text: &str) -> Vec<u8> {
+            let mut lines: Vec<String> = std::str::from_utf8(BASE12)
+                .expect("utf8")
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            lines[line - 1] = text.to_owned();
+            let mut out = lines.join("\n");
+            out.push('\n');
+            out.into_bytes()
+        }
+
+        /// Run the scenario through every production resolve path: the plain
+        /// diff3 path and (with `ast-merge`) the AST pipeline with AST both
+        /// enabled for all languages and disabled.
+        fn resolve_all_paths(
+            path: &str,
+            entries: Vec<PathEntry>,
+            base: &[u8],
+        ) -> Vec<(&'static str, ResolveResult)> {
+            let partition = shared_only(path, entries);
+            let mut base_map = BTreeMap::new();
+            base_map.insert(PathBuf::from(path), base.to_vec());
+            #[allow(unused_mut)]
+            let mut out = vec![(
+                "plain",
+                resolve_partition(&partition, &base_map).expect("resolve"),
+            )];
+            #[cfg(feature = "ast-merge")]
+            {
+                use crate::merge::ast_merge::AstMergeConfig;
+                out.push((
+                    "ast-all",
+                    resolve_partition_with_ast(
+                        &partition,
+                        &base_map,
+                        &AstMergeConfig::all_languages(),
+                    )
+                    .expect("resolve"),
+                ));
+                out.push((
+                    "ast-none",
+                    resolve_partition_with_ast(&partition, &base_map, &AstMergeConfig::default())
+                        .expect("resolve"),
+                ));
+            }
+            out
+        }
+
+        fn sides_of(result: &ResolveResult) -> Vec<String> {
+            assert_eq!(result.conflicts.len(), 1, "expected exactly one conflict");
+            let mut v: Vec<String> = result.conflicts[0]
+                .sides
+                .iter()
+                .map(|s| s.workspace_id.to_string())
+                .collect();
+            v.sort();
+            v
+        }
+
+        /// Every atom must carry an edit for every listed side, so atom-level
+        /// `--resolve cf-X.N=<ws>` can pick any side (resolve_atoms keeps the
+        /// BASE region when the chosen workspace has no edit — silent loss).
+        fn assert_atoms_cover_sides(label: &str, result: &ResolveResult) {
+            let record = &result.conflicts[0];
+            assert!(!record.atoms.is_empty(), "{label}: atoms must not be empty");
+            for atom in &record.atoms {
+                for side in &record.sides {
+                    assert!(
+                        atom.edits
+                            .iter()
+                            .any(|e| e.workspace == side.workspace_id.as_str()),
+                        "{label}: atom {:?} has no edit for side {}; edits: {:?}",
+                        atom.base_region,
+                        side.workspace_id,
+                        atom.edits.iter().map(|e| &e.workspace).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+
+        /// The exact field repro: wa, wb, wc each rewrite the only line.
+        #[test]
+        fn three_workspaces_same_line_all_listed() {
+            for path in ["x.rs", "x.txt"] {
+                let results = resolve_all_paths(
+                    path,
+                    vec![
+                        entry("wa", ChangeKind::Modified, Some(b"line wa\n")),
+                        entry("wb", ChangeKind::Modified, Some(b"line wb\n")),
+                        entry("wc", ChangeKind::Modified, Some(b"line wc\n")),
+                    ],
+                    b"line one\n",
+                );
+                for (label, result) in &results {
+                    assert_eq!(
+                        sides_of(result),
+                        vec!["wa", "wb", "wc"],
+                        "{label} {path}: every overlapping workspace must be a side"
+                    );
+                    let wc = result.conflicts[0]
+                        .sides
+                        .iter()
+                        .find(|s| s.workspace_id.as_str() == "wc")
+                        .expect("wc side");
+                    assert_eq!(wc.content.as_deref(), Some(&b"line wc\n"[..]));
+                    assert_atoms_cover_sides(label, result);
+                }
+            }
+        }
+
+        /// Two distinct conflict regions whose pairs interleave in sort
+        /// order: a/c fight over line 2, b/d over line 11.  The fold merges
+        /// a+b cleanly, conflicts at c — b and d must still be listed.
+        #[test]
+        fn interleaved_second_region_pair_all_listed() {
+            let results = resolve_all_paths(
+                "f.txt",
+                vec![
+                    entry("a", ChangeKind::Modified, Some(&edit12(2, "a_edit"))),
+                    entry("b", ChangeKind::Modified, Some(&edit12(11, "b_edit"))),
+                    entry("c", ChangeKind::Modified, Some(&edit12(2, "c_edit"))),
+                    entry("d", ChangeKind::Modified, Some(&edit12(11, "d_edit"))),
+                ],
+                BASE12,
+            );
+            for (label, result) in &results {
+                assert_eq!(sides_of(result), vec!["a", "b", "c", "d"], "{label}");
+            }
+        }
+
+        /// An overlapping workspace sorted after a disjoint one and after the
+        /// first conflict is listed; the disjoint one still is not (bn-ztu6).
+        #[test]
+        fn late_overlapping_listed_disjoint_excluded() {
+            let results = resolve_all_paths(
+                "f.txt",
+                vec![
+                    entry("a", ChangeKind::Modified, Some(&edit12(2, "a_edit"))),
+                    entry("b", ChangeKind::Modified, Some(&edit12(2, "b_edit"))),
+                    entry(
+                        "c-disjoint",
+                        ChangeKind::Modified,
+                        Some(&edit12(11, "c_edit")),
+                    ),
+                    entry("d", ChangeKind::Modified, Some(&edit12(2, "d_edit"))),
+                ],
+                BASE12,
+            );
+            for (label, result) in &results {
+                assert_eq!(sides_of(result), vec!["a", "b", "d"], "{label}");
+                assert_atoms_cover_sides(label, result);
+            }
+        }
+
+        /// Participant attribution must not depend on fold order.
+        #[test]
+        fn participants_order_independent() {
+            let a = edit12(2, "a_edit");
+            let b = edit12(11, "b_edit");
+            let c = edit12(2, "c_edit");
+            let d = edit12(6, "d_disjoint");
+            let mk = |names: [&str; 4]| {
+                names
+                    .iter()
+                    .map(|n| {
+                        let content = match *n {
+                            "a" => &a,
+                            "b" => &b,
+                            "c" => &c,
+                            _ => &d,
+                        };
+                        entry(n, ChangeKind::Modified, Some(content))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for order in [
+                ["a", "b", "c", "d"],
+                ["d", "c", "b", "a"],
+                ["b", "d", "a", "c"],
+                ["c", "a", "d", "b"],
+            ] {
+                for (label, result) in resolve_all_paths("f.txt", mk(order), BASE12) {
+                    assert_eq!(sides_of(&result), vec!["a", "c"], "{label} order {order:?}");
+                }
+            }
+        }
+
+        /// AST path with real items: three workspaces rewrite the same fn
+        /// body; the AST engine's atoms (and sides) must name all three.
+        #[cfg(feature = "ast-merge")]
+        #[test]
+        fn ast_items_three_way_same_fn_all_listed() {
+            let base = b"fn foo() {\n    old();\n}\n\nfn bar() {\n    keep();\n}\n";
+            let v = |tag: &str| {
+                format!("fn foo() {{\n    {tag}();\n}}\n\nfn bar() {{\n    keep();\n}}\n")
+                    .into_bytes()
+            };
+            let results = resolve_all_paths(
+                "src/lib.rs",
+                vec![
+                    entry("wa", ChangeKind::Modified, Some(&v("wa"))),
+                    entry("wb", ChangeKind::Modified, Some(&v("wb"))),
+                    entry("wc", ChangeKind::Modified, Some(&v("wc"))),
+                ],
+                base,
+            );
+            for (label, result) in &results {
+                assert_eq!(sides_of(result), vec!["wa", "wb", "wc"], "{label}");
+                assert_atoms_cover_sides(label, result);
+            }
+        }
+
+        /// Second defect: `variants` was built with `filter_map` over
+        /// content while the fold indexed `entries[i + 1]`, so a content-less
+        /// entry ahead of the conflict shifted workspace attribution.
+        #[test]
+        fn content_less_entry_does_not_shift_attribution() {
+            let entries = vec![
+                entry("a-del", ChangeKind::Deleted, None),
+                entry("b", ChangeKind::Modified, Some(&edit12(11, "b_edit"))),
+                entry("c", ChangeKind::Modified, Some(&edit12(2, "c_edit"))),
+                entry("d", ChangeKind::Modified, Some(&edit12(2, "d_edit"))),
+            ];
+            let (_atoms, participants) =
+                recover_diff3_atoms_with_participants(&entries, Some(BASE12));
+            let names: Vec<&str> = participants.iter().map(WorkspaceId::as_str).collect();
+            assert!(
+                names.contains(&"c"),
+                "c must be a participant; got {names:?}"
+            );
+            assert!(
+                names.contains(&"d"),
+                "d must be a participant; got {names:?}"
+            );
+            assert!(
+                !names.contains(&"b"),
+                "b edits a disjoint line and must not be attributed; got {names:?}"
+            );
+        }
     }
 }

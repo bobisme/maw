@@ -776,7 +776,6 @@ proptest! {
     /// Every workspace's changed paths appear in the merge output (resolved
     /// or conflicts). This is the fundamental pushout embedding property.
     #[test]
-    #[ignore = "bn-86hd: bn-ztu6 drops post-first-conflict workspaces from conflict sides (see pushout_embedding_conflict_sides_complete)"]
     fn pushout_embedding_all_paths_accounted(workspaces in arb_workspaces()) {
         let base_contents = make_base_contents(&workspaces);
         let result = run_merge(&workspaces, &base_contents);
@@ -788,16 +787,7 @@ proptest! {
 
     /// For conflicted shared paths, every workspace that touched the path
     /// is represented as a conflict side.
-    ///
-    /// IGNORED (bn-86hd): fails on trunk since bn-ztu6 (f4a6e6f9). The k-way
-    /// participant fold in `recover_diff3_atoms_with_participants` stops at
-    /// the first conflicting step, so a workspace sorted AFTER that step is
-    /// omitted from the conflict record even when it edits the same line.
-    /// Minimal case: base "x.rs", ws-00/ws-01/ws-02 each rewrite its only
-    /// line differently -> sides {ws-00, ws-01}, ws-02 missing. Kept as-is
-    /// (not weakened) pending a decision on whether that is a data-loss bug.
     #[test]
-    #[ignore = "bn-86hd: bn-ztu6 drops post-first-conflict workspaces from conflict sides"]
     fn pushout_embedding_conflict_sides_complete(workspaces in arb_workspaces()) {
         let base_contents = make_base_contents(&workspaces);
         let result = run_merge(&workspaces, &base_contents);
@@ -922,7 +912,6 @@ proptest! {
     /// Every conflict in the merge result is justified — the conflict cannot
     /// be resolved without losing a side's contribution.
     #[test]
-    #[ignore = "bn-86hd: bn-ztu6 drops post-first-conflict workspaces from conflict sides (see pushout_embedding_conflict_sides_complete)"]
     fn pushout_minimality_conflicts_justified(workspaces in arb_workspaces()) {
         let base_contents = make_base_contents(&workspaces);
         let result = run_merge(&workspaces, &base_contents);
@@ -1133,7 +1122,6 @@ proptest! {
     /// Full pushout contract: embedding + minimality + commutativity in
     /// one combined check. This is the canonical §9.2 verification.
     #[test]
-    #[ignore = "bn-86hd: bn-ztu6 drops post-first-conflict workspaces from conflict sides (see pushout_embedding_conflict_sides_complete)"]
     fn pushout_full_contract(workspaces in arb_workspaces()) {
         let base_contents = make_base_contents(&workspaces);
         let result = run_merge(&workspaces, &base_contents);

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4b173a479b782b09eb01a85d79e2dc7b44a425cc4be92dea4e5804a710a6f36b # shrinks to workspaces = [TestWorkspace { name: "ws-00", changes: [FileChange { path: "a.rs", kind: Added, content: Some([65, 10]), file_id: None, blob: None, mode: None }, FileChange { path: "a.rs", kind: Added, content: Some([66, 10]), file_id: None, blob: None, mode: None }] }, TestWorkspace { name: "ws-01", changes: [FileChange { path: "a.rs", kind: Modified, content: Some([32, 10]), file_id: None, blob: None, mode: None }] }]
