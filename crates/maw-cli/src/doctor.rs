@@ -277,7 +277,7 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
             ),
             fix: Some(format!(
                 "Recover it first: {}",
-                maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+                maw::merge::prepare::MERGE_RECOVER_CMD
             )),
         }),
         Ok(AutoAdvanceOutcome::NoOp {

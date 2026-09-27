@@ -135,14 +135,14 @@ pub fn run(
     let _lock = EpochLock::acquire(&root, "undo")?;
 
     // bn-3rhz: an unfinished `ws merge` journal under the epoch lock is a
-    // crashed merge; its recovery (`maw ws merge --abort`) refuses once the
-    // epoch moved away from its `epoch_before`, so undo must not move it.
+    // crashed merge; its recovery (`maw ws merge --recover`, bn-1fcox) needs
+    // the refs where the merge left them, so undo must not move the epoch.
     if let Some(phase) = crate::workspace::epoch_drift::unfinished_merge_phase(&root)? {
         bail!(
             "A previous `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
              Undoing now would move the epoch and strand its recovery; nothing was changed.\n  \
              To fix: {}, then re-run `maw undo`.",
-            maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+            maw::merge::prepare::MERGE_RECOVER_CMD
         );
     }
 

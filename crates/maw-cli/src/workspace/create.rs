@@ -641,7 +641,7 @@ fn workspace_commits_ahead(ws_path: &std::path::Path, base_epoch_oid: &str) -> O
 /// lists this workspace in `sources` and its owner process is **alive**, the
 /// destroy is refused with an actionable message. An orphaned or
 /// indeterminate merge-state must NOT block destroy forever — that would
-/// regress bn-2wyh — so those cases surface the `maw ws merge --abort`
+/// regress bn-2wyh — so those cases surface the `maw ws merge --recover`
 /// recovery hint instead, consistent with prepare.rs / doctor behavior.
 fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> Result<()> {
     use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
@@ -695,7 +695,7 @@ fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> R
                 "Workspace '{name}' is listed as a source in a stale merge-state \
                  (phase: {}, owner process not running). The interrupted merge will \
                  not complete on its own.\n  \
-                 Clear it first: maw ws merge --abort\n  \
+                 Recover it first: maw ws merge --recover\n  \
                  Then: maw ws destroy {name} --force",
                 state.phase
             )

@@ -33,9 +33,7 @@ use maw_core::merge::plan::{
     compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
 use maw_core::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
-use maw_core::merge_state::{
-    AbortOutcome, MergePhase, MergeStateFile, abort_merge_state, run_cleanup_phase,
-};
+use maw_core::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use maw_core::model::conflict::ConflictAtom;
 use maw_core::model::conflict::Region;
 use maw_core::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
@@ -43,6 +41,9 @@ use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::types::{OpPayload, Operation};
 use tracing::instrument;
+
+/// bn-1fcox: crash recovery for an unfinished merge journal.
+mod recover;
 
 use super::capture::capture_before_destroy;
 use super::destroy_record::{DestroyReason, write_destroy_record};
@@ -1922,6 +1923,7 @@ fn check_merge_result_for_target(
                 &build_dir,
                 target_branch,
                 (!target_updates_epoch).then_some(&merge_base_epoch),
+                None,
             )
             .context("failed to persist merge target context for check")?;
 
@@ -2223,6 +2225,7 @@ pub fn plan_merge(
         &manifold_dir,
         target_branch,
         (!target_updates_epoch).then_some(&merge_base_epoch),
+        None,
     ) {
         let _ = cleanup_plan_merge_state(&manifold_dir);
         bail!("failed to persist merge target context for plan: {e}");
@@ -3666,9 +3669,12 @@ fn reconcile_epoch_with_branch(
     }
 
     // bn-302v: this reconcile runs BEFORE PREPARE's journal check. A crashed
-    // merge's COMMIT/CLEANUP journal pins `epoch_before` for its recovery
-    // (`maw ws merge --abort` refuses once the epoch moved away from it), so
-    // absorbing trunk commits into the epoch now would strand it for good.
+    // merge's COMMIT/CLEANUP journal needs the epoch where that merge left it
+    // for its recovery to prove whether its commit landed, so absorbing trunk
+    // commits into the epoch now would strand it for good. (bn-1fcox: `merge`
+    // runs that recovery right after taking the epoch lock, so a journal still
+    // here is one recovery refused, or a pre-COMMIT one; the refusal below
+    // points at `maw ws merge --recover`.)
     // Refuse before any mutation (Stateright
     // `mutation_pre_bn_302v_ff_absorb_ignores_merge_journal_strands_recovery`).
     // An unreadable journal cannot drive a recovery either, so it does not
@@ -3706,7 +3712,7 @@ fn reconcile_epoch_with_branch(
              `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
              Absorbing the trunk commits now would strand its recovery.\n  \
              To fix: {}, then retry.",
-            maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+            maw::merge::prepare::MERGE_RECOVER_CMD
         );
     }
 
@@ -5364,6 +5370,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Epoch lock FIRST; the sibling auto-rebase takes per-workspace locks under
     // it (see epoch_lock ordering rule). `--check`/`--plan` never reach here.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws merge")?;
+    // bn-1fcox: under the epoch lock a COMMIT/CLEANUP journal is provably
+    // orphaned (a live merge holds this lock for its whole run). Finish it if
+    // its commit landed, abort it if it provably did not — BEFORE FF-absorb
+    // and PREPARE, both of which refuse under it. Pre-COMMIT journals stay
+    // with PREPARE's orphan takeover. `--dry-run` never mutates here.
+    if !dry_run {
+        recover::before_merge(&root)?;
+    }
     // bn-2rnq: snapshot every sibling's committed HEAD BEFORE any epoch mutation
     // (FF-absorb reconcile, PREPARE→COMMIT, sibling auto-rebase). We are inside
     // the epoch lock, so no sibling can move under us between here and the audit.
@@ -5556,6 +5570,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         &manifold_dir,
         branch,
         (!target_updates_epoch).then_some(&merge_base_epoch),
+        Some(&MergeTargetContext {
+            target_workspace: default_ws,
+            updates_epoch: target_updates_epoch,
+            destroy_after,
+        }),
     ) {
         abort_merge(
             &manifold_dir,
@@ -6230,16 +6249,17 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         bail!("Merge COMMIT phase failed: could not update refs.");
                     }
                     Err(e) => {
-                        // Epoch moved but branch is at an unexpected value —
-                        // abort so the merge-state doesn't stay stuck at "commit".
-                        abort_merge(
-                            &manifold_dir,
-                            &format!("partial commit recovery failed: {e}"),
-                        );
+                        // Epoch moved but branch is at an unexpected value.
+                        // bn-1fcox: do NOT abort — the epoch may already carry
+                        // the merged commit, and labelling that `aborted`
+                        // (then deleting the journal) would hide committed
+                        // work. Keep the journal; `--recover` re-reads the
+                        // refs and refuses unless it can prove the outcome.
                         bail!(
                             "Merge COMMIT phase partially applied and recovery failed: {e}\n  \
-                             The merge-state has been aborted. Check refs manually:\n  \
-                             refs/manifold/epoch/current and refs/heads/{branch}"
+                             The merge journal was kept. Check refs/manifold/epoch/current and \
+                             refs/heads/{branch}, then run: {}",
+                            maw::merge::prepare::MERGE_RECOVER_CMD
                         );
                     }
                 }
@@ -6953,15 +6973,28 @@ fn enter_commit_phase(
     Ok(())
 }
 
+/// What crash recovery needs to finish this merge's CLEANUP (bn-1fcox).
+struct MergeTargetContext<'a> {
+    target_workspace: &'a str,
+    updates_epoch: bool,
+    destroy_after: bool,
+}
+
 fn record_merge_target_context(
     manifold_dir: &Path,
     target_branch: &str,
     epoch_before_override: Option<&EpochId>,
+    ctx: Option<&MergeTargetContext<'_>>,
 ) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
     let mut state =
         MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
     state.target_branch = Some(target_branch.to_owned());
+    if let Some(ctx) = ctx {
+        state.target_workspace = Some(ctx.target_workspace.to_owned());
+        state.updates_epoch = Some(ctx.updates_epoch);
+        state.destroy_after = Some(ctx.destroy_after);
+    }
     if let Some(epoch_before) = epoch_before_override {
         state.epoch_before = epoch_before.clone();
     }
@@ -6987,111 +7020,30 @@ fn abort_merge(manifold_dir: &Path, reason: &str) {
 
 /// Handle `maw ws merge --abort`.
 ///
-/// Clears an orphaned/stuck `.manifold/merge-state.json` so merges can run
-/// again after a killed/OOM'd/panicked/Ctrl-C'd merge (bn-2wyh). Upholds the
-/// Prime Invariant: refuses to clear if the merge already passed COMMIT
-/// (epoch / target branch advanced to the merged commit), because clearing
-/// then could mask committed work.
+/// bn-1fcox: same recovery decision as `--recover`. A merge that never
+/// reached COMMIT, or whose COMMIT CAS provably did not land, is cleared; a
+/// merge whose commit already landed cannot be aborted without hiding
+/// committed work (Prime Invariant), so it is finished forward instead and
+/// the output says so (`maw undo` reverts it). An unprovable ref state is
+/// refused with the journal kept.
 ///
 /// # Errors
-/// Returns an error on I/O / deserialization failure, or (with a non-zero
-/// exit) when the abort is refused for safety.
+/// Lock timeout, I/O / deserialization failure, or an unprovable ref state.
 pub fn abort_in_progress_merge(root: &Path, fmt: OutputFormat) -> Result<()> {
-    let manifold_dir =
-        maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root);
-    let state_path = MergeStateFile::default_path(&manifold_dir);
-    let text_mode = fmt != OutputFormat::Json;
+    recover::explicit(root, fmt, recover::Trigger::Abort)
+}
 
-    // Observe the current epoch and (if recorded) target branch head so the
-    // core abort logic can apply the Prime-Invariant gate without any git
-    // dependency of its own.
-    let current_epoch = maw_core::refs::read_epoch_current(root)
-        .ok()
-        .flatten()
-        .map(|o| o.as_str().to_owned());
-
-    let current_target_head = match MergeStateFile::read(&state_path) {
-        Ok(state) => state.target_branch.and_then(|branch| {
-            let branch_ref = format!("refs/heads/{branch}");
-            maw_core::refs::read_ref(root, &branch_ref)
-                .ok()
-                .flatten()
-                .map(|o| o.as_str().to_owned())
-        }),
-        Err(_) => None,
-    };
-
-    let outcome = abort_merge_state(
-        &state_path,
-        current_epoch.as_deref(),
-        current_target_head.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("merge --abort failed to read merge-state: {e}"))?;
-
-    match outcome {
-        AbortOutcome::NothingToAbort => {
-            if fmt == OutputFormat::Json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "aborted": false,
-                        "reason": "no merge-state file",
-                    })
-                );
-            } else {
-                println!(
-                    "No merge in progress \u{2014} nothing to abort.\n  \
-                     Next: maw ws merge <workspaces> --into <target> --message \"...\""
-                );
-            }
-            Ok(())
-        }
-        AbortOutcome::Cleared { from } => {
-            if fmt == OutputFormat::Json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "aborted": true,
-                        "phase": from.to_string(),
-                    })
-                );
-            } else {
-                println!(
-                    "Cleared orphaned merge-state (was in phase: {from}).\n  \
-                     The interrupted merge made no committed changes (pre-COMMIT), so no \
-                     work was lost.\n  \
-                     Next: re-run your merge \u{2014} maw ws merge <workspaces> --into \
-                     <target> --message \"...\""
-                );
-            }
-            Ok(())
-        }
-        AbortOutcome::RefusedPostCommit { phase, reason } => {
-            // Refuse loudly. This is the Prime-Invariant guardrail: do NOT
-            // delete state that might be masking committed work.
-            if fmt == OutputFormat::Json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "aborted": false,
-                        "phase": phase.to_string(),
-                        "reason": reason,
-                    })
-                );
-            }
-            let _ = text_mode;
-            bail!(
-                "Refused to abort merge: {reason}.\n  \
-                 The merge reached phase '{phase}' and may have committed work \u{2014} \
-                 clearing merge-state now could orphan it (violates the Prime Invariant).\n  \
-                 To inspect what was committed: maw ws recover\n  \
-                 Check epoch/branch state: maw status && maw doctor\n  \
-                 If you have confirmed the refs did NOT advance, remove \
-                 {} manually as a last resort.",
-                state_path.display()
-            )
-        }
-    }
+/// Handle `maw ws merge --recover` (bn-1fcox).
+///
+/// Under the epoch lock, finishes an interrupted merge whose COMMIT CAS
+/// landed (CLEANUP: target checkout, `--destroy`, journal removal), aborts
+/// one whose CAS provably did not land, clears pre-COMMIT / terminal
+/// journals, and refuses (keeping the journal) when the refs prove neither.
+///
+/// # Errors
+/// Lock timeout, I/O / deserialization failure, or an unprovable ref state.
+pub fn recover_in_progress_merge(root: &Path, fmt: OutputFormat) -> Result<()> {
+    recover::explicit(root, fmt, recover::Trigger::Recover)
 }
 
 /// Get current Unix timestamp in seconds.

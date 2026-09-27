@@ -188,8 +188,8 @@ pub enum QuarantineError {
     Commit(String),
     /// A `ws merge` journal (`merge-state.json`) is still in progress (live
     /// or crashed). Promote refuses: moving the epoch under it would turn a
-    /// recoverable crashed merge into one `ws merge --abort` refuses to
-    /// clear (bn-3w2b).
+    /// recoverable crashed merge into one `ws merge --recover` cannot
+    /// resolve (bn-3w2b, bn-1fcox).
     MergeInProgress { phase: String },
     /// Refused to remove an existing quarantine worktree because no valid
     /// [`RemovalProof`] shows its state is recoverable (bn-jfj2). Nothing was
@@ -225,7 +225,7 @@ impl std::fmt::Display for QuarantineError {
                 f,
                 "a `maw ws merge` is in progress (merge-state phase: {phase}); \
                  refusing to promote while its journal exists.\n  \
-                 Finish or recover it first: maw ws merge --abort"
+                 Finish or recover it first: maw ws merge --recover"
             ),
             Self::Unpinned { merge_id, reason } => write!(
                 f,

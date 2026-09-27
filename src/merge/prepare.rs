@@ -42,10 +42,13 @@ use crate::merge_state::{
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 use crate::refs;
 
-/// Exact command an agent must run to clear an orphaned merge-state.
+/// Exact command an agent must run to recover an orphaned merge-state.
 ///
-/// Centralized so the PREPARE error, `maw doctor`, and docs all agree.
-pub const MERGE_ABORT_RECOVERY_CMD: &str = "maw ws merge --abort";
+/// Centralized so the PREPARE error, FF-absorb, `maw doctor`, `maw epoch
+/// sync`, `maw undo` and docs all agree. `--recover` (bn-1fcox) finishes a
+/// merge whose commit already landed and aborts one whose commit did not;
+/// `--abort` alone refused the former.
+pub const MERGE_RECOVER_CMD: &str = "maw ws merge --recover";
 
 // ---------------------------------------------------------------------------
 // FrozenInputs
@@ -124,7 +127,7 @@ impl fmt::Display for PrepareError {
                          running process)\n  \
                          Another merge is actively running. Wait for it to finish, then retry.\n  \
                          If you are certain no merge is running (the owner was killed), run:\n    \
-                         {MERGE_ABORT_RECOVERY_CMD}"
+                         {MERGE_RECOVER_CMD}"
                     )
                 } else {
                     write!(
@@ -133,7 +136,7 @@ impl fmt::Display for PrepareError {
                          exists)\n  \
                          A previous merge left state behind. If no merge is running (it was \
                          killed / OOM'd / interrupted), recover with:\n    \
-                         {MERGE_ABORT_RECOVERY_CMD}\n  \
+                         {MERGE_RECOVER_CMD}\n  \
                          Diagnose: maw doctor"
                     )
                 }
@@ -724,7 +727,7 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("already in progress"));
         // bn-2wyh: the error must always print the exact recovery command.
-        assert!(msg.contains(MERGE_ABORT_RECOVERY_CMD));
+        assert!(msg.contains(MERGE_RECOVER_CMD));
 
         let err = PrepareError::EpochNotFound("not found".to_owned());
         assert!(format!("{err}").contains("epoch ref not found"));
@@ -1118,7 +1121,7 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(
-            msg.contains(MERGE_ABORT_RECOVERY_CMD),
+            msg.contains(MERGE_RECOVER_CMD),
             "error must include recovery command, got: {msg}"
         );
 
@@ -1126,6 +1129,6 @@ mod tests {
             phase: MergePhase::Validate,
             live: true,
         };
-        assert!(format!("{err_live}").contains(MERGE_ABORT_RECOVERY_CMD));
+        assert!(format!("{err_live}").contains(MERGE_RECOVER_CMD));
     }
 }

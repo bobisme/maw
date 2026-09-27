@@ -386,8 +386,8 @@ where
 
     // bn-302v: refuse while an unfinished `ws merge` journal exists. Under the
     // epoch lock no live merge can be running, so this is a crashed merge
-    // awaiting recovery; its recovery (`maw ws merge --abort`) needs the epoch
-    // still at the journal's `epoch_before`. Same rule as bn-3w2b's
+    // awaiting recovery; its recovery (`maw ws merge --recover`, bn-1fcox) needs
+    // the refs where the merge left them. Same rule as bn-3w2b's
     // `maw merge promote` refusal (Stateright
     // `fast_doctor_repair_vs_crashed_merge`).
     if let Some(phase) = unfinished_merge_phase(root)? {

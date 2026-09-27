@@ -1334,34 +1334,52 @@ pub enum WorkspaceCommands {
     #[command(verbatim_doc_comment)]
     Merge {
         /// Workspace names to merge
-        #[arg(required_unless_present = "abort")]
+        #[arg(required_unless_present_any = ["abort", "recover"])]
         workspaces: Vec<String>,
 
         /// Explicit merge target: default workspace, branch-attached workspace, or active change id.
         ///
         /// Use ws:<name> or change:<id> when a bare target is ambiguous.
-        #[arg(long, required_unless_present = "abort")]
+        #[arg(long, required_unless_present_any = ["abort", "recover"])]
         into: Option<String>,
 
-        /// Clear an orphaned/stuck merge-state left by a killed, OOM'd,
-        /// panicked, or Ctrl-C'd `maw ws merge`.
+        /// Abort an interrupted merge left by a killed, OOM'd, panicked, or
+        /// Ctrl-C'd `maw ws merge`.
         ///
-        /// A crashed merge leaves `.manifold/merge-state.json` on disk and
-        /// every subsequent merge then fails with "merge already in
-        /// progress". This flag clears that state so merges can proceed
-        /// again.
-        ///
-        /// SAFE BY DESIGN: it refuses to clear if the merge already passed
-        /// COMMIT (the epoch advanced past where the merge started), so no
-        /// committed work can ever be lost (Prime Invariant).
+        /// Same decision as --recover: a merge that never reached COMMIT, or
+        /// whose commit provably never landed, is cleared. A merge whose
+        /// commit ALREADY landed cannot be aborted without hiding committed
+        /// work (Prime Invariant) — it is finished instead, and the output
+        /// says so (`maw undo` reverts it).
         ///
         /// Takes no workspaces and no --into. Example:
         ///   maw ws merge --abort
         #[arg(
             long,
-            conflicts_with_all = ["check", "plan", "dry_run", "destroy", "resolve", "resolve_all"]
+            conflicts_with_all = ["check", "plan", "dry_run", "destroy", "resolve", "resolve_all", "recover"]
         )]
         abort: bool,
+
+        /// Recover an interrupted `maw ws merge` (bn-1fcox).
+        ///
+        /// A crashed merge leaves its journal (merge-state.json) behind, and
+        /// merges, `maw epoch sync`, `maw undo` and `maw doctor --repair`
+        /// refuse while it exists. This inspects the live refs under the
+        /// epoch lock (waiting for any running merge) and:
+        ///   - commit already landed: finishes the merge's cleanup (checks
+        ///     out the target workspace, runs --destroy if it was requested)
+        ///     and clears the journal — refs are never rewound or re-applied;
+        ///   - commit provably never landed (or pre-COMMIT): clears it;
+        ///   - refs prove neither: refuses, keeps the journal, shows the refs.
+        ///
+        /// `maw ws merge <ws> ...` runs the same recovery automatically for a
+        /// post-COMMIT journal. Takes no workspaces and no --into. Example:
+        ///   maw ws merge --recover
+        #[arg(
+            long,
+            conflicts_with_all = ["check", "plan", "dry_run", "destroy", "resolve", "resolve_all"]
+        )]
+        recover: bool,
 
         /// Destroy workspaces after successful merge (non-interactive by default)
         #[arg(long)]
@@ -1923,6 +1941,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             workspaces,
             into,
             abort,
+            recover,
             destroy,
             confirm,
             message,
@@ -1943,13 +1962,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             if abort {
                 return merge::abort_in_progress_merge(&root, fmt);
             }
+            if recover {
+                return merge::recover_in_progress_merge(&root, fmt);
+            }
             // Past this point a merge target is required; clap guarantees
             // `into` is Some unless --abort was passed (handled above).
             let into = into.ok_or_else(|| {
                 anyhow::anyhow!(
                     "Missing --into target.\n  \
                      Usage: maw ws merge <workspaces> --into <target> --message \"...\"\n  \
-                     To clear a stuck merge instead: maw ws merge --abort"
+                     To recover a stuck merge instead: maw ws merge --recover"
                 )
             })?;
             if check {

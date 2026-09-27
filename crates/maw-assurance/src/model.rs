@@ -77,6 +77,14 @@
 //!
 //! * The default (target) workspace's worktree is not modelled; it is assumed
 //!   clean and equal to the branch. Trunk commits advance the branch directly.
+//!   The one thing tracked about it is the checkout a committed merge still
+//!   owes it (ghost [`State::target_stale`], property [`P_TARGET_CHECKED_OUT`],
+//!   bn-1fcox).
+//! * Crash recovery ([`Action::Recover`]) stands for every entry point that
+//!   runs it — `maw ws merge --recover` / `--abort` and the automatic
+//!   recovery at the start of the next `maw ws merge` — all under the epoch
+//!   lock. It is enabled whenever the lock is free, so the checker explores
+//!   it before, between and after every other actor's steps.
 //! * One merge process per configuration (a crashed merge is recovered by
 //!   the *next* invocation, modelled by [`Action::Recover`]).
 //! * Multi-commit replay is collapsed into a single cherry-pick of the
@@ -104,7 +112,10 @@
     clippy::missing_const_for_fn
 )]
 
-use maw_core::merge_state::{MergePhase, RecoveryOutcome, recovery_outcome_for_phase};
+use maw_core::merge_state::{
+    CasObservation, JournalRecovery, MergePhase, RecoveryOutcome, classify_cas_landing,
+    decide_journal_recovery, recovery_outcome_for_phase,
+};
 use stateright::{Model, Property};
 
 // ---------------------------------------------------------------------------
@@ -302,6 +313,10 @@ pub enum Pc {
     MAutoRebase(u8),
     /// `advance_merge_state(Cleanup)`.
     MCleanup,
+    /// CLEANUP: `update_default_workspace` — check the merge target's
+    /// worktree out at the merged commit (the `FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT`
+    /// crash window sits between [`Pc::MCleanup`] and this step).
+    MTargetCheckout,
     /// Remove merge-state, release the epoch lock.
     MFinish,
 
@@ -434,6 +449,11 @@ pub struct State {
     pub crashes_left: u8,
     /// Ghost: a crashed merge left a journal recovery could not clear.
     pub stuck: bool,
+    /// Ghost (bn-1fcox): a `ws merge` CAS moved the target branch but the
+    /// merge's CLEANUP has not yet checked the target worktree out at the
+    /// merged commit. The worktree itself is not modelled (fidelity notes);
+    /// this bit records the owed checkout.
+    pub target_stale: bool,
     /// Ghost: bitset of [`ev`] events that happened.
     pub events: u16,
     /// Ghost: every value `refs/manifold/epoch/current` has ever held.
@@ -656,6 +676,14 @@ pub enum Mutation {
     /// Pre-bn-302v `ws merge` FF-absorb: absorbs trunk commits into the epoch
     /// even while a crashed merge's COMMIT/CLEANUP journal exists.
     FfAbsorbIgnoresMergeJournal,
+    /// Pre-bn-1fcox: `recover_from_merge_state` had no production caller;
+    /// the only user-invocable recovery was `ws merge --abort`, which refuses
+    /// a journal whose CAS landed — the journal is stuck.
+    PostCasAbortOnly,
+    /// Pre-bn-1fcox PREPARE `stale_completed` takeover: a landed journal is
+    /// overwritten without running the rest of CLEANUP (the target worktree
+    /// is never checked out at the merged commit).
+    PostCasClearWithoutCleanup,
 }
 
 /// The protocol model.
@@ -733,6 +761,7 @@ impl ProtocolModel {
             trunk_left: self.trunk_commits,
             crashes_left: self.crashes,
             stuck: false,
+            target_stale: false,
             events: 0,
             epochs_seen: 0,
             quarantine: None,
@@ -1181,6 +1210,7 @@ impl ProtocolModel {
                     s.epoch = p.candidate;
                     s.branch = p.candidate;
                 }
+                s.target_stale = true;
                 s.events |= ev::MERGE_COMMITTED;
                 s.procs[i].pc = Pc::MCommitDone;
             }
@@ -1189,6 +1219,7 @@ impl ProtocolModel {
                 if s.branch == p.branch_before {
                     s.branch = p.candidate;
                 }
+                s.target_stale = true;
                 s.events |= ev::MERGE_COMMITTED;
                 s.procs[i].pc = Pc::MCommitDone;
             }
@@ -1230,6 +1261,10 @@ impl ProtocolModel {
                 if let Some(j) = s.merge_state.as_mut() {
                     j.phase = JPhase::Cleanup;
                 }
+                s.procs[i].pc = Pc::MTargetCheckout;
+            }
+            Pc::MTargetCheckout => {
+                s.target_stale = false;
                 s.procs[i].pc = Pc::MFinish;
             }
             Pc::MFinish => {
@@ -1527,39 +1562,66 @@ impl ProtocolModel {
         true
     }
 
-    /// Crash recovery of a killed merge, as performed by the next
-    /// `maw ws merge` PREPARE (`src/merge/prepare.rs`) and, failing that,
-    /// `maw ws merge --abort` (`AbortOutcome`). Phase dispatch goes through
-    /// the production `recovery_outcome_for_phase`.
-    fn recover(s: &mut State) {
+    /// Crash recovery of a killed merge (bn-1fcox): `maw ws merge --recover`
+    /// / `--abort`, or the automatic recovery at the start of the next
+    /// `maw ws merge` (all run under the epoch lock — see `actions`). The
+    /// decision goes through the production
+    /// [`maw_core::merge_state::decide_journal_recovery`] (phase dispatch via
+    /// `recovery_outcome_for_phase`) over the production
+    /// [`maw_core::merge_state::classify_cas_landing`] of the live refs.
+    fn recover(&self, s: &mut State) {
         let Some(j) = s.merge_state.clone() else {
             return;
         };
-        match recovery_outcome_for_phase(&j.phase.to_core()) {
-            RecoveryOutcome::AbortedPreCommit { .. } | RecoveryOutcome::RetryValidate => {
-                // Pre-COMMIT orphan: no ref moved; auto-recovered.
+        if self.mutation == Mutation::PostCasAbortOnly {
+            Self::recover_pre_bn_1fcox_abort(s, &j);
+            return;
+        }
+        let landing = j
+            .candidate
+            .map_or(maw_core::merge_state::CasLanding::Unknown, |c| {
+                classify_cas_landing(CasObservation {
+                    updates_epoch: !j.into_branch_only,
+                    epoch_at_candidate: s.epoch == c,
+                    epoch_at_before: s.epoch == j.epoch_before,
+                    candidate_in_branch: s.is_ancestor_or_eq(c, s.branch),
+                })
+            });
+        match decide_journal_recovery(&j.phase.to_core(), landing) {
+            JournalRecovery::ClearTerminal { .. } => s.merge_state = None,
+            JournalRecovery::ClearPreCommit { .. } | JournalRecovery::AbortNotLanded => {
+                // No ref moved: the journal owns nothing; the sources were
+                // never destroyed.
                 s.merge_state = None;
                 s.events |= ev::RECOVERED_PRE_CAS;
             }
-            RecoveryOutcome::CheckCommit | RecoveryOutcome::RetryCleanup => {
-                let advanced = j
-                    .candidate
-                    .is_some_and(|c| (!j.into_branch_only && s.epoch == c) || s.branch == c);
-                if advanced {
-                    // stale_completed: refs reached the candidate → clear.
-                    s.merge_state = None;
-                    s.events |= ev::RECOVERED_POST_CAS;
-                } else if s.epoch == j.epoch_before {
-                    // --abort: epoch never advanced → safe to clear.
-                    s.merge_state = None;
-                    s.events |= ev::RECOVERED_PRE_CAS;
-                } else {
-                    s.stuck = true;
+            JournalRecovery::FinalizeCommitted { .. } => {
+                // Converge forward: finish CLEANUP (target checkout), then
+                // clear. The pre-bn-1fcox PREPARE `stale_completed` takeover
+                // cleared the journal WITHOUT the checkout.
+                if self.mutation != Mutation::PostCasClearWithoutCleanup {
+                    s.target_stale = false;
                 }
-            }
-            RecoveryOutcome::Terminal { .. } | RecoveryOutcome::NoMergeInProgress => {
                 s.merge_state = None;
+                s.events |= ev::RECOVERED_POST_CAS;
             }
+            JournalRecovery::Refuse { .. } => s.stuck = true,
+        }
+    }
+
+    /// Pre-bn-1fcox: no production caller ran `CheckCommit` /
+    /// `RetryCleanup`; the only recovery a user could invoke without starting
+    /// a new merge was `maw ws merge --abort` (`abort_merge_state`), which
+    /// refuses a COMMIT/CLEANUP journal once the refs reached the candidate
+    /// and any journal once the epoch left `epoch_before`.
+    fn recover_pre_bn_1fcox_abort(s: &mut State, j: &MergeJournal) {
+        let post = matches!(j.phase, JPhase::Commit | JPhase::Cleanup);
+        let at_candidate = j.candidate.is_some_and(|c| s.epoch == c || s.branch == c);
+        if (post && at_candidate) || s.epoch != j.epoch_before {
+            s.stuck = true;
+        } else {
+            s.merge_state = None;
+            s.events |= ev::RECOVERED_PRE_CAS;
         }
     }
 
@@ -1633,6 +1695,10 @@ pub const P_NO_DEADLOCK: &str = "no deadlock (wait-for acyclic)";
 pub const P_EPOCH_MONOTONE: &str = "epoch monotone";
 /// Crash recovery always clears the journal.
 pub const P_RECOVERY_CONVERGES: &str = "crash recovery converges";
+/// bn-1fcox: once no merge journal remains, every committed merge's CLEANUP
+/// target checkout has run (recovery finishes CLEANUP, it does not just drop
+/// the journal).
+pub const P_TARGET_CHECKED_OUT: &str = "no journal => merge target checked out";
 
 fn covered(s: &State) -> u16 {
     let mut c = tree_atoms(s.tree(s.epoch)) | tree_atoms(s.tree(s.branch));
@@ -1739,6 +1805,10 @@ fn prop_epoch_monotone(_: &ProtocolModel, s: &State) -> bool {
 
 fn prop_recovery_converges(_: &ProtocolModel, s: &State) -> bool {
     !s.stuck
+}
+
+fn prop_target_checked_out(_: &ProtocolModel, s: &State) -> bool {
+    s.merge_state.is_some() || !s.target_stale
 }
 
 macro_rules! event_prop {
@@ -1848,8 +1918,11 @@ impl Model for ProtocolModel {
             match p.pc {
                 Pc::Done => {}
                 Pc::Crashed => {
+                    // Recovery runs under the epoch lock (bn-1fcox): it waits
+                    // for any live epoch mutator to finish.
                     if matches!(self.procs[pid as usize], ProcSpec::Merge { .. })
                         && s.merge_state.is_some()
+                        && s.epoch_lock.is_none()
                     {
                         actions.push(Action::Recover(pid));
                     }
@@ -1915,7 +1988,7 @@ impl Model for ProtocolModel {
                 s.crashes_left -= 1;
             }
             Action::Recover(_) => {
-                Self::recover(&mut s);
+                self.recover(&mut s);
             }
             Action::Edit { ws, path } => {
                 let bit = 1u16 << s.next_atom;
@@ -1956,6 +2029,7 @@ impl Model for ProtocolModel {
             Property::<Self>::always(P_NO_DEADLOCK, prop_no_deadlock),
             Property::<Self>::always(P_EPOCH_MONOTONE, prop_epoch_monotone),
             Property::<Self>::always(P_RECOVERY_CONVERGES, prop_recovery_converges),
+            Property::<Self>::always(P_TARGET_CHECKED_OUT, prop_target_checked_out),
         ];
         if self.strict_oracle_b {
             props.push(Property::<Self>::always(
@@ -2227,6 +2301,34 @@ pub mod configs {
             crashes: 1,
             expect: ev::MERGE_COMMITTED | ev::FF_ABSORBED | ev::QUARANTINE_PROMOTED,
             ..ProtocolModel::new(1)
+        }
+    }
+
+    /// bn-1fcox: one merge that may crash anywhere (including after the CAS,
+    /// before the target checkout), direct trunk commits racing the crash and
+    /// the recovery, and a sync of the sibling. Recovery must converge on
+    /// both sides of the CAS.
+    pub fn fast_merge_crash_recover_racing_trunk() -> ProtocolModel {
+        ProtocolModel {
+            procs: vec![merge(0), ProcSpec::Sync { ws: 1 }],
+            agent_edits: 1,
+            agent_commits: 1,
+            trunk_commits: 1,
+            crashes: 1,
+            expect: ev::MERGE_COMMITTED | ev::RECOVERED_POST_CAS | ev::RECOVERED_PRE_CAS,
+            ..ProtocolModel::new(2)
+        }
+    }
+
+    /// [`fast_merge_crash_recover_racing_trunk`] for `--into <change>`.
+    pub fn fast_merge_crash_recover_racing_trunk_into_branch() -> ProtocolModel {
+        ProtocolModel {
+            procs: vec![ProcSpec::Merge {
+                src: 0,
+                into_branch_only: true,
+                auto_rebase: false,
+            }],
+            ..fast_merge_crash_recover_racing_trunk()
         }
     }
 

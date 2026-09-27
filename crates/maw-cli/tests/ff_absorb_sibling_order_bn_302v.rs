@@ -369,11 +369,14 @@ fn held_sibling_rebase_lock_skips_ff_advance() {
 }
 
 /// A merge crashed inside COMMIT (journal written, refs not moved), then a
-/// direct trunk commit landed. The next `ws merge` must NOT FF-absorb the
-/// trunk commit into the epoch before PREPARE sees the journal: that would
-/// move the epoch away from the journal's `epoch_before` and make
-/// `maw ws merge --abort` refuse forever. It refuses instead, the documented
-/// recovery works, and the merge then succeeds.
+/// direct trunk commit landed. FF-absorb must NOT absorb the trunk commit
+/// into the epoch while the journal exists: that would move the epoch away
+/// from the journal's `epoch_before` and leave its recovery unable to prove
+/// whether the commit landed. A `--dry-run` (which never runs recovery)
+/// shows that refusal, pointing at `maw ws merge --recover`. A real merge
+/// first runs that recovery under the epoch lock (bn-1fcox): the crashed
+/// commit provably never landed, so it is aborted, and the merge then
+/// FF-absorbs and succeeds.
 #[cfg(feature = "failpoints")]
 #[test]
 fn ff_absorb_refuses_under_crashed_commit_journal_and_recovery_converges() {
@@ -424,24 +427,16 @@ fn ff_absorb_refuses_under_crashed_commit_journal_and_recovery_converges() {
 
     let out = maw_raw(
         root,
-        &[
-            "ws",
-            "merge",
-            "b",
-            "--into",
-            "default",
-            "--message",
-            "merge b",
-        ],
+        &["ws", "merge", "b", "--into", "default", "--dry-run"],
         None,
     );
     let text = combined(&out);
     assert!(
         !out.status.success(),
-        "merge must refuse under the journal:\n{text}"
+        "FF-absorb must refuse under the journal:\n{text}"
     );
     assert!(
-        text.contains("did not finish"),
+        text.contains("did not finish") && text.contains("maw ws merge --recover"),
         "unexpected refusal:\n{text}"
     );
     assert_eq!(
@@ -450,8 +445,7 @@ fn ff_absorb_refuses_under_crashed_commit_journal_and_recovery_converges() {
         "the epoch must not be absorbed past the crashed merge's epoch_before"
     );
 
-    maw(root, &["ws", "merge", "--abort"]);
-    maw(
+    let text = maw(
         root,
         &[
             "ws",
@@ -462,6 +456,14 @@ fn ff_absorb_refuses_under_crashed_commit_journal_and_recovery_converges() {
             "--message",
             "merge b",
         ],
+    );
+    assert!(
+        text.contains("never landed"),
+        "the merge must report aborting the crashed one:\n{text}"
+    );
+    assert!(
+        ws_path(root, "a").exists(),
+        "the never-landed merge destroyed nothing"
     );
     assert_eq!(git(root, &["show", "main:trunk.txt"]), "trunk");
     assert_eq!(git(root, &["show", "main:b.txt"]), "work");

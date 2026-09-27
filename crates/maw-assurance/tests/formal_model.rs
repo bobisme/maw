@@ -373,6 +373,64 @@ fn mutation_pre_bn_302v_doctor_ignores_merge_journal_strands_recovery() {
     );
 }
 
+/// bn-1fcox fix: crash recovery of a merge journal whose COMMIT CAS landed
+/// converges forward — it finishes CLEANUP (the target checkout) and clears
+/// the journal — and one whose CAS provably did not land aborts. Both are
+/// reachable (`RECOVERED_POST_CAS` / `RECOVERED_PRE_CAS`, non-vacuity), under
+/// the epoch lock, racing trunk commits.
+#[test]
+fn fast_merge_crash_recover_racing_trunk() {
+    check_green(configs::fast_merge_crash_recover_racing_trunk());
+}
+
+/// Pre-bn-1fcox: `recover_from_merge_state` (`CheckCommit` /
+/// `RetryCleanup`) had no production caller, and `ws merge --abort` refuses
+/// a journal whose CAS landed — one crash after the CAS leaves a journal
+/// nothing clears.
+#[test]
+fn mutation_pre_bn_1fcox_abort_only_recovery_strands_journal() {
+    expect_counterexample(
+        mutated(
+            configs::fast_merge_crash_destroy(),
+            Mutation::PostCasAbortOnly,
+        ),
+        P_RECOVERY_CONVERGES,
+    );
+}
+
+/// Pre-bn-1fcox PREPARE `stale_completed`: a landed journal was overwritten
+/// without the rest of CLEANUP, so the merge target's worktree was never
+/// checked out at the merged commit.
+#[test]
+fn mutation_pre_bn_1fcox_clear_without_cleanup_skips_target_checkout() {
+    expect_counterexample(
+        mutated(
+            configs::fast_merge_crash_destroy(),
+            Mutation::PostCasClearWithoutCleanup,
+        ),
+        P_TARGET_CHECKED_OUT,
+    );
+}
+
+/// Same, for a branch-only `--into <change>` merge.
+#[test]
+fn mutation_pre_bn_1fcox_into_branch_clear_without_cleanup() {
+    expect_counterexample(
+        mutated(
+            configs::fast_merge_crash_recover_racing_trunk_into_branch(),
+            Mutation::PostCasClearWithoutCleanup,
+        ),
+        P_TARGET_CHECKED_OUT,
+    );
+}
+
+/// Branch-only recovery is green too (trunk commits may land on the change
+/// branch on top of the merged commit before recovery runs).
+#[test]
+fn fast_merge_crash_recover_racing_trunk_into_branch() {
+    check_green(configs::fast_merge_crash_recover_racing_trunk_into_branch());
+}
+
 // ---------------------------------------------------------------------------
 // Deep (manual / nightly)
 // ---------------------------------------------------------------------------

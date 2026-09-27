@@ -76,17 +76,26 @@ impl MergePhase {
             Self::Validate => &[Self::Commit, Self::Aborted],
             // `Commit -> Aborted` is deliberate even though COMMIT is "the
             // point of no return" (bn-2l63). The phase is persisted as
-            // `commit` BEFORE the ref CAS (maw-cli merge: advance to Commit,
-            // then record `epoch_after`, then the branch-divergence
-            // pre-flight, then the CAS). Every abort from this phase happens
-            // while the refs are provably NOT at the candidate: the
-            // pre-flight refusal, a failed CAS, and
-            // `recover_partial_commit*` returning `NotCommitted`. Crash
-            // recovery likewise maps Commit to `CheckCommit`, whose
-            // not-committed branch is exactly this edge. The point of no
-            // return is the successful CAS, not entry into the phase; once
-            // refs have moved, `abort_merge_state` refuses to clear the
-            // state (Prime-Invariant gate) and the merge converges forward.
+            // `commit` (with `epoch_after`, one write) BEFORE the ref CAS
+            // (maw-cli merge: `enter_commit_phase`, then the
+            // branch-divergence pre-flight, then the CAS). Every abort from
+            // this phase happens while the refs are provably NOT at the
+            // candidate: the pre-flight refusal, a failed CAS (the epoch +
+            // branch CAS is one atomic transaction, so a failed CAS moved
+            // neither ref), and `recover_partial_commit*` returning
+            // `NotCommitted`. Crash recovery likewise maps Commit to
+            // `CheckCommit`, whose not-landed branch
+            // (`JournalRecovery::AbortNotLanded`) is exactly this edge.
+            //
+            // bn-1fcox: the legacy `CommitError::PartialCommit` arm (epoch
+            // moved, branch did not) used to abort here too when
+            // `recover_partial_commit*` failed — i.e. AFTER the epoch had
+            // moved to the candidate. It no longer does: it leaves the
+            // journal for `maw ws merge --recover`, which refuses to label
+            // an unprovable ref state either way. The point of no return is
+            // the successful CAS, not entry into the phase; once refs have
+            // moved, recovery converges FORWARD
+            // (`JournalRecovery::FinalizeCommitted`), never to `Aborted`.
             Self::Commit => &[Self::Cleanup, Self::Aborted],
             // No `Cleanup -> Aborted` (bn-s8ti): Cleanup is entered only after
             // the ref CAS succeeded, so the merge is committed and must
@@ -252,6 +261,26 @@ pub struct MergeStateFile {
     /// is provably gone (the machine rebooted) — the merge-state is stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_boot_id: Option<String>,
+
+    /// Name of the workspace whose worktree the merge checks out in CLEANUP
+    /// (the default workspace, or a change's branch-attached workspace).
+    ///
+    /// Recorded in PREPARE so crash recovery can finish CLEANUP (bn-1fcox).
+    /// `None` for journals written before bn-1fcox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_workspace: Option<String>,
+
+    /// Whether the COMMIT moves `refs/manifold/epoch/current` together with
+    /// the target branch (`true`), or the target branch only (`--into
+    /// <change>`, `false`). Recorded in PREPARE (bn-1fcox); `None` for older
+    /// journals (recovery then infers it from `target_branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates_epoch: Option<bool>,
+
+    /// Whether the merge was asked to destroy its sources in CLEANUP
+    /// (`--destroy`). Recorded in PREPARE (bn-1fcox); `None` = no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy_after: Option<bool>,
 }
 
 impl MergeStateFile {
@@ -279,6 +308,9 @@ impl MergeStateFile {
             owner_pid: None,
             owner_host: None,
             owner_boot_id: None,
+            target_workspace: None,
+            updates_epoch: None,
+            destroy_after: None,
         }
     }
 
@@ -730,6 +762,145 @@ where
     remove_merge_state_if_exists(merge_state_path)
 }
 
+// ---------------------------------------------------------------------------
+// Journal recovery decision (bn-1fcox)
+// ---------------------------------------------------------------------------
+
+/// What the live refs say about a journaled merge's COMMIT-phase ref CAS.
+///
+/// Computed by the caller from the refs it observed (this module stays free
+/// of git I/O). See [`classify_cas_landing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CasLanding {
+    /// The CAS provably landed: every ref the merge moves carries the
+    /// candidate.
+    Landed,
+    /// The CAS provably did not land: the merge's candidate is on none of
+    /// the refs it moves, and (for an epoch-moving merge) the epoch still
+    /// sits at the journal's `epoch_before`.
+    NotLanded,
+    /// Neither can be proven (something else moved the refs). Recovery must
+    /// not guess.
+    Unknown,
+}
+
+/// The live-ref facts [`classify_cas_landing`] decides on (bn-1fcox).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four independent ref observations"
+)]
+pub struct CasObservation {
+    /// The merge moves the epoch ref and the target branch in one atomic
+    /// CAS (`false`: `--into <change>`, branch only).
+    pub updates_epoch: bool,
+    /// The epoch ref equals the journal's candidate.
+    pub epoch_at_candidate: bool,
+    /// The epoch ref equals the journal's `epoch_before`.
+    pub epoch_at_before: bool,
+    /// The candidate is the target branch head or an ancestor of it (direct
+    /// commits may have landed on top after a crash).
+    pub candidate_in_branch: bool,
+}
+
+/// Classify whether a journaled merge's COMMIT CAS landed (bn-1fcox).
+///
+/// The epoch comparisons are exact on purpose: nothing may move the epoch
+/// while a journal exists (FF-absorb, `doctor --repair`, `epoch sync`,
+/// `undo` and `merge promote` all refuse), so an epoch anywhere else means
+/// the ref state is not one this merge produced — [`CasLanding::Unknown`].
+#[must_use]
+pub const fn classify_cas_landing(obs: CasObservation) -> CasLanding {
+    if !obs.updates_epoch {
+        return if obs.candidate_in_branch {
+            CasLanding::Landed
+        } else {
+            CasLanding::NotLanded
+        };
+    }
+    match (obs.epoch_at_candidate, obs.candidate_in_branch) {
+        (true, true) => CasLanding::Landed,
+        (false, false) if obs.epoch_at_before => CasLanding::NotLanded,
+        _ => CasLanding::Unknown,
+    }
+}
+
+/// What crash recovery must do with an unfinished merge journal (bn-1fcox).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JournalRecovery {
+    /// Terminal leftover (`complete` / `aborted`): just remove the file.
+    ClearTerminal {
+        /// The journal's phase.
+        phase: MergePhase,
+    },
+    /// PREPARE / BUILD / VALIDATE: no ref was touched; clearing is safe.
+    ClearPreCommit {
+        /// The journal's phase.
+        phase: MergePhase,
+    },
+    /// The COMMIT CAS landed: finish CLEANUP (target checkout, `--destroy`)
+    /// and then clear. Never re-apply or roll back the refs.
+    FinalizeCommitted {
+        /// The journal's phase.
+        phase: MergePhase,
+    },
+    /// COMMIT phase and the CAS provably did not land: abort (clear); the
+    /// sources were never destroyed, so no work is at stake.
+    AbortNotLanded,
+    /// The ref state proves neither outcome: keep the journal and refuse.
+    Refuse {
+        /// The journal's phase.
+        phase: MergePhase,
+        /// Why nothing can be proven.
+        reason: &'static str,
+    },
+}
+
+/// Decide how to recover an unfinished merge journal (bn-1fcox).
+///
+/// Phase dispatch goes through [`recovery_outcome_for_phase`];
+/// `CheckCommit` / `RetryCleanup` are resolved against `landing`. A
+/// `Cleanup`-phase journal is post-CAS by construction (sources may already
+/// have been destroyed), so it only ever converges forward: when the refs no
+/// longer carry its candidate, recovery refuses rather than clearing it.
+#[must_use]
+pub fn decide_journal_recovery(phase: &MergePhase, landing: CasLanding) -> JournalRecovery {
+    match recovery_outcome_for_phase(phase) {
+        RecoveryOutcome::Terminal { phase } => JournalRecovery::ClearTerminal { phase },
+        RecoveryOutcome::AbortedPreCommit { from: phase } => {
+            JournalRecovery::ClearPreCommit { phase }
+        }
+        RecoveryOutcome::RetryValidate => JournalRecovery::ClearPreCommit {
+            phase: phase.clone(),
+        },
+        RecoveryOutcome::CheckCommit => match landing {
+            CasLanding::Landed => JournalRecovery::FinalizeCommitted {
+                phase: phase.clone(),
+            },
+            CasLanding::NotLanded => JournalRecovery::AbortNotLanded,
+            CasLanding::Unknown => JournalRecovery::Refuse {
+                phase: phase.clone(),
+                reason: "the epoch / target branch refs are neither at the merge's \
+                         pre-merge value nor at its merged commit",
+            },
+        },
+        RecoveryOutcome::RetryCleanup => match landing {
+            CasLanding::Landed => JournalRecovery::FinalizeCommitted {
+                phase: phase.clone(),
+            },
+            CasLanding::NotLanded | CasLanding::Unknown => JournalRecovery::Refuse {
+                phase: phase.clone(),
+                reason: "the merge committed (phase cleanup) but its merged commit is no \
+                         longer on the epoch / target branch refs",
+            },
+        },
+        // Unreachable: a journal exists whenever this is called.
+        RecoveryOutcome::NoMergeInProgress => JournalRecovery::ClearTerminal {
+            phase: phase.clone(),
+        },
+    }
+}
+
 /// Outcome of an explicit `--abort` request against a merge-state file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbortOutcome {
@@ -917,6 +1088,129 @@ mod tests {
 
     fn test_oid() -> GitOid {
         GitOid::new(&"b".repeat(40)).expect("operation should succeed")
+    }
+
+    // -- bn-1fcox: journal recovery decision --------------------------------
+
+    fn obs(u: bool, ec: bool, eb: bool, cb: bool) -> CasObservation {
+        CasObservation {
+            updates_epoch: u,
+            epoch_at_candidate: ec,
+            epoch_at_before: eb,
+            candidate_in_branch: cb,
+        }
+    }
+
+    #[test]
+    fn cas_landing_epoch_moving_merge() {
+        use CasLanding::*;
+        // (epoch_at_candidate, epoch_at_before, candidate_in_branch)
+        assert_eq!(classify_cas_landing(obs(true, true, false, true)), Landed);
+        assert_eq!(
+            classify_cas_landing(obs(true, false, true, false)),
+            NotLanded
+        );
+        // Epoch moved to the candidate but the branch does not carry it: the
+        // legacy split shape — never guess.
+        assert_eq!(classify_cas_landing(obs(true, true, false, false)), Unknown);
+        // Epoch still at before but the branch carries the candidate.
+        assert_eq!(classify_cas_landing(obs(true, false, true, true)), Unknown);
+        // Epoch moved somewhere else entirely (e.g. absorbed past the journal).
+        assert_eq!(
+            classify_cas_landing(obs(true, false, false, false)),
+            Unknown
+        );
+        assert_eq!(classify_cas_landing(obs(true, false, false, true)), Unknown);
+    }
+
+    #[test]
+    fn cas_landing_branch_only_merge_ignores_epoch() {
+        for e_c in [false, true] {
+            for e_b in [false, true] {
+                assert_eq!(
+                    classify_cas_landing(obs(false, e_c, e_b, true)),
+                    CasLanding::Landed
+                );
+                assert_eq!(
+                    classify_cas_landing(obs(false, e_c, e_b, false)),
+                    CasLanding::NotLanded
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn journal_recovery_decision_table() {
+        let all = [
+            CasLanding::Landed,
+            CasLanding::NotLanded,
+            CasLanding::Unknown,
+        ];
+        for landing in all {
+            for phase in [MergePhase::Prepare, MergePhase::Build, MergePhase::Validate] {
+                assert_eq!(
+                    decide_journal_recovery(&phase, landing),
+                    JournalRecovery::ClearPreCommit {
+                        phase: phase.clone()
+                    }
+                );
+            }
+            for phase in [MergePhase::Complete, MergePhase::Aborted] {
+                assert_eq!(
+                    decide_journal_recovery(&phase, landing),
+                    JournalRecovery::ClearTerminal {
+                        phase: phase.clone()
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            decide_journal_recovery(&MergePhase::Commit, CasLanding::Landed),
+            JournalRecovery::FinalizeCommitted {
+                phase: MergePhase::Commit
+            }
+        );
+        assert_eq!(
+            decide_journal_recovery(&MergePhase::Commit, CasLanding::NotLanded),
+            JournalRecovery::AbortNotLanded
+        );
+        assert!(matches!(
+            decide_journal_recovery(&MergePhase::Commit, CasLanding::Unknown),
+            JournalRecovery::Refuse { .. }
+        ));
+        assert_eq!(
+            decide_journal_recovery(&MergePhase::Cleanup, CasLanding::Landed),
+            JournalRecovery::FinalizeCommitted {
+                phase: MergePhase::Cleanup
+            }
+        );
+        // Cleanup is post-CAS: it never aborts, even if the refs no longer
+        // carry the candidate (sources may already be destroyed).
+        for landing in [CasLanding::NotLanded, CasLanding::Unknown] {
+            assert!(matches!(
+                decide_journal_recovery(&MergePhase::Cleanup, landing),
+                JournalRecovery::Refuse { .. }
+            ));
+        }
+    }
+
+    /// Journals written before bn-1fcox (no target/destroy fields) still
+    /// deserialize; the new fields round-trip.
+    #[test]
+    fn journal_recovery_fields_are_backward_compatible() {
+        let legacy = r#"{"phase":"commit","sources":["a"],"epoch_before":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","started_at":1,"updated_at":1}"#;
+        let st: MergeStateFile = serde_json::from_str(legacy).expect("legacy journal parses");
+        assert_eq!(st.target_workspace, None);
+        assert_eq!(st.updates_epoch, None);
+        assert_eq!(st.destroy_after, None);
+
+        let mut st = MergeStateFile::new(vec![], test_epoch(), 1);
+        st.target_workspace = Some("default".into());
+        st.updates_epoch = Some(true);
+        st.destroy_after = Some(true);
+        let json = serde_json::to_string(&st).expect("serialize");
+        let back: MergeStateFile = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, st);
     }
 
     fn test_sources() -> Vec<WorkspaceId> {

@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use anyhow::Result;
 use maw_git::GitRepo as _;
 
-use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateError, MergeStateFile, Staleness};
+use maw_core::merge_state::{
+    DEFAULT_STALE_AFTER_SECS, MergePhase, MergeStateError, MergeStateFile, Staleness,
+};
 use maw_core::model::types::{GitOid as CoreOid, WorkspaceId};
 use maw_core::oplog::read::{OpLogReadError, walk_chain};
 use maw_core::oplog::types::OpPayload;
@@ -733,8 +735,8 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
                          be verified"
                     ),
                     Some(
-                        "Inspect the file and active maw processes; if no merge is running: maw ws \
-                         merge --abort"
+                        "Inspect the file and active maw processes; if no merge is running, move \
+                         it aside (it is unreadable, so `maw ws merge --recover` cannot use it)"
                             .to_string(),
                     ),
                 )),
@@ -751,7 +753,10 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
         return (
             Some(Violation::repairable(
                 format!("leftover terminal merge-state (phase: {})", state.phase),
-                Some("Fix: maw ws merge --abort  (or: maw fsck --repair)".to_string()),
+                Some(format!(
+                    "Fix: {}  (or: maw fsck --repair)",
+                    maw::merge::prepare::MERGE_RECOVER_CMD
+                )),
             )),
             true,
         );
@@ -761,8 +766,26 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // bn-1fcox: a COMMIT/CLEANUP journal may belong to a merge whose commit
+    // already landed; deleting it would skip that merge's CLEANUP (target
+    // checkout, --destroy). Only `maw ws merge --recover` may resolve it.
+    let post_cas = matches!(state.phase, MergePhase::Commit | MergePhase::Cleanup);
     match state.staleness(now, DEFAULT_STALE_AFTER_SECS) {
         Staleness::Live => (None, false),
+        Staleness::Orphaned | Staleness::Indeterminate if post_cas => (
+            Some(Violation::new(
+                format!(
+                    "unfinished merge journal (phase: {}) — the merge may already have \
+                     committed; blocks merges, epoch sync, undo and doctor --repair",
+                    state.phase
+                ),
+                Some(format!(
+                    "Fix: {}  (finishes the merge if its commit landed, aborts it if not)",
+                    maw::merge::prepare::MERGE_RECOVER_CMD
+                )),
+            )),
+            false,
+        ),
         Staleness::Orphaned => (
             Some(Violation::repairable(
                 format!(
@@ -770,7 +793,10 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
                      merges",
                     state.phase
                 ),
-                Some("Fix: maw ws merge --abort  (or: maw fsck --repair)".to_string()),
+                Some(format!(
+                    "Fix: {}  (or: maw fsck --repair)",
+                    maw::merge::prepare::MERGE_RECOVER_CMD
+                )),
             )),
             true,
         ),
@@ -780,7 +806,10 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
                     "merge-state present (phase: {}) but owner liveness could not be confirmed",
                     state.phase
                 ),
-                Some("If no merge is running: maw ws merge --abort".to_string()),
+                Some(format!(
+                    "If no merge is running: {}",
+                    maw::merge::prepare::MERGE_RECOVER_CMD
+                )),
             )),
             // Not auto-repairable: we cannot prove the owner is dead.
             false,
@@ -816,7 +845,7 @@ impl Invariant for MergeStateInvariant {
         if !safe {
             return Ok(vec![
                 "declined: merge-state could not be proven stale — not removing (inspect active \
-                 maw processes, then run `maw ws merge --abort` if no merge is running)"
+                 maw processes, then run `maw ws merge --recover` if no merge is running)"
                     .to_string(),
             ]);
         }
