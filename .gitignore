@@ -8,3 +8,5 @@ opencode.json
 /.maw/
 /repo.git/
 /ws/
+# maw admin tree (consolidated layout) — runtime/admin only
+/.manifold/
