@@ -301,120 +301,115 @@ pub fn partition_by_path(patch_sets: &[PatchSet]) -> PartitionResult {
 
     // Paths are already sorted (BTreeMap iterates in order).
 
-    // bn-2dy1: D/F clash detection.
-    //
-    // After the initial partition, a workspace might have added FILE `clash`
-    // (in unique) while another workspace added `clash/sub.txt` (also in
-    // unique). These never collide by exact-path, so they both land in `unique`
-    // — but they are structurally incompatible in a git tree.
-    //
-    // We detect these by building a lookup of path → workspace for all entries
-    // and then checking every path P for a component-wise prefix relationship
-    // with every other path Q: if Q = P/..., then P is a FILE in its workspace
-    // while Q's workspace treats P as a directory.
-    //
-    // We emit a `DfClash` record for each incompatible pair and leave the
-    // paths themselves untouched in `unique`/`shared`. The resolve step will
-    // intercept them via `PartitionResult::df_clash_paths()` and emit
-    // `ConflictReason::FileDirectory` conflicts.
-    //
-    // Build a lookup: path_string → (path, workspace_id) for all NON-DELETION
-    // entries. Sorted for deterministic binary-search.
-    //
-    // Deletions never participate in a D/F clash: a `Deleted` entry means the
-    // path will NOT occupy the result tree, so it cannot structurally collide
-    // with anything. (E.g. a single workspace restructuring FILE↔DIR emits
-    // `Deleted deep/a/leaf.txt` + `Added deep` in one patch — internally
-    // consistent, NOT a clash.)
-    let all_path_ws: Vec<(String, PathBuf, WorkspaceId)> = {
-        let mut v: Vec<(String, PathBuf, WorkspaceId)> = unique
-            .iter()
-            .filter(|(_, e)| !e.is_deletion())
-            .map(|(p, e)| {
-                (
-                    p.to_string_lossy().replace('\\', "/"),
-                    p.clone(),
-                    e.workspace_id.clone(),
-                )
-            })
-            .chain(shared.iter().flat_map(|(p, entries)| {
-                entries.iter().filter(|e| !e.is_deletion()).map(|e| {
-                    (
-                        p.to_string_lossy().replace('\\', "/"),
-                        p.clone(),
-                        e.workspace_id.clone(),
-                    )
-                })
-            }))
-            .collect();
-        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        v
-    };
-
-    let all_path_strs: Vec<&str> = all_path_ws.iter().map(|(s, _, _)| s.as_str()).collect();
-
-    let mut df_clashes: Vec<DfClash> = Vec::new();
-
-    // For each unique non-deletion path, check directions 1 and 2.
-    for (path, entry) in &unique {
-        if entry.is_deletion() {
-            continue;
-        }
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        let dir_prefix = format!("{path_str}/");
-
-        // Direction 1: is there any other path under path_str/?
-        // (path is FILE, Q = path_str/... exists → Q's ws treats path as dir)
-        if let Some(child_row) = all_path_ws
-            .iter()
-            .find(|(s, _, _)| s != &path_str && s.starts_with(&dir_prefix))
-        {
-            df_clashes.push(DfClash {
-                file_path: path.clone(),
-                file_ws: entry.workspace_id.clone(),
-                dir_child_example: child_row.1.clone(),
-                dir_ws: child_row.2.clone(),
-            });
-        }
-
-        // Direction 2: is some ancestor of path also a FILE in another ws?
-        let mut ancestor = path.parent();
-        while let Some(anc) = ancestor {
-            if anc == std::path::Path::new("") {
-                break;
-            }
-            let anc_str = anc.to_string_lossy().replace('\\', "/");
-            // Binary search for the ancestor string.
-            if let Ok(pos) = all_path_strs.binary_search(&anc_str.as_str()) {
-                let (_, anc_path, anc_ws) = &all_path_ws[pos];
-                // `path` is under `anc` — so `anc_ws` has a FILE at `anc`
-                // while the current workspace has files under it.
-                df_clashes.push(DfClash {
-                    file_path: anc_path.clone(),
-                    file_ws: anc_ws.clone(),
-                    dir_child_example: path.clone(),
-                    dir_ws: entry.workspace_id.clone(),
-                });
-                break;
-            }
-            ancestor = anc.parent();
-        }
-    }
-
-    // De-duplicate clashes (same file_path may be found multiple times).
-    df_clashes.sort_unstable_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.dir_child_example.cmp(&b.dir_child_example))
-    });
-    df_clashes
-        .dedup_by(|a, b| a.file_path == b.file_path && a.dir_child_example == b.dir_child_example);
-
+    // bn-2dy1 / bn-2jml: D/F clash detection over EVERY non-deletion entry,
+    // unique and shared alike. See `detect_df_clashes`.
+    let df_clashes = detect_df_clashes(&unique, &shared);
     PartitionResult {
         unique,
         shared,
         df_clashes,
     }
+}
+
+/// Component-normalised byte key for a repo-relative path: components joined
+/// with `/`. `./` components and trailing separators vanish, so `a/./b` and
+/// `a/b/` both key as `a/b`. Bytes (not lossy UTF-8) so distinct non-UTF-8
+/// names never collapse onto the same key.
+fn path_key(path: &std::path::Path) -> Vec<u8> {
+    let mut key = Vec::new();
+    for comp in path.components() {
+        if matches!(comp, std::path::Component::CurDir) {
+            continue;
+        }
+        if !key.is_empty() {
+            key.push(b'/');
+        }
+        key.extend_from_slice(comp.as_os_str().as_encoded_bytes());
+    }
+    key
+}
+
+/// Detect D/F (Directory/File) clashes (bn-2dy1, completed by bn-2jml).
+///
+/// A clash exists for every pair of non-deleted paths `(P, Q)` — drawn from
+/// ANY entry, unique or shared — where `P` is a strict component-wise prefix
+/// of `Q`: some workspace puts a FILE at `P` while some workspace needs `P`
+/// to be a directory. Both cannot occupy one git tree.
+///
+/// bn-2jml: the original detector only iterated `unique` entries, so a
+/// shared FILE `a` (ws1+ws2) against a shared `a/b` (ws3+ws4) produced no
+/// clash and the build step wrote a tree with a duplicate `a` entry (blob +
+/// tree) onto the target branch.
+///
+/// Deletions never participate: a `Deleted` entry does not occupy the result
+/// tree. (A single workspace restructuring FILE↔DIR emits `Deleted deep/x` +
+/// `Added deep` — internally consistent, not a clash.)
+///
+/// Output: one `DfClash` per `(file_path, dir_child)` pair, sorted by
+/// `(file_path, dir_child_example)`, deduplicated. When several workspaces
+/// sit on either side, the reported `(file_ws, dir_ws)` is the first pair in
+/// workspace-id order whose workspaces differ (falling back to the first
+/// pair). Same-workspace pairs are still reported: no valid single tree can
+/// hold both `P` and `P/...`, so reporting them fails closed.
+fn detect_df_clashes(
+    unique: &[(PathBuf, PathEntry)],
+    shared: &[(PathBuf, Vec<PathEntry>)],
+) -> Vec<DfClash> {
+    // (key, path, workspace) for every non-deletion entry, sorted by key then
+    // workspace so iteration (and thus the chosen example pair) is
+    // deterministic.
+    let mut rows: Vec<(Vec<u8>, &PathBuf, &WorkspaceId)> = unique
+        .iter()
+        .map(|(p, e)| (p, e))
+        .chain(
+            shared
+                .iter()
+                .flat_map(|(p, entries)| entries.iter().map(move |e| (p, e))),
+        )
+        .filter(|(_, e)| !e.is_deletion())
+        .map(|(p, e)| (path_key(p), p, &e.workspace_id))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.as_str().cmp(b.2.as_str())));
+
+    // (file_path, dir_child) -> (file_ws, dir_ws)
+    let mut found: BTreeMap<(PathBuf, PathBuf), (WorkspaceId, WorkspaceId)> = BTreeMap::new();
+
+    for (file_key, file_path, file_ws) in &rows {
+        let mut dir_prefix = file_key.clone();
+        dir_prefix.push(b'/');
+        // Every key starting with `P/` forms one contiguous run in the sorted
+        // rows, beginning at the first key >= `P/`.
+        let start = rows.partition_point(|(k, _, _)| k.as_slice() < dir_prefix.as_slice());
+        for (child_key, child_path, child_ws) in &rows[start..] {
+            if !child_key.starts_with(&dir_prefix) {
+                break;
+            }
+            let slot = (PathBuf::clone(file_path), PathBuf::clone(child_path));
+            let candidate = (WorkspaceId::clone(file_ws), WorkspaceId::clone(child_ws));
+            match found.get_mut(&slot) {
+                None => {
+                    found.insert(slot, candidate);
+                }
+                Some(existing) => {
+                    if existing.0 == existing.1 && candidate.0 != candidate.1 {
+                        *existing = candidate;
+                    }
+                }
+            }
+        }
+    }
+
+    found
+        .into_iter()
+        .map(
+            |((file_path, dir_child_example), (file_ws, dir_ws))| DfClash {
+                file_path,
+                file_ws,
+                dir_child_example,
+                dir_ws,
+            },
+        )
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1079,84 @@ mod tests {
         assert!(result.is_conflict_free());
     }
 
+    /// bn-2jml regression: shared FILE `a` (ws1+ws2) vs shared `a/b`
+    /// (ws3+ws4). Both paths are in `shared`, so the pre-fix detector — which
+    /// only iterated `unique` — emitted no clash, and the build step wrote a
+    /// tree with duplicate entry `a` (blob + tree) onto the target branch.
+    #[test]
+    fn partition_df_clash_shared_file_vs_shared_dir_child() {
+        let file = |ws: &str| {
+            PatchSet::new(
+                make_ws(ws),
+                make_epoch(),
+                vec![make_change("a", ChangeKind::Added, Some(b"file"))],
+            )
+        };
+        let child = |ws: &str| {
+            PatchSet::new(
+                make_ws(ws),
+                make_epoch(),
+                vec![make_change("a/b", ChangeKind::Added, Some(b"child"))],
+            )
+        };
+
+        let result = partition_by_path(&[file("ws-1"), file("ws-2"), child("ws-3"), child("ws-4")]);
+
+        assert_eq!(result.unique_count(), 0);
+        assert_eq!(result.shared_count(), 2);
+        let pairs: Vec<(PathBuf, PathBuf)> = result
+            .df_clashes
+            .iter()
+            .map(|c| (c.file_path.clone(), c.dir_child_example.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![(PathBuf::from("a"), PathBuf::from("a/b"))],
+            "shared-vs-shared D/F clash must be reported exactly once"
+        );
+        let paths = result.df_clash_paths();
+        assert!(paths.contains(&PathBuf::from("a")));
+        assert!(paths.contains(&PathBuf::from("a/b")));
+        assert!(!result.is_conflict_free());
+    }
+
+    /// bn-2jml: every directory-side child of a clashing FILE must land in
+    /// `df_clash_paths()`, including shared children, so the resolve step
+    /// never applies any of them next to the file.
+    #[test]
+    fn partition_df_clash_covers_every_shared_dir_child() {
+        let ps1 = PatchSet::new(
+            make_ws("ws-1"),
+            make_epoch(),
+            vec![make_change("a", ChangeKind::Added, Some(b"file"))],
+        );
+        let ps2 = PatchSet::new(
+            make_ws("ws-2"),
+            make_epoch(),
+            vec![
+                make_change("a/b", ChangeKind::Added, Some(b"x")),
+                make_change("a/c/d", ChangeKind::Added, Some(b"y")),
+            ],
+        );
+        let ps3 = PatchSet::new(
+            make_ws("ws-3"),
+            make_epoch(),
+            vec![
+                make_change("a/b", ChangeKind::Added, Some(b"x")),
+                make_change("a/c/d", ChangeKind::Added, Some(b"y")),
+            ],
+        );
+
+        let result = partition_by_path(&[ps1, ps2, ps3]);
+        let paths = result.df_clash_paths();
+        for p in ["a", "a/b", "a/c/d"] {
+            assert!(
+                paths.contains(&PathBuf::from(p)),
+                "{p} missing from {paths:?}"
+            );
+        }
+    }
+
     /// Clean case: completely disjoint paths produce no D/F clashes.
     #[test]
     fn partition_no_df_clash_for_disjoint_paths() {
@@ -1110,5 +1183,145 @@ mod tests {
 
         assert!(result.df_clashes.is_empty());
         assert!(result.is_conflict_free());
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2jml: D/F clash specification property
+    // -----------------------------------------------------------------------
+
+    mod df_clash_props {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+        use std::path::Path;
+
+        /// Paths over a tiny alphabet {a, b, a.rs} with 1..=3 components, so
+        /// component-prefix pairs (`a` vs `a/b`, `a/b` vs `a/b/a.rs`) and
+        /// near-miss string prefixes (`a` vs `a.rs`) are both common.
+        fn arb_small_path() -> impl Strategy<Value = PathBuf> {
+            prop::collection::vec(prop::sample::select(vec!["a", "b", "a.rs"]), 1..=3)
+                .prop_map(|segs| PathBuf::from(segs.join("/")))
+        }
+
+        fn arb_kind() -> impl Strategy<Value = ChangeKind> {
+            prop_oneof![
+                3 => Just(ChangeKind::Added),
+                2 => Just(ChangeKind::Modified),
+                2 => Just(ChangeKind::Deleted),
+            ]
+        }
+
+        /// 2..=4 workspaces, each with 0..=4 distinct paths.
+        fn arb_patch_sets() -> impl Strategy<Value = Vec<PatchSet>> {
+            prop::collection::vec(
+                prop::collection::btree_map(arb_small_path(), arb_kind(), 0..=4),
+                2..=4,
+            )
+            .prop_map(|per_ws| {
+                per_ws
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, changes)| {
+                        let changes = changes
+                            .into_iter()
+                            .map(|(path, kind)| {
+                                let content =
+                                    (!matches!(kind, ChangeKind::Deleted)).then(|| b"x".to_vec());
+                                FileChange::new(path, kind, content)
+                            })
+                            .collect();
+                        PatchSet::new(make_ws(&format!("ws-{i}")), make_epoch(), changes)
+                    })
+                    .collect()
+            })
+        }
+
+        /// Independent oracle: every (P, Q) of non-deleted paths (any
+        /// workspace) with P a strict component-wise prefix of Q, via
+        /// `Path::starts_with` rather than the production byte-key scan.
+        fn spec_pairs(patch_sets: &[PatchSet]) -> BTreeSet<(PathBuf, PathBuf)> {
+            let live: BTreeSet<PathBuf> = patch_sets
+                .iter()
+                .flat_map(|ps| ps.changes.iter())
+                .filter(|c| !matches!(c.kind, ChangeKind::Deleted))
+                .map(|c| c.path.clone())
+                .collect();
+            let mut out = BTreeSet::new();
+            for p in &live {
+                for q in &live {
+                    if p != q && q.starts_with(p) {
+                        out.insert((p.clone(), q.clone()));
+                    }
+                }
+            }
+            out
+        }
+
+        fn live_in(patch_sets: &[PatchSet], ws: &WorkspaceId, path: &Path) -> bool {
+            patch_sets.iter().any(|ps| {
+                &ps.workspace_id == ws
+                    && ps
+                        .changes
+                        .iter()
+                        .any(|c| c.path == path && !matches!(c.kind, ChangeKind::Deleted))
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(2048))]
+
+            /// Clash reported for (P, Q) iff P and Q are non-deleted in some
+            /// workspaces and P is a strict component prefix of Q — whether
+            /// either side is unique or shared (bn-2jml).
+            #[test]
+            fn prop_df_clash_iff_component_prefix_small_alphabet_le_3_comps(
+                patch_sets in arb_patch_sets()
+            ) {
+                let result = partition_by_path(&patch_sets);
+                let got: BTreeSet<(PathBuf, PathBuf)> = result
+                    .df_clashes
+                    .iter()
+                    .map(|c| (c.file_path.clone(), c.dir_child_example.clone()))
+                    .collect();
+                prop_assert_eq!(got.len(), result.df_clashes.len(), "clashes must be deduplicated");
+                prop_assert_eq!(&got, &spec_pairs(&patch_sets));
+
+                let skip = result.df_clash_paths();
+                for (p, q) in &got {
+                    prop_assert!(skip.contains(p) && skip.contains(q));
+                }
+
+                for c in &result.df_clashes {
+                    prop_assert!(live_in(&patch_sets, &c.file_ws, &c.file_path));
+                    prop_assert!(live_in(&patch_sets, &c.dir_ws, &c.dir_child_example));
+                    // Prefer a cross-workspace witness whenever one exists.
+                    let cross_exists = patch_sets.iter().any(|a| patch_sets.iter().any(|b| {
+                        a.workspace_id != b.workspace_id
+                            && live_in(&patch_sets, &a.workspace_id, &c.file_path)
+                            && live_in(&patch_sets, &b.workspace_id, &c.dir_child_example)
+                    }));
+                    if cross_exists {
+                        prop_assert_ne!(&c.file_ws, &c.dir_ws);
+                    }
+                }
+
+                // Order of workspaces must not change the answer.
+                let mut reversed = patch_sets.clone();
+                reversed.reverse();
+                let again = partition_by_path(&reversed);
+                let render = |r: &PartitionResult| -> Vec<(PathBuf, PathBuf, String, String)> {
+                    r.df_clashes
+                        .iter()
+                        .map(|c| (
+                            c.file_path.clone(),
+                            c.dir_child_example.clone(),
+                            c.file_ws.as_str().to_owned(),
+                            c.dir_ws.as_str().to_owned(),
+                        ))
+                        .collect()
+                };
+                prop_assert_eq!(render(&result), render(&again));
+            }
+        }
     }
 }

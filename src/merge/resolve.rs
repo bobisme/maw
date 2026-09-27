@@ -429,49 +429,79 @@ impl From<std::io::Error> for ResolveError {
     }
 }
 
-/// Emit `FileDirectory` conflict records for each D/F clash in `clashes`.
+/// Emit `FileDirectory` conflict records for each D/F clash in the partition.
 ///
-/// Each clash produces one `ConflictRecord` keyed on the FILE-side path
-/// (`clash.file_path`). The directory-child paths that are structurally
-/// incompatible are captured in `ConflictReason::FileDirectory::dir_child_example`.
+/// Each FILE-side path (`clash.file_path`) produces one `ConflictRecord`, so
+/// the user sees one conflict per FILE-side path rather than one per dir
+/// child. The directory-child paths are captured by
+/// `ConflictReason::FileDirectory::dir_child_example` and are excluded from
+/// normal resolution via `PartitionResult::df_clash_paths()`.
 ///
-/// All paths that participate in at least one D/F clash (both `file_path` and
-/// `dir_child_example`) are in `skip_set` and should be excluded from normal
-/// unique/shared resolution.
-///
-/// Clashes with the same `file_path` are merged into a single record so the
-/// user sees one conflict per FILE-side path rather than one per dir child.
-fn emit_df_clash_conflicts(
-    clashes: &[DfClash],
-    _skip_set: &std::collections::HashSet<PathBuf>,
-    conflicts: &mut Vec<ConflictRecord>,
-) {
-    // Group by file_path (may have multiple dir children).
+/// bn-2jml: `sides` lists EVERY workspace entry at the FILE path (with its
+/// kind and content) followed by every workspace with a live path under it
+/// (kind `Added`, no content). Previously only the one witness pair was
+/// recorded, so with a shared FILE path the other file-side workspaces
+/// vanished from the conflict.
+fn emit_df_clash_conflicts(partition: &PartitionResult, conflicts: &mut Vec<ConflictRecord>) {
     use std::collections::BTreeMap as SortedMap;
-    let mut by_file: SortedMap<&PathBuf, &DfClash> = SortedMap::new();
+    use std::collections::BTreeSet as SortedSet;
+
+    let clashes = &partition.df_clashes;
+    let entries_at = |path: &PathBuf| -> Vec<&PathEntry> {
+        if let Ok(i) = partition.unique.binary_search_by(|(p, _)| p.cmp(path)) {
+            return vec![&partition.unique[i].1];
+        }
+        partition
+            .shared
+            .binary_search_by(|(p, _)| p.cmp(path))
+            .map(|i| partition.shared[i].1.iter().collect())
+            .unwrap_or_default()
+    };
+
+    // file_path -> (first clash as witness, dir-side workspaces)
+    let mut by_file: SortedMap<&PathBuf, (&DfClash, SortedSet<WorkspaceId>)> = SortedMap::new();
     for clash in clashes {
-        by_file.entry(&clash.file_path).or_insert(clash);
+        let slot = by_file
+            .entry(&clash.file_path)
+            .or_insert_with(|| (clash, SortedSet::new()));
+        for e in entries_at(&clash.dir_child_example) {
+            if !e.is_deletion() {
+                slot.1.insert(e.workspace_id.clone());
+            }
+        }
+        slot.1.insert(clash.dir_ws.clone());
     }
 
-    for clash in by_file.values() {
+    for (file_path, (witness, dir_wss)) in by_file {
+        let mut sides: Vec<ConflictSide> = entries_at(file_path)
+            .into_iter()
+            .map(|e| ConflictSide {
+                workspace_id: e.workspace_id.clone(),
+                kind: e.kind.clone(),
+                content: e.content.clone(),
+            })
+            .collect();
+        if sides.is_empty() {
+            // Hand-built partition without the FILE entry: fall back to the
+            // witness so the record still names the file side.
+            sides.push(ConflictSide {
+                workspace_id: witness.file_ws.clone(),
+                kind: ChangeKind::Added,
+                content: None,
+            });
+        }
+        sides.extend(dir_wss.into_iter().map(|workspace_id| ConflictSide {
+            workspace_id,
+            kind: ChangeKind::Added,
+            content: None,
+        }));
         conflicts.push(ConflictRecord {
-            path: clash.file_path.clone(),
+            path: file_path.clone(),
             base: None,
-            sides: vec![
-                ConflictSide {
-                    workspace_id: clash.file_ws.clone(),
-                    kind: ChangeKind::Added,
-                    content: None, // file content not available at partition stage
-                },
-                ConflictSide {
-                    workspace_id: clash.dir_ws.clone(),
-                    kind: ChangeKind::Added,
-                    content: None,
-                },
-            ],
+            sides,
             reason: ConflictReason::FileDirectory {
-                file_side: clash.file_ws.as_str().to_owned(),
-                dir_child_example: clash.dir_child_example.clone(),
+                file_side: witness.file_ws.as_str().to_owned(),
+                dir_child_example: witness.dir_child_example.clone(),
             },
             atoms: vec![],
         });
@@ -511,9 +541,7 @@ pub fn resolve_partition_with_attrs(
     // bn-2dy1: D/F clash paths must be emitted as FileDirectory conflicts
     // rather than resolved normally. Build a skip-set of all participating paths.
     let df_clash_skip = partition.df_clash_paths();
-    if !partition.df_clashes.is_empty() {
-        emit_df_clash_conflicts(&partition.df_clashes, &df_clash_skip, &mut conflicts);
-    }
+    emit_df_clash_conflicts(partition, &mut conflicts);
 
     // Unique paths: direct passthrough to BUILD changes.
     for (path, entry) in &partition.unique {
@@ -604,9 +632,7 @@ pub fn resolve_partition_with_ast_and_attrs(
 
     // bn-2dy1: D/F clash paths must be emitted as FileDirectory conflicts.
     let df_clash_skip = partition.df_clash_paths();
-    if !partition.df_clashes.is_empty() {
-        emit_df_clash_conflicts(&partition.df_clashes, &df_clash_skip, &mut conflicts);
-    }
+    emit_df_clash_conflicts(partition, &mut conflicts);
 
     // Unique paths: same as resolve_partition.
     for (path, entry) in &partition.unique {

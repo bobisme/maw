@@ -109,6 +109,24 @@ pub enum BuildError {
         /// The raw value returned.
         raw: String,
     },
+    /// bn-2jml defence in depth: the resolved flat tree holds a FILE at
+    /// `file` and another entry under it (`child`), so `file` would have to be
+    /// both a blob and a tree. Refused before any tree object is written, so
+    /// no commit is created and no ref moves.
+    FileDirectoryClash {
+        /// Path that is a file in the flat tree.
+        file: PathBuf,
+        /// A flat-tree entry strictly under `file`.
+        child: PathBuf,
+    },
+    /// bn-2jml defence in depth: one tree level would contain two entries
+    /// with the same name (a git fsck `duplicateEntries` error).
+    DuplicateTreeEntry {
+        /// Directory (repo-relative, empty for root) holding the duplicate.
+        dir: PathBuf,
+        /// The duplicated entry name.
+        name: String,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -135,6 +153,17 @@ impl std::fmt::Display for BuildError {
             Self::InvalidOid { context, raw } => {
                 write!(f, "invalid OID from {context}: {raw:?}")
             }
+            Self::FileDirectoryClash { file, child } => write!(
+                f,
+                "refusing to build merge tree: {} is a file but {} needs it to be a directory",
+                file.display(),
+                child.display()
+            ),
+            Self::DuplicateTreeEntry { dir, name } => write!(
+                f,
+                "refusing to build merge tree: duplicate entry {name:?} in directory {:?}",
+                dir.display().to_string()
+            ),
         }
     }
 }
@@ -430,7 +459,32 @@ fn git_tree_entry_cmp(
 /// parents.
 ///
 /// Returns the root tree OID.
+/// Refuse a flat tree in which some path is a strict ancestor of another
+/// path (bn-2jml defence in depth). Partition-level D/F detection should make
+/// this unreachable; if it ever misses a case, the merge must fail loudly
+/// rather than publish a tree with a blob and a subtree under one name.
+fn check_flat_tree_shape(flat: &FlatTree) -> Result<(), BuildError> {
+    for path in flat.keys() {
+        let mut ancestor = path.parent();
+        while let Some(anc) = ancestor {
+            if anc.as_os_str().is_empty() {
+                break;
+            }
+            if flat.contains_key(anc) {
+                return Err(BuildError::FileDirectoryClash {
+                    file: anc.to_path_buf(),
+                    child: path.clone(),
+                });
+            }
+            ancestor = anc.parent();
+        }
+    }
+    Ok(())
+}
+
 fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, BuildError> {
+    check_flat_tree_shape(flat)?;
+
     // Collect all unique directory paths (including root "").
     let mut all_dirs: Vec<PathBuf> = vec![PathBuf::new()]; // root = empty path
 
@@ -504,6 +558,17 @@ fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, Bu
         // Sort entries using git's canonical tree sort order: directory entries
         // sort as if they have a trailing '/' (e.g. "assurance/" > "assurance-plan.md").
         tree_entries.sort_by(|a, b| git_tree_entry_cmp(&a.name, a.mode, &b.name, b.mode));
+        // bn-2jml: never write a tree level with two entries of one name.
+        {
+            let mut names: Vec<&str> = tree_entries.iter().map(|e| e.name.as_str()).collect();
+            names.sort_unstable();
+            if let Some(w) = names.windows(2).find(|w| w[0] == w[1]) {
+                return Err(BuildError::DuplicateTreeEntry {
+                    dir: dir.clone(),
+                    name: w[0].to_owned(),
+                });
+            }
+        }
 
         // Write this tree level.
         let tree_oid = repo
@@ -1299,5 +1364,115 @@ mod tests {
             "100644",
             "edited tracked file keeps its epoch mode when no modes map entry"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2jml: defence-in-depth tree-shape guard
+    // -----------------------------------------------------------------------
+
+    fn refs_snapshot(root: &Path) -> String {
+        let out = Command::new("git")
+            .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+            .current_dir(root)
+            .output()
+            .expect("git for-each-ref");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Bypasses partition-level D/F detection entirely: a resolved change set
+    /// that upserts both FILE `a` and `a/b` must be refused with a typed error
+    /// and must not create a commit or move a ref.
+    #[test]
+    fn build_refuses_file_and_directory_with_same_name() {
+        let (dir, epoch, repo) = setup_git_repo();
+        let root = dir.path();
+        let refs_before = refs_snapshot(root);
+        let resolved = vec![
+            ResolvedChange::Upsert {
+                path: PathBuf::from("a"),
+                content: b"file\n".to_vec(),
+            },
+            ResolvedChange::Upsert {
+                path: PathBuf::from("a/b"),
+                content: b"child\n".to_vec(),
+            },
+        ];
+        let err = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws-1", "ws-2"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect_err("a tree holding both FILE a and a/b must be refused");
+        match &err {
+            BuildError::FileDirectoryClash { file, child } => {
+                assert_eq!(file, &PathBuf::from("a"));
+                assert_eq!(child, &PathBuf::from("a/b"));
+            }
+            other => panic!("expected FileDirectoryClash, got {other:?}"),
+        }
+        assert_eq!(refs_snapshot(root), refs_before, "no ref may move");
+    }
+
+    /// Same guard when the FILE side comes from the epoch tree: a resolved
+    /// `<epoch-file>/x` without deleting the epoch file is refused.
+    #[test]
+    fn build_refuses_child_under_existing_epoch_file() {
+        let (dir, epoch, repo) = setup_git_repo();
+        let root = dir.path();
+        let epoch_file = git_ls_tree_flat(root, epoch.as_str())
+            .into_iter()
+            .next()
+            .expect("seed commit has at least one file");
+        let child = PathBuf::from(format!("{epoch_file}/x"));
+        let err = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws-1"]),
+            &[ResolvedChange::Upsert {
+                path: child.clone(),
+                content: b"x\n".to_vec(),
+            }],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect_err("child under an epoch file must be refused");
+        assert!(
+            matches!(&err, BuildError::FileDirectoryClash { file, child: c }
+                if file == &PathBuf::from(&epoch_file) && c == &child),
+            "got {err:?}"
+        );
+    }
+
+    /// A legitimate FILE->DIR restructure (delete `a`, add `a/b`) still builds.
+    #[test]
+    fn build_allows_file_to_directory_restructure() {
+        let (dir, epoch, repo) = setup_git_repo();
+        let root = dir.path();
+        let epoch_file = git_ls_tree_flat(root, epoch.as_str())
+            .into_iter()
+            .next()
+            .expect("seed commit has at least one file");
+        let child = format!("{epoch_file}/x");
+        let oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws-1"]),
+            &[
+                ResolvedChange::Delete {
+                    path: PathBuf::from(&epoch_file),
+                },
+                ResolvedChange::Upsert {
+                    path: PathBuf::from(&child),
+                    content: b"x\n".to_vec(),
+                },
+            ],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("restructure must build");
+        assert!(git_ls_tree_flat(root, oid.as_str()).contains(&child));
     }
 }

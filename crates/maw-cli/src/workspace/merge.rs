@@ -597,6 +597,55 @@ fn apply_resolutions(
     Ok((resolved_contents, remaining))
 }
 
+/// Error for `--resolve ID=<ws>` naming a side that carries no content.
+///
+/// bn-2jml: only suggests sides that actually carry content (the old message
+/// offered every other side, including content-less ones that would fail the
+/// same way), and explains D/F conflicts, whose directory-side entries never
+/// carry content.
+fn no_content_side_error(
+    name: &str,
+    side: &maw::merge::resolve::ConflictSide,
+    record: &ConflictRecord,
+) -> anyhow::Error {
+    let mut with_content: Vec<String> = record
+        .sides
+        .iter()
+        .filter(|s| s.content.is_some())
+        .map(|s| s.workspace_id.to_string())
+        .collect();
+    with_content.dedup();
+    let path = record.path.display();
+    let try_line = if with_content.is_empty() {
+        "Try: content:PATH (no side carries file content)".to_owned()
+    } else {
+        format!("Try: {} or content:PATH", with_content.join(", "))
+    };
+
+    if let ConflictReason::FileDirectory {
+        dir_child_example, ..
+    } = &record.reason
+    {
+        return anyhow::anyhow!(
+            "Workspace '{name}' is on the DIRECTORY side of this D/F clash at {path} \
+             (it has files under it, e.g. '{}'), so it has no file content to keep.\n  \
+             Resolving with a file-side workspace keeps FILE {path} and drops the \
+             directory-side files under it.\n  \
+             {try_line}\n  \
+             To keep the directory instead, delete or rename {path} in the file-side \
+             workspace(s), commit, and re-merge.",
+            dir_child_example.display()
+        );
+    }
+
+    let why = if matches!(side.kind, ChangeKind::Deleted) {
+        "deleted it"
+    } else {
+        "has no content for it"
+    };
+    anyhow::anyhow!("Workspace '{name}' {why} ({path}).\n  {try_line}")
+}
+
 /// Resolve a whole file using the given strategy.
 fn resolve_file_content(
     resolution: &Resolution,
@@ -623,20 +672,9 @@ fn resolve_file_content(
                         available.join(", ")
                     )
                 })?;
-            side.content.clone().ok_or_else(|| {
-                let others: Vec<_> = record
-                    .sides
-                    .iter()
-                    .filter(|s| s.workspace_id != ws_id)
-                    .map(|s| s.workspace_id.to_string())
-                    .collect();
-                anyhow::anyhow!(
-                    "Workspace '{name}' has no content (deleted) for {}.\n  \
-                     Try: {} or content:PATH",
-                    record.path.display(),
-                    others.join(", ")
-                )
-            })
+            side.content
+                .clone()
+                .ok_or_else(|| no_content_side_error(name, side, record))
         }
         Resolution::Content(path) => {
             // If path is relative, try resolving against each workspace dir

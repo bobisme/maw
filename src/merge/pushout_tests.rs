@@ -136,10 +136,26 @@ fn format_scenario(workspaces: &[TestWorkspace]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Generate a file path: 1-2 segments, short alphanumeric names.
+///
+/// bn-2jml: half the paths come from a tiny alphabet with the `.rs` suffix
+/// optional, so D/F prefix pairs (`src` vs `src/lib`) are common. The old
+/// generator always appended `.rs` to the last segment, so no generated
+/// path could ever be a directory prefix of another.
 fn arb_path() -> impl Strategy<Value = PathBuf> {
-    prop::collection::vec("[a-z][a-z0-9]{0,5}", 1..=2usize).prop_map(|segments| {
+    let wide = (
+        prop::collection::vec("[a-z][a-z0-9]{0,5}", 1..=2usize),
+        any::<bool>(),
+    );
+    let narrow = (
+        prop::collection::vec(prop::sample::select(vec!["src", "lib"]), 1..=2usize),
+        any::<bool>(),
+    )
+        .prop_map(|(segs, rs)| (segs.into_iter().map(str::to_owned).collect(), rs));
+    prop_oneof![wide, narrow].prop_map(|(segments, rs_suffix): (Vec<String>, bool)| {
         let mut p = segments.join("/");
-        p.push_str(".rs");
+        if rs_suffix {
+            p.push_str(".rs");
+        }
         PathBuf::from(p)
     })
 }
@@ -171,6 +187,17 @@ fn arb_file_change() -> impl Strategy<Value = FileChange> {
     })
 }
 
+/// Keep the first change per path: a real `PatchSet` never lists one path
+/// twice, and the small-alphabet `arb_path` makes in-workspace duplicates
+/// common (bn-2jml).
+fn dedup_paths(changes: Vec<FileChange>) -> Vec<FileChange> {
+    let mut seen = std::collections::BTreeSet::new();
+    changes
+        .into_iter()
+        .filter(|c| seen.insert(c.path.clone()))
+        .collect()
+}
+
 /// Generate 2-8 workspaces with 1-6 file changes each.
 fn arb_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
     prop::collection::vec(
@@ -183,7 +210,7 @@ fn arb_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
             .enumerate()
             .map(|(i, changes)| TestWorkspace {
                 name: format!("ws-{i:02}"),
-                changes,
+                changes: dedup_paths(changes),
             })
             .collect()
     })
@@ -331,8 +358,30 @@ fn verify_embedding(workspaces: &[TestWorkspace], result: &ResolveResult) -> Res
             let path = &change.path;
             let in_resolved = resolved_paths.contains(path);
             let in_conflicts = conflict_map.contains_key(path);
+            // bn-2jml: a live path strictly under a D/F-conflicted FILE path
+            // is surfaced by that ancestor's FileDirectory conflict.
+            let under_df_conflict = result.conflicts.iter().any(|c| {
+                matches!(c.reason, ConflictReason::FileDirectory { .. })
+                    && &c.path != path
+                    && path.starts_with(&c.path)
+            });
 
-            if !in_resolved && !in_conflicts {
+            if under_df_conflict && !matches!(change.kind, ChangeKind::Deleted) {
+                let named = result.conflicts.iter().any(|c| {
+                    matches!(c.reason, ConflictReason::FileDirectory { .. })
+                        && path.starts_with(&c.path)
+                        && c.sides.iter().any(|s| s.workspace_id.as_str() == w.name)
+                });
+                if !named {
+                    return Err(format!(
+                        "EMBEDDING VIOLATION: workspace '{}' has live path {:?} under a \
+                         D/F-conflicted FILE path but is not a side of that conflict.",
+                        w.name, path,
+                    ));
+                }
+            }
+
+            if !in_resolved && !in_conflicts && !under_df_conflict {
                 return Err(format!(
                     "EMBEDDING VIOLATION: workspace '{}' changed path {:?}, \
                      but it appears in neither resolved nor conflicts.\n\
@@ -597,24 +646,37 @@ fn verify_minimality(
                     ));
                 }
             }
+            ConflictReason::FileDirectory {
+                file_side,
+                dir_child_example,
+            } => {
+                // bn-2jml: a D/F conflict on P is justified only if `file_side`
+                // really has a live FILE at P and some workspace has a live
+                // path strictly under P.
+                let live = |ws_name: Option<&str>, p: &PathBuf| {
+                    workspaces.iter().any(|w| {
+                        ws_name.is_none_or(|n| n == w.name)
+                            && w.changes
+                                .iter()
+                                .any(|c| &c.path == p && !matches!(c.kind, ChangeKind::Deleted))
+                    })
+                };
+                if !live(Some(file_side), &conflict.path)
+                    || dir_child_example == &conflict.path
+                    || !dir_child_example.starts_with(&conflict.path)
+                    || !live(None, dir_child_example)
+                {
+                    return Err(format!(
+                        "MINIMALITY VIOLATION: FileDirectory conflict on {:?} \
+                         (file side {file_side}, child {dir_child_example:?}) is \
+                         not backed by a live file + live descendant.",
+                        conflict.path,
+                    ));
+                }
+            }
             ConflictReason::MissingBase => {
                 // Sides have different content but no base to merge against.
                 // This is a valid conflict if contents differ.
-            }
-            ConflictReason::FileDirectory {
-                dir_child_example, ..
-            } => {
-                // D/F clash: the example child must live strictly under the
-                // conflicted path (i.e. some side treats it as a directory).
-                if !dir_child_example.starts_with(&conflict.path)
-                    || dir_child_example == &conflict.path
-                {
-                    return Err(format!(
-                        "MINIMALITY VIOLATION: FileDirectory conflict on {:?} but \
-                         dir_child_example {:?} is not under that path.",
-                        conflict.path, dir_child_example,
-                    ));
-                }
             }
             ConflictReason::MissingContent => {
                 // A non-deletion entry was missing file content.
@@ -638,6 +700,23 @@ fn verify_minimality(
     // path should be represented.
     for conflict in &result.conflicts {
         let expected_ws = workspaces_touching_path(workspaces, &conflict.path);
+        // D/F conflicts also name the directory-side workspaces, so their
+        // sides must be a SUPERSET of the workspaces touching the FILE path.
+        if matches!(conflict.reason, ConflictReason::FileDirectory { .. }) {
+            let actual_ws: BTreeSet<String> = conflict
+                .sides
+                .iter()
+                .map(|s| s.workspace_id.to_string())
+                .collect();
+            if let Some(missing) = expected_ws.iter().find(|w| !actual_ws.contains(*w)) {
+                return Err(format!(
+                    "MINIMALITY VIOLATION: D/F conflict on {:?} omits workspace {missing}; \
+                     sides {:?}.",
+                    conflict.path, actual_ws,
+                ));
+            }
+            continue;
+        }
         if expected_ws.len() > 1 {
             let actual_ws: BTreeSet<String> = conflict
                 .sides
@@ -811,6 +890,16 @@ proptest! {
                 .map(|s| s.workspace_id.to_string())
                 .collect();
 
+            if matches!(conflict.reason, ConflictReason::FileDirectory { .. }) {
+                // D/F conflicts also name the directory-side workspaces, so
+                // sides is a superset of the workspaces touching the FILE path.
+                prop_assert!(
+                    expected.is_subset(&actual),
+                    "D/F conflict on {:?}: sides {:?} miss {:?}",
+                    conflict.path, actual, expected,
+                );
+                continue;
+            }
             prop_assert_eq!(
                 &actual, &expected,
                 "Conflict on {:?}: sides {:?} != expected {:?}",
@@ -1118,6 +1207,45 @@ proptest! {
     // ===================================================================
     // COMBINED PUSHOUT CONTRACT
     // ===================================================================
+
+    /// bn-2jml: the resolved change set must be tree-shaped — no upserted
+    /// path may be a strict component prefix of another upserted path, or
+    /// the build step writes a tree with a duplicate entry (blob + tree under
+    /// one name) onto the target branch. D/F clashes must become conflicts.
+    #[test]
+    fn pushout_resolved_upserts_are_tree_shaped(
+        mut workspaces in arb_workspaces(),
+        uniform_content in any::<bool>(),
+    ) {
+        if uniform_content {
+            // Identical content everywhere makes shared paths resolve by hash
+            // equality, so shared-vs-shared D/F pairs reach the upsert set.
+            for w in &mut workspaces {
+                for c in &mut w.changes {
+                    if c.content.is_some() {
+                        c.content = Some(b"same\n".to_vec());
+                    }
+                }
+            }
+        }
+        let base_contents = make_base_contents(&workspaces);
+        let result = run_merge(&workspaces, &base_contents);
+        let upserts: Vec<&PathBuf> = result
+            .resolved
+            .iter()
+            .filter(|r| matches!(r, ResolvedChange::Upsert { .. }))
+            .map(ResolvedChange::path)
+            .collect();
+        for p in &upserts {
+            for q in &upserts {
+                prop_assert!(
+                    p == q || !q.starts_with(p),
+                    "resolved upserts {:?} and {:?} cannot coexist in one tree\n{}",
+                    p, q, format_scenario(&workspaces),
+                );
+            }
+        }
+    }
 
     /// Full pushout contract: embedding + minimality + commutativity in
     /// one combined check. This is the canonical §9.2 verification.

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d80fb024d7083c2aaf3913d4eff1e1dd9a5d247c655bc3ebb08cf7d6ba639956 # shrinks to patch_sets = [PatchSet { workspace_id: WorkspaceId("ws-0"), epoch: EpochId(GitOid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), changes: [FileChange { path: "a", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }] }, PatchSet { workspace_id: WorkspaceId("ws-1"), epoch: EpochId(GitOid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), changes: [FileChange { path: "a/a", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }] }, PatchSet { workspace_id: WorkspaceId("ws-2"), epoch: EpochId(GitOid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), changes: [FileChange { path: "a", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }] }]
+cc 31e7923c1bf503a7a76fff83f9c92ad5dde113fad6ead25df6102491c283e133 # shrinks to patch_sets = [PatchSet { workspace_id: WorkspaceId("ws-0"), epoch: EpochId(GitOid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), changes: [FileChange { path: "b/b/a", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }] }, PatchSet { workspace_id: WorkspaceId("ws-1"), epoch: EpochId(GitOid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), changes: [FileChange { path: "b", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }, FileChange { path: "b/b", kind: Added, content: Some([120]), file_id: None, blob: None, mode: None }] }]

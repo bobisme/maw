@@ -28,7 +28,7 @@ use proptest::prelude::*;
 
 use crate::merge::build::{ResolvedChange, build_merge_commit};
 use crate::merge::partition::partition_by_path;
-use crate::merge::resolve::{ConflictRecord, ResolveResult, resolve_partition};
+use crate::merge::resolve::{ConflictReason, ConflictRecord, ResolveResult, resolve_partition};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -81,11 +81,28 @@ fn results_equal(a: &ResolveResult, b: &ResolveResult) -> bool {
 // Proptest strategies
 // ---------------------------------------------------------------------------
 
-/// Generate a valid file path (1-3 segments, alphanumeric + .rs suffix).
+/// Generate a valid file path (1-3 segments).
+///
+/// bn-2jml: half the paths come from a tiny alphabet with the `.rs` suffix
+/// optional, so one generated path is frequently a component-wise directory
+/// prefix of another (`src` vs `src/lib.rs`) — the D/F clash class. The old
+/// generator always suffixed the last segment with `.rs`, which made a
+/// directory-prefix pair impossible.
 fn arb_path() -> impl Strategy<Value = PathBuf> {
-    prop::collection::vec("[a-z][a-z0-9]{0,7}", 1..=3usize).prop_map(|segments| {
+    let wide = (
+        prop::collection::vec("[a-z][a-z0-9]{0,7}", 1..=3usize),
+        any::<bool>(),
+    );
+    let narrow = (
+        prop::collection::vec(prop::sample::select(vec!["src", "lib", "a"]), 1..=3usize),
+        any::<bool>(),
+    )
+        .prop_map(|(segs, rs)| (segs.into_iter().map(str::to_owned).collect(), rs));
+    prop_oneof![wide, narrow].prop_map(|(segments, rs_suffix): (Vec<String>, bool)| {
         let mut p = segments.join("/");
-        p.push_str(".rs");
+        if rs_suffix {
+            p.push_str(".rs");
+        }
         PathBuf::from(p)
     })
 }
@@ -117,6 +134,17 @@ fn arb_file_change() -> impl Strategy<Value = FileChange> {
     })
 }
 
+/// Keep the first change per path: a real `PatchSet` never lists one path
+/// twice, and the small-alphabet `arb_path` makes in-workspace duplicates
+/// common (bn-2jml).
+fn dedup_paths(changes: Vec<FileChange>) -> Vec<FileChange> {
+    let mut seen = std::collections::BTreeSet::new();
+    changes
+        .into_iter()
+        .filter(|c| seen.insert(c.path.clone()))
+        .collect()
+}
+
 /// A workspace scenario: workspace name + list of file changes.
 #[derive(Clone, Debug)]
 struct WorkspaceScenario {
@@ -136,7 +164,7 @@ fn arb_scenario() -> impl Strategy<Value = Vec<WorkspaceScenario>> {
             .enumerate()
             .map(|(i, changes)| WorkspaceScenario {
                 name: format!("ws-{i:02}"),
-                changes,
+                changes: dedup_paths(changes),
             })
             .collect()
     })
@@ -251,7 +279,7 @@ fn arb_large_scenario() -> impl Strategy<Value = Vec<WorkspaceScenario>> {
             .enumerate()
             .map(|(i, changes)| WorkspaceScenario {
                 name: format!("ws-{i:02}"),
-                changes,
+                changes: dedup_paths(changes),
             })
             .collect()
     })
@@ -544,6 +572,17 @@ proptest! {
         }
         for c in &result.conflicts {
             output_paths.insert(c.path.clone());
+        }
+        // bn-2jml: a path strictly under a D/F-conflicted FILE path is
+        // surfaced by that ancestor's FileDirectory conflict record.
+        for p in &input_paths {
+            if result.conflicts.iter().any(|c| {
+                matches!(c.reason, ConflictReason::FileDirectory { .. })
+                    && &c.path != p
+                    && p.starts_with(&c.path)
+            }) {
+                output_paths.insert(p.clone());
+            }
         }
 
         prop_assert_eq!(
