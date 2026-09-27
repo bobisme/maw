@@ -11,8 +11,9 @@
 //!   these starts passing *without* a discovery the property went vacuous.
 //! * **Residuals** (`residual_*`): the faithful model under a weaker
 //!   environment assumption finds a real counterexample. These pin known,
-//!   documented races (see the bn-3ppf bone comments) so a fix shows up as a
-//!   test that needs updating, never silently.
+//!   documented races so a fix shows up as a test that needs updating, never
+//!   silently. (The bn-3ppf FF-absorb residuals were fixed by bn-302v and are
+//!   now `fast_*` tests with the old shapes kept as `mutation_*`.)
 //! * **Deep** (`deep_*`, `#[ignore]`): larger configurations for
 //!   `just formal-check` / nightly.
 //!
@@ -275,30 +276,100 @@ fn mutation_pre_bn_3w2b_promote_unlocked_regresses_epoch() {
 }
 
 // ---------------------------------------------------------------------------
-// Residuals: real races in the faithful model under weaker assumptions
+// bn-302v: former residuals, now must-hold, with the old shapes as mutations
 // ---------------------------------------------------------------------------
 
-/// With agents acting at any time, FF-absorb's classification-time dirty
-/// snapshot and unconditional `set_head` let a concurrent agent write be
-/// dropped (see bone comment).
+/// With agents editing and committing at ANY time, the FF-absorb sibling loop
+/// (sibling try-lock + re-check on fresh facts + HEAD CAS) loses nothing.
+/// Was `residual_ff_absorb_races_concurrent_agent`.
 #[test]
-fn residual_ff_absorb_races_concurrent_agent() {
-    expect_counterexample(configs::residual_ff_absorb_agents_anytime(), P_NO_LOST_WORK);
+fn fast_ff_absorb_agents_anytime() {
+    check_green(configs::fast_ff_absorb_agents_anytime());
 }
 
-/// A crash between the sibling epoch-ref write and `set_head` in the FF-absorb
-/// loop leaves the epoch ref AHEAD of HEAD (see bone comment).
+/// Pre-bn-302v sibling write (no lock, classification-time dirty set,
+/// unconditional `set_head`): a concurrent agent write is dropped.
 #[test]
-fn residual_ff_absorb_crash_leaves_leading_epoch_ref() {
-    expect_counterexample(configs::residual_ff_absorb_crash(), P_WS_COHERENT);
-}
-
-/// ... and the next merge of that sibling silently reverts the absorbed hunks.
-#[test]
-fn residual_ff_absorb_crash_then_merge_reverts() {
+fn mutation_pre_bn_302v_ff_no_sibling_lock_loses_agent_work() {
     expect_counterexample(
-        configs::residual_ff_absorb_crash_then_merge_sibling(),
+        mutated(
+            configs::fast_ff_absorb_agents_anytime(),
+            Mutation::FfNoSiblingLockRecheck,
+        ),
+        P_NO_LOST_WORK,
+    );
+}
+
+/// A crash anywhere inside the FF-absorb sibling loop leaves every sibling
+/// coherent: its epoch ref is written last, so it is never ahead of HEAD.
+/// Was `residual_ff_absorb_crash_leaves_leading_epoch_ref`.
+#[test]
+fn fast_ff_absorb_crash_in_loop() {
+    check_green(configs::fast_ff_absorb_crash_in_loop());
+}
+
+/// Pre-bn-302v order (epoch ref first): a crash leaves it AHEAD of HEAD.
+#[test]
+fn mutation_pre_bn_302v_ff_ref_before_head_breaks_coherence() {
+    expect_counterexample(
+        mutated(
+            configs::fast_ff_absorb_crash_in_loop(),
+            Mutation::FfRefBeforeHead,
+        ),
+        P_WS_COHERENT,
+    );
+}
+
+/// ... and the next merge of that sibling cannot silently revert the
+/// absorbed hunks. Was `residual_ff_absorb_crash_then_merge_reverts`.
+#[test]
+fn fast_ff_absorb_crash_then_merge_sibling() {
+    check_green(configs::fast_ff_absorb_crash_then_merge_sibling());
+}
+
+/// Pre-bn-302v order: the next merge of the sibling silently reverts.
+#[test]
+fn mutation_pre_bn_302v_ff_ref_before_head_then_merge_reverts() {
+    expect_counterexample(
+        mutated(
+            configs::fast_ff_absorb_crash_then_merge_sibling(),
+            Mutation::FfRefBeforeHead,
+        ),
         P_NO_SILENT_REVERT,
+    );
+}
+
+/// Pre-bn-302v `ws merge`: the FF-absorb reconcile (which runs BEFORE
+/// PREPARE's journal check) absorbs a trunk commit under a crashed merge's
+/// COMMIT journal, so its recovery can never clear it.
+#[test]
+fn mutation_pre_bn_302v_ff_absorb_ignores_merge_journal_strands_recovery() {
+    expect_counterexample(
+        mutated(
+            configs::fast_ff_absorb_crash_then_merge_sibling(),
+            Mutation::FfAbsorbIgnoresMergeJournal,
+        ),
+        P_RECOVERY_CONVERGES,
+    );
+}
+
+/// `maw doctor --repair` refuses while a crashed merge's journal exists, so
+/// crash recovery always converges; the doctor still advances otherwise.
+#[test]
+fn fast_doctor_repair_vs_crashed_merge() {
+    check_green(configs::doctor_vs_crashed_merge());
+}
+
+/// Pre-bn-302v doctor: advancing the epoch under a crashed COMMIT-phase
+/// journal strands the merge (recovery can no longer clear it).
+#[test]
+fn mutation_pre_bn_302v_doctor_ignores_merge_journal_strands_recovery() {
+    expect_counterexample(
+        mutated(
+            configs::doctor_vs_crashed_merge(),
+            Mutation::DoctorIgnoresMergeJournal,
+        ),
+        P_RECOVERY_CONVERGES,
     );
 }
 

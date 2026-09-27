@@ -1,7 +1,7 @@
 pub(crate) mod auto_rebase;
 pub(crate) mod checks; // pub(crate): advance.rs uses committed_ahead_of_epoch (bn-8flz)
 mod cross_target;
-mod lock;
+pub(crate) mod lock;
 pub(crate) mod notice;
 pub(crate) mod rebase; // pub(crate): advance.rs uses rebase_workspace (bn-8flz)
 pub(crate) mod sanity;

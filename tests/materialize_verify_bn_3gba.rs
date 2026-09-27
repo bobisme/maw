@@ -198,7 +198,7 @@ fn dirty_sibling_edits_survive_merge_auto_rebase_untouched() {
 /// The same skip logic on the FF-absorb path: a commit lands directly on trunk
 /// (outside maw), so the next merge must absorb the drift; a sibling holding
 /// uncommitted edits on a DISJOINT path is classified
-/// `SiblingPlan::FastForward { dirty: true }` and keeps them on purpose.
+/// `SiblingPlan::FastForward` (dirty, re-checked under its lock) and keeps them on purpose.
 #[test]
 fn dirty_sibling_edits_survive_ff_absorb_untouched() {
     let repo = TestRepo::new();

@@ -384,6 +384,18 @@ where
     // are about to write over.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire_with(root, "doctor --repair", policy)?;
 
+    // bn-302v: refuse while an unfinished `ws merge` journal exists. Under the
+    // epoch lock no live merge can be running, so this is a crashed merge
+    // awaiting recovery; its recovery (`maw ws merge --abort`) needs the epoch
+    // still at the journal's `epoch_before`. Same rule as bn-3w2b's
+    // `maw merge promote` refusal (Stateright
+    // `fast_doctor_repair_vs_crashed_merge`).
+    if let Some(phase) = unfinished_merge_phase(root)? {
+        return Ok(AutoAdvanceOutcome::NoOp {
+            reason: AutoAdvanceSkip::MergeInProgress { phase },
+        });
+    }
+
     let Some(classified) = classify_drift_with_oids(root, branch, backend)? else {
         return Ok(AutoAdvanceOutcome::NoOp {
             reason: AutoAdvanceSkip::EpochUnset,
@@ -470,6 +482,36 @@ pub enum AutoAdvanceSkip {
     FfBlocked(EpochDriftReport),
     /// Epoch and branch have forked.
     Diverged(EpochDriftReport),
+    /// bn-302v: an unfinished (crashed) `ws merge` journal exists; advancing
+    /// the epoch under it would strand its recovery.
+    MergeInProgress {
+        /// The journal's phase.
+        phase: maw_core::merge_state::MergePhase,
+    },
+}
+
+/// bn-302v: the phase of an unfinished `ws merge` journal
+/// (`merge-state.json` in a non-terminal phase), if one exists.
+///
+/// Callers that are about to move the epoch use this to refuse while a
+/// crashed merge still needs the epoch at its `epoch_before` to recover.
+///
+/// # Errors
+/// Returns an error when the journal exists but cannot be read (fails
+/// closed: the caller must not move the epoch past a journal it cannot see).
+pub fn unfinished_merge_phase(root: &Path) -> Result<Option<maw_core::merge_state::MergePhase>> {
+    use maw_core::merge_state::{MergeStateError, MergeStateFile};
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root);
+    let path = MergeStateFile::default_path(&manifold_dir);
+    match MergeStateFile::read(&path) {
+        Ok(state) if !state.phase.is_terminal() => Ok(Some(state.phase)),
+        Ok(_) | Err(MergeStateError::NotFound(_)) => Ok(None),
+        Err(e) => Err(anyhow!(
+            "cannot read merge journal {}: {e}; refusing to move the epoch past it",
+            path.display()
+        )),
+    }
 }
 
 fn short_oid(s: &str) -> String {
@@ -754,6 +796,63 @@ mod integration_tests {
         assert_eq!(post_report.kind, EpochDriftKind::InSync);
         // Sanity: we genuinely moved.
         assert_ne!(after.as_str(), epoch0);
+    }
+
+    /// bn-302v: a crashed `ws merge` left its COMMIT journal behind. The
+    /// doctor must not advance the epoch under it (its `--abort` recovery
+    /// needs the epoch at `epoch_before`), and must advance once it is gone.
+    #[test]
+    fn auto_advance_refuses_while_unfinished_merge_journal_exists() {
+        let (dir, root, epoch0) = setup();
+        let _ = dir;
+        let new_tip = advance_branch(&root, 1, "trunk");
+        let manifold_dir =
+            maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+        fs::create_dir_all(&manifold_dir).expect("mkdir manifold");
+        let path = maw_core::merge_state::MergeStateFile::default_path(&manifold_dir);
+        let epoch_id = maw_core::model::types::EpochId::new(&epoch0).expect("epoch id");
+        let mut journal = maw_core::merge_state::MergeStateFile::new(
+            vec![maw_core::model::types::WorkspaceId::new("alice").expect("ws id")],
+            epoch_id.clone(),
+            1,
+        );
+        for phase in [
+            maw_core::merge_state::MergePhase::Build,
+            maw_core::merge_state::MergePhase::Validate,
+        ] {
+            journal.advance(phase, 2).expect("advance");
+        }
+        journal
+            .advance_to_commit(epoch_id, 3)
+            .expect("commit phase");
+        journal.write_atomic(&path).expect("write journal");
+
+        let backend = GitWorktreeBackend::new(root.clone());
+        let outcome = auto_advance_if_safe(&root, "main", "default", &backend).expect("call");
+        assert!(
+            matches!(
+                outcome,
+                AutoAdvanceOutcome::NoOp {
+                    reason: AutoAdvanceSkip::MergeInProgress { .. }
+                }
+            ),
+            "doctor --repair must refuse under an unfinished merge journal, got {outcome:?}"
+        );
+        let after = manifold_refs::read_epoch_current(&root)
+            .expect("read")
+            .expect("set");
+        assert_eq!(after.as_str(), epoch0, "the epoch must not move");
+
+        fs::remove_file(&path).expect("remove journal");
+        let outcome = auto_advance_if_safe(&root, "main", "default", &backend).expect("call");
+        assert!(
+            matches!(outcome, AutoAdvanceOutcome::Advanced { .. }),
+            "{outcome:?}"
+        );
+        let after = manifold_refs::read_epoch_current(&root)
+            .expect("read")
+            .expect("set");
+        assert_eq!(after.as_str(), new_tip);
     }
 
     #[test]

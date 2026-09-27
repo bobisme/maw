@@ -241,9 +241,11 @@ pub enum Plan {
     Untouched,
     /// Committed-ahead, clean: replay onto the absorbed tip.
     Replay,
-    /// HEAD at base: advance epoch ref, materialize, move HEAD. Carries the
-    /// dirty-path mask observed at classification time.
-    FastForward { dirty: u8 },
+    /// HEAD at base: materialize, move HEAD, advance the epoch ref. Carries
+    /// the dirty-path mask and HEAD observed at classification time (the
+    /// bn-302v re-check and HEAD CAS compare against `head`; only the legacy
+    /// [`Mutation::FfNoSiblingLockRecheck`] writes with `dirty`).
+    FastForward { dirty: u8, head: Oid },
     /// bn-mq3b: dirty in a path that is stale against the target — leave it.
     SkipStaleDirty,
 }
@@ -266,11 +268,13 @@ pub enum Pc {
     MReplay(u8),
     /// `write_epoch_current(branch)` — plain write under the epoch lock.
     MWriteEpoch,
-    /// FF sibling `i`: write its per-workspace epoch ref.
+    /// FF sibling `i`: write its per-workspace epoch ref (bn-302v: LAST,
+    /// then release the sibling lock).
     MFfRef(u8),
-    /// FF sibling `i`: materialize the delta paths into the worktree.
+    /// FF sibling `i`: try-lock the sibling (skip if held), re-check HEAD and
+    /// the fresh dirty set, then materialize the delta paths (bn-302v).
     MFfMat(u8),
-    /// FF sibling `i`: `set_head_detached(branch)`.
+    /// FF sibling `i`: `set_head_detached_cas(classified HEAD -> branch)`.
     MFfHead(u8),
     /// PREPARE: stale-source check + write merge-state + freeze inputs.
     MPrepare,
@@ -512,6 +516,12 @@ impl State {
         }
     }
 
+    fn release_ws(&mut self, w: usize, pid: Pid) {
+        if self.ws_lock[w] == Some(pid) {
+            self.ws_lock[w] = None;
+        }
+    }
+
     fn finish(&mut self, pid: Pid) {
         self.release_all(pid);
         self.procs[pid as usize].pc = Pc::Done;
@@ -633,6 +643,18 @@ pub enum Mutation {
     /// Pre-bn-3w2b `maw merge promote`: no epoch lock, epoch CAS then a
     /// separate branch CAS.
     QuarantinePromoteUnlockedSplitCas,
+    /// Pre-bn-302v FF-absorb sibling order: the per-workspace epoch ref is
+    /// written FIRST, then materialize, then `set_head`.
+    FfRefBeforeHead,
+    /// Pre-bn-302v FF-absorb sibling write: no sibling lock, no re-check,
+    /// the classification-time dirty mask, unconditional `set_head`.
+    FfNoSiblingLockRecheck,
+    /// Pre-bn-302v `doctor --repair`: advances the epoch even while an
+    /// unfinished (crashed) `ws merge` journal exists.
+    DoctorIgnoresMergeJournal,
+    /// Pre-bn-302v `ws merge` FF-absorb: absorbs trunk commits into the epoch
+    /// even while a crashed merge's COMMIT/CLEANUP journal exists.
+    FfAbsorbIgnoresMergeJournal,
 }
 
 /// The protocol model.
@@ -806,6 +828,25 @@ impl ProtocolModel {
             .map(|i| i as u8)
     }
 
+    /// First step of the FF advance of the next `FastForward` sibling at or
+    /// after `from` (or PREPARE when there is none).
+    fn next_ff(&self, p: &Proc, from: usize) -> Pc {
+        Self::next_plan_idx(p, from, false).map_or(Pc::MPrepare, |i| {
+            if self.mutation == Mutation::FfRefBeforeHead {
+                Pc::MFfRef(i)
+            } else {
+                Pc::MFfMat(i)
+            }
+        })
+    }
+
+    /// bn-302v: leave FF sibling `w` stale (release its lock if held) and
+    /// move on to the next one.
+    fn skip_ff(&self, s: &mut State, pid: Pid, w: usize) -> Pc {
+        s.release_ws(w, pid);
+        self.next_ff(&s.procs[pid as usize], w + 1)
+    }
+
     fn next_auto_rebase(s: &State, from: usize, src: usize) -> Pc {
         (from..s.ws.len())
             .find(|&i| i != src && s.ws[i].exists)
@@ -848,6 +889,17 @@ impl ProtocolModel {
                     s.finish(pid); // bail_diverged: fork divergence
                     return true;
                 }
+                // bn-302v: a crashed merge's COMMIT/CLEANUP journal pins
+                // `epoch_before` for its recovery; absorbing now would strand
+                // it. Refuse (PREPARE would refuse this journal anyway).
+                if self.mutation != Mutation::FfAbsorbIgnoresMergeJournal
+                    && s.merge_state
+                        .as_ref()
+                        .is_some_and(|j| matches!(j.phase, JPhase::Commit | JPhase::Cleanup))
+                {
+                    s.finish(pid);
+                    return true;
+                }
                 let ff_paths = diff_paths(s.tree(s.epoch), s.tree(branch));
                 // evaluate_ff_safety: any workspace touching an FF path blocks.
                 for w in 0..s.ws.len() {
@@ -875,7 +927,10 @@ impl ProtocolModel {
                         *plan = if stale != 0 && self.mutation != Mutation::NoStaleDirtyGuard {
                             Plan::SkipStaleDirty
                         } else {
-                            Plan::FastForward { dirty }
+                            Plan::FastForward {
+                                dirty,
+                                head: ws.head,
+                            }
                         };
                     } else if dirty != 0 {
                         // committed-ahead + dirty: blocks the whole absorb.
@@ -921,26 +976,59 @@ impl ProtocolModel {
             Pc::MWriteEpoch => {
                 s.epoch = s.procs[i].target;
                 s.events |= ev::FF_ABSORBED;
-                let p = &mut s.procs[i];
-                p.pc = Self::next_plan_idx(p, 0, false).map_or(Pc::MPrepare, Pc::MFfRef);
+                s.procs[i].pc = self.next_ff(&s.procs[i], 0);
             }
             Pc::MFfRef(w) => {
-                s.ws[w as usize].base = s.procs[i].target;
-                s.procs[i].pc = Pc::MFfMat(w);
+                let wu = w as usize;
+                s.ws[wu].base = s.procs[i].target;
+                s.procs[i].pc = if self.mutation == Mutation::FfRefBeforeHead {
+                    Pc::MFfMat(w)
+                } else {
+                    s.release_ws(wu, pid);
+                    self.next_ff(&s.procs[i], wu + 1)
+                };
             }
             Pc::MFfMat(w) => {
                 let w = w as usize;
                 let target = s.procs[i].target;
-                let Plan::FastForward { dirty } = s.procs[i].plans[w] else {
+                let Plan::FastForward {
+                    dirty: dirty_classified,
+                    head: head_classified,
+                } = s.procs[i].plans[w]
+                else {
                     unreachable!("MFfMat only for FastForward plans")
                 };
-                // sync_ff_paths_in_worktree: ff_paths ∪ (own HEAD→target delta
-                // minus classification-time dirty paths); unconditional writes.
                 let own = diff_paths(s.tree(s.ws[w].head), s.tree(target));
-                let to_apply = if self.mutation == Mutation::GlobalFfPathsOnly {
-                    s.procs[i].ff_paths
+                let ff_paths = s.procs[i].ff_paths;
+                let dirty = if self.mutation == Mutation::FfNoSiblingLockRecheck {
+                    dirty_classified
                 } else {
-                    s.procs[i].ff_paths | (own & !dirty)
+                    // bn-302v: try-lock the sibling (a held lock means another
+                    // maw process is rewriting it: skip, leave it stale), then
+                    // re-run the classifier on fresh facts.
+                    if !s.ws_lock_free_for(w, pid) {
+                        s.procs[i].pc = self.skip_ff(s, pid, w);
+                        return true;
+                    }
+                    s.ws_lock[w] = Some(pid);
+                    let dirty = s.dirty_mask(w);
+                    // The stale-dirty part is the same production
+                    // `classify_sibling` guard as at classification, so
+                    // `NoStaleDirtyGuard` removes it here too.
+                    let stale = dirty & (own | ff_paths) != 0
+                        && self.mutation != Mutation::NoStaleDirtyGuard;
+                    if !s.ws[w].exists || s.ws[w].head != head_classified || stale {
+                        s.procs[i].pc = self.skip_ff(s, pid, w);
+                        return true;
+                    }
+                    dirty
+                };
+                // sync_ff_paths_in_worktree: ff_paths ∪ (own HEAD→target delta
+                // minus the dirty paths).
+                let to_apply = if self.mutation == Mutation::GlobalFfPathsOnly {
+                    ff_paths
+                } else {
+                    ff_paths | (own & !dirty)
                 };
                 let tt = *s.tree(target);
                 for (p, t) in tt.iter().enumerate() {
@@ -951,11 +1039,24 @@ impl ProtocolModel {
                 s.procs[i].pc = Pc::MFfHead(w as u8);
             }
             Pc::MFfHead(w) => {
-                s.ws[w as usize].head = s.procs[i].target;
+                let wu = w as usize;
+                let Plan::FastForward { head, .. } = s.procs[i].plans[wu] else {
+                    unreachable!("MFfHead only for FastForward plans")
+                };
+                if self.mutation != Mutation::FfNoSiblingLockRecheck && s.ws[wu].head != head {
+                    // bn-302v HEAD CAS failed (a commit landed after the
+                    // re-check): HEAD and the epoch ref stay put.
+                    s.procs[i].pc = self.skip_ff(s, pid, wu);
+                    return true;
+                }
+                s.ws[wu].head = s.procs[i].target;
                 s.events |= ev::SIBLING_FF;
-                let p = &mut s.procs[i];
-                p.pc =
-                    Self::next_plan_idx(p, w as usize + 1, false).map_or(Pc::MPrepare, Pc::MFfRef);
+                s.procs[i].pc = if self.mutation == Mutation::FfRefBeforeHead {
+                    s.release_ws(wu, pid);
+                    self.next_ff(&s.procs[i], wu + 1)
+                } else {
+                    Pc::MFfRef(w)
+                };
             }
             Pc::MPrepare => {
                 // stale_merge_sources + run_prepare_phase.
@@ -1312,6 +1413,14 @@ impl ProtocolModel {
                 s.procs[i].pc = Pc::XClassify;
             }
             Pc::XClassify => {
+                // bn-302v: refuse while a (crashed) `ws merge` journal exists
+                // (mirrors bn-3w2b's promote refusal) — advancing the epoch
+                // under it would make its recovery refuse ("epoch advanced
+                // since this merge started").
+                if s.merge_state.is_some() && self.mutation != Mutation::DoctorIgnoresMergeJournal {
+                    s.finish(pid); // AutoAdvanceSkip::MergeInProgress
+                    return true;
+                }
                 let branch = s.branch;
                 if !s.is_strict_ancestor(s.epoch, branch) {
                     s.finish(pid); // InSync / Diverged: no-op
@@ -2028,30 +2137,53 @@ pub mod configs {
         }
     }
 
-    /// Faithful model with agents acting at ANY time (no quiescence).
-    pub fn residual_ff_absorb_agents_anytime() -> ProtocolModel {
+    /// `maw doctor --repair` after a crashed `ws merge` and a trunk commit.
+    ///
+    /// The crash leaves the merge journal behind. Faithful = bn-302v (doctor refuses
+    /// while the journal exists); the pre-fix shape is
+    /// [`Mutation::DoctorIgnoresMergeJournal`].
+    pub fn doctor_vs_crashed_merge() -> ProtocolModel {
+        ProtocolModel {
+            crashes: 1,
+            expect: ev::MERGE_COMMITTED
+                | ev::DOCTOR_ADVANCED
+                | ev::RECOVERED_PRE_CAS
+                | ev::RECOVERED_POST_CAS,
+            ..doctor_vs_merge()
+        }
+    }
+
+    /// FF-absorb with agents acting at ANY time, racing the sibling loop.
+    ///
+    /// Was a residual before bn-302v (sibling lock + re-check +
+    /// HEAD CAS); the pre-fix shape is [`Mutation::FfNoSiblingLockRecheck`].
+    pub fn fast_ff_absorb_agents_anytime() -> ProtocolModel {
         ProtocolModel {
             agents: AgentPolicy::ANYTIME,
             crashes: 0,
-            expect: 0,
+            expect: ev::FF_ABSORBED | ev::SIBLING_FF | ev::AGENT_COMMIT | ev::MERGE_COMMITTED,
             ..fast_ff_absorb()
         }
     }
 
-    /// Faithful model with crashes allowed inside the FF-absorb sibling loop.
-    pub fn residual_ff_absorb_crash() -> ProtocolModel {
+    /// FF-absorb with crashes allowed inside the sibling loop.
+    ///
+    /// Was a residual before bn-302v (epoch ref written last); the pre-fix shape is
+    /// [`Mutation::FfRefBeforeHead`].
+    pub fn fast_ff_absorb_crash_in_loop() -> ProtocolModel {
         ProtocolModel {
             crash_in_ff_absorb: true,
             procs: vec![merge(0)],
-            expect: 0,
+            expect: ev::FF_ABSORBED | ev::SIBLING_FF | ev::MERGE_COMMITTED,
             ..fast_ff_absorb()
         }
     }
 
-    /// As [`residual_ff_absorb_crash`], plus a second `ws merge` of the
-    /// sibling afterwards — shows the leading epoch ref turning into a silent
-    /// revert of the absorbed range.
-    pub fn residual_ff_absorb_crash_then_merge_sibling() -> ProtocolModel {
+    /// As [`fast_ff_absorb_crash_in_loop`], plus a second `ws merge`.
+    ///
+    /// The second merge is of the sibling; pre-bn-302v the leading epoch ref turned into a
+    /// silent revert of the absorbed range.
+    pub fn fast_ff_absorb_crash_then_merge_sibling() -> ProtocolModel {
         ProtocolModel {
             procs: vec![
                 merge(0),
@@ -2061,7 +2193,7 @@ pub mod configs {
                     auto_rebase: false,
                 },
             ],
-            ..residual_ff_absorb_crash()
+            ..fast_ff_absorb_crash_in_loop()
         }
     }
 
@@ -2080,8 +2212,9 @@ pub mod configs {
         }
     }
 
-    /// `maw merge promote` of a quarantine racing `ws merge` (with FF-absorb
-    /// of a direct trunk commit). Faithful = bn-3w2b (epoch lock + one
+    /// `maw merge promote` of a quarantine racing `ws merge`.
+    ///
+    /// The merge FF-absorbs a direct trunk commit. Faithful = bn-3w2b (epoch lock + one
     /// atomic 2-ref CAS); the pre-fix shape is
     /// [`Mutation::QuarantinePromoteUnlockedSplitCas`].
     pub fn fast_quarantine_promote_vs_merge() -> ProtocolModel {

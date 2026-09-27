@@ -555,6 +555,19 @@ impl GixRepo {
         crate::checkout_impl::set_head(self, oid)
     }
 
+    /// Compare-and-swap variant of [`Self::set_head_detached`] (bn-302v):
+    /// moves HEAD to `new` only if it still resolves to `expected`, holding
+    /// git's `HEAD.lock` across the re-read and the write so a concurrent
+    /// `git commit` can never be silently moved off. See
+    /// [`crate::checkout_impl::set_head_detached_cas`].
+    ///
+    /// # Errors
+    /// [`GitError::RefConflict`] if HEAD moved or `HEAD.lock` is held; I/O
+    /// errors otherwise. HEAD is unchanged on every error.
+    pub fn set_head_detached_cas(&self, expected: GitOid, new: GitOid) -> Result<(), GitError> {
+        crate::checkout_impl::set_head_detached_cas(self, expected, new)
+    }
+
     /// Point HEAD at `<branch>` and update the worktree to match.
     ///
     /// Equivalent to `git checkout <branch>` but fully native:

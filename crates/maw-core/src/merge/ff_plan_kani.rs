@@ -162,7 +162,7 @@ fn classify_sibling_safety_exhaustive() {
     // for a dirty, not-ahead sibling whose probe succeeded.
     assert_eq!(probe_calls.get(), u8::from(!base_is_branch));
     let expect_stale_call =
-        !base_is_branch && !probe_err && dirty && !matches!(head, SiblingHead::Ahead);
+        !base_is_branch && !probe_err && dirty && matches!(head, SiblingHead::AtBase);
     assert_eq!(stale_calls.get(), u8::from(expect_stale_call));
 
     // Errors propagate (fail closed: the absorb is refused).
@@ -171,8 +171,10 @@ fn classify_sibling_safety_exhaustive() {
 
     assert_eq!(d == SiblingDecision::AlreadySynced, base_is_branch);
     if d == SiblingDecision::FastForward {
-        // Never fast-forward committed work ahead of base (bn-rah2).
-        assert!(!matches!(head, SiblingHead::Ahead));
+        // Only a HEAD proven to be at its base epoch is fast-forwarded:
+        // never committed work ahead of base (bn-rah2), never a HEAD that
+        // could not be read (bn-302v).
+        assert!(matches!(head, SiblingHead::AtBase));
         // Never fast-forward over a stale dirty overlap (bn-mq3b).
         assert!(!(dirty && stale));
     }
@@ -186,35 +188,52 @@ fn classify_sibling_safety_exhaustive() {
         d == SiblingDecision::Replay,
         !base_is_branch && matches!(head, SiblingHead::Ahead) && !dirty
     );
-    // SkipStaleDirty exactly when dirty, not ahead, and the stale check hit.
+    // SkipStaleDirty exactly when dirty, at base, and the stale check hit.
     assert_eq!(
         d == SiblingDecision::SkipStaleDirty,
-        !base_is_branch && !matches!(head, SiblingHead::Ahead) && dirty && stale
+        !base_is_branch && matches!(head, SiblingHead::AtBase) && dirty && stale
+    );
+    // bn-302v: SkipUnreadableHead exactly when HEAD could not be read.
+    assert_eq!(
+        d == SiblingDecision::SkipUnreadableHead,
+        !base_is_branch && matches!(head, SiblingHead::Unreadable)
     );
 }
 
-/// Unreadable HEAD/tree with a dirty worktree fails closed: wired through
-/// the real stale_dirty_filter_by with an unknown delta (None), the sibling
-/// is skipped, never fast-forwarded, for every conflict relation.
+/// Unreadable HEAD or tree fails closed, wired through the real
+/// stale_dirty_filter_by with an unknown delta (None), for every conflict
+/// relation and every dirty set of <= 2 paths (including clean):
+/// * HEAD unreadable => SkipUnreadableHead, clean or dirty (bn-302v; a clean
+///   sibling used to be fast-forwarded);
+/// * HEAD at base, tree unreadable, dirty => SkipStaleDirty (bn-27n7).
 #[kani::proof]
 #[kani::unwind(5)]
-fn classify_unreadable_dirty_never_fast_forwards_le_2_dirty() {
+fn classify_unreadable_head_or_tree_never_fast_forwards_le_2_dirty() {
     let rel = any_relation();
     let (dirty, lr) = any_seq::<2>(3);
-    kani::assume(lr >= 1);
     let dirty = &dirty[..lr];
     let head_n: u8 = kani::any();
     kani::assume(head_n < 2); // Unreadable HEAD, or AtBase with unreadable tree
     let head = head_of(head_n);
+    let is_dirty = !dirty.is_empty();
     let d = classify_sibling::<()>(
         false,
-        || Ok(SiblingProbe { head, dirty: true }),
+        || {
+            Ok(SiblingProbe {
+                head,
+                dirty: is_dirty,
+            })
+        },
         || {
             !stale_dirty_filter_by(None, dirty, |x: &u8, y: &u8| rel[*x as usize][*y as usize])
                 .is_empty()
         },
     );
-    assert_eq!(d, Ok(SiblingDecision::SkipStaleDirty));
+    match head {
+        SiblingHead::Unreadable => assert_eq!(d, Ok(SiblingDecision::SkipUnreadableHead)),
+        _ if is_dirty => assert_eq!(d, Ok(SiblingDecision::SkipStaleDirty)),
+        _ => assert_eq!(d, Ok(SiblingDecision::FastForward)),
+    }
 }
 
 fn decision_of(n: u8) -> SiblingDecision {
@@ -223,7 +242,8 @@ fn decision_of(n: u8) -> SiblingDecision {
         1 => SiblingDecision::BlockAbsorb,
         2 => SiblingDecision::Replay,
         3 => SiblingDecision::FastForward,
-        _ => SiblingDecision::SkipStaleDirty,
+        4 => SiblingDecision::SkipStaleDirty,
+        _ => SiblingDecision::SkipUnreadableHead,
     }
 }
 
@@ -232,7 +252,7 @@ fn decision_of(n: u8) -> SiblingDecision {
 #[kani::proof]
 #[kani::unwind(5)]
 fn absorb_verdict_blocks_all_or_nothing_le_3_siblings() {
-    let (codes, len) = any_seq::<3>(5);
+    let (codes, len) = any_seq::<3>(6);
     let all = [
         decision_of(codes[0]),
         decision_of(codes[1]),

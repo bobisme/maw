@@ -267,6 +267,20 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
             )),
         }),
         Ok(AutoAdvanceOutcome::NoOp {
+            reason: AutoAdvanceSkip::MergeInProgress { phase },
+        }) => Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "epoch repair: skipped \u{2014} an unfinished `maw ws merge` left its journal \
+                 behind (phase: {phase}); moving the epoch now would strand its recovery."
+            ),
+            fix: Some(format!(
+                "Recover it first: {}",
+                maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+            )),
+        }),
+        Ok(AutoAdvanceOutcome::NoOp {
             reason: AutoAdvanceSkip::Diverged(report),
         }) => Some(DoctorCheck {
             name: "epoch repair".to_string(),

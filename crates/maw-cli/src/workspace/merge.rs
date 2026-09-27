@@ -3658,6 +3658,28 @@ fn reconcile_epoch_with_branch(
         return bail_diverged(&[]);
     }
 
+    // bn-302v: this reconcile runs BEFORE PREPARE's journal check. A crashed
+    // merge's COMMIT/CLEANUP journal pins `epoch_before` for its recovery
+    // (`maw ws merge --abort` refuses once the epoch moved away from it), so
+    // absorbing trunk commits into the epoch now would strand it for good.
+    // Refuse before any mutation (Stateright
+    // `mutation_pre_bn_302v_ff_absorb_ignores_merge_journal_strands_recovery`).
+    // An unreadable journal cannot drive a recovery either, so it does not
+    // block (PREPARE overwrites it the same way).
+    let unfinished = super::epoch_drift::unfinished_merge_phase(root).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "FF absorb: unreadable merge journal ignored");
+        None
+    });
+    if let Some(phase @ (MergePhase::Commit | MergePhase::Cleanup)) = unfinished {
+        bail!(
+            "Target branch '{branch}' is ahead of the current epoch, but a previous \
+             `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
+             Absorbing the trunk commits now would strand its recovery.\n  \
+             To fix: {}, then retry.",
+            maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+        );
+    }
+
     let ff_paths = super::ff_absorb::compute_ff_changed_paths(&repo, &epoch_git, &branch_git)?;
 
     let backend = get_backend()?;
@@ -3735,20 +3757,20 @@ fn reconcile_epoch_with_branch(
             // the epoch-sync guidance rather than half-moving anything.
             #[allow(clippy::items_after_statements)]
             enum SiblingPlan {
-                FastForward {
-                    dirty_paths: std::collections::BTreeSet<PathBuf>,
-                },
-                Replay {
-                    base_epoch: String,
-                },
+                // bn-302v: the classification-time dirty set is deliberately
+                // not carried: the advance re-reads it under the sibling lock.
+                FastForward,
+                Replay { base_epoch: String },
                 // bn-mq3b: a dirty sibling whose uncommitted paths also changed
                 // between its HEAD and the absorb target. Advancing its HEAD
                 // would strand the stale worker content behind a HEAD that
                 // claims the new epoch — the next commit then silently reverts
                 // the epoch's hunks. Leave it stale (no ref/HEAD move) and warn.
-                SkipStaleDirty {
-                    stale_paths: Vec<PathBuf>,
-                },
+                SkipStaleDirty { stale_paths: Vec<PathBuf> },
+                // bn-302v: HEAD could not be read, so committed work ahead of
+                // the base epoch cannot be ruled out. Leave it exactly in
+                // place (fail closed), clean or dirty.
+                SkipUnreadableHead,
             }
             #[allow(clippy::items_after_statements)]
             struct SiblingClass {
@@ -3772,7 +3794,6 @@ fn reconcile_epoch_with_branch(
                 name: String,
                 ws_path: PathBuf,
                 decision: SiblingDecision,
-                dirty_paths: std::collections::BTreeSet<PathBuf>,
                 stale_paths: Vec<PathBuf>,
                 base_epoch: String,
                 head_before: String,
@@ -3819,8 +3840,8 @@ fn reconcile_epoch_with_branch(
                         })?;
                         *dirty_paths.borrow_mut() = inspected;
                         Ok(SiblingProbe {
-                            // HEAD unreadable falls back to the non-destructive
-                            // FF path, which preserves the worktree.
+                            // bn-302v: an unreadable HEAD fails closed
+                            // (SkipUnreadableHead), clean or dirty.
                             head: match &head {
                                 None => SiblingHead::Unreadable,
                                 Some(h) if *h == base_epoch => SiblingHead::AtBase,
@@ -3858,7 +3879,6 @@ fn reconcile_epoch_with_branch(
                     name: ws.name.clone(),
                     ws_path,
                     decision,
-                    dirty_paths: dirty_paths.into_inner(),
                     stale_paths,
                     base_epoch,
                     head_before,
@@ -3885,9 +3905,8 @@ fn reconcile_epoch_with_branch(
                         SiblingDecision::SkipStaleDirty => SiblingPlan::SkipStaleDirty {
                             stale_paths: c.stale_paths,
                         },
-                        SiblingDecision::FastForward => SiblingPlan::FastForward {
-                            dirty_paths: c.dirty_paths,
-                        },
+                        SiblingDecision::FastForward => SiblingPlan::FastForward,
+                        SiblingDecision::SkipUnreadableHead => SiblingPlan::SkipUnreadableHead,
                         SiblingDecision::AlreadySynced | SiblingDecision::BlockAbsorb => {
                             unreachable!("filtered above: synced skipped, block bailed")
                         }
@@ -4050,37 +4069,121 @@ fn reconcile_epoch_with_branch(
                     );
                     continue;
                 }
-                if let SiblingPlan::FastForward { ref dirty_paths } = c.plan {
-                    // bn-3ppf (Stateright residuals, see
+                if matches!(c.plan, SiblingPlan::SkipUnreadableHead) {
+                    notes.push(format!(
+                        "  {}: left stale (NOT fast-forwarded) \u{2014} its HEAD could not be \
+                         read, so committed work ahead of its base cannot be ruled out; \
+                         nothing was moved \u{2014} check: git -C {} status, then run: \
+                         maw ws sync {}",
+                        c.name,
+                        c.ws_path.display(),
+                        c.name
+                    ));
+                    continue;
+                }
+                if matches!(c.plan, SiblingPlan::FastForward) {
+                    // bn-302v (was the bn-3ppf Stateright residuals, see
                     // crates/maw-assurance/tests/formal_model.rs):
-                    // * this loop holds the epoch lock but NOT the sibling's
-                    //   rebase lock, and `dirty_paths` is the classification-
-                    //   time snapshot: an agent edit to an FF path, or a commit,
-                    //   landing after classification is overwritten / has HEAD
-                    //   moved off it (`residual_ff_absorb_races_concurrent_agent`);
-                    // * the sibling epoch ref is written BEFORE materialization
-                    //   and `set_head`; a crash (or the early-return warn paths
-                    //   in `sync_ff_paths_in_worktree`) in between leaves the
-                    //   epoch ref AHEAD of HEAD, and the next merge of that
-                    //   sibling diffs its stale tree against the new base and
-                    //   silently reverts the absorbed hunks
-                    //   (`residual_ff_absorb_crash_then_merge_reverts`).
+                    // * B: take the sibling's rebase lock (try-lock; a held
+                    //   lock means another maw process is rewriting it, so
+                    //   skip it like auto-rebase's SkippedInUse) and RE-CHECK
+                    //   HEAD and the dirty set under it, immediately before
+                    //   writing. The classification-time dirty snapshot is
+                    //   never used for the write.
+                    // * A: materialize, then CAS-move HEAD (under git's own
+                    //   HEAD.lock, so a racing `git commit` either lands first
+                    //   and fails the CAS or fails itself), and ONLY THEN
+                    //   write the sibling epoch ref (the snapshot diff base).
+                    //   A crash or failure at any earlier point leaves the ref
+                    //   at the old base: the sibling is merely stale, never
+                    //   "ref new, files old" (which the next merge would turn
+                    //   into a silent revert of the absorbed range).
+                    // Residual window: an agent file write between the
+                    // re-check and a path's materialization, or a HEAD move
+                    // by a tool that bypasses HEAD.lock, is not excluded
+                    // (agents take no maw lock).
+                    let _ = maw::fp!("FP_FF_ABSORB_BEFORE_SIBLING_LOCK");
+                    let prepared = match ff_advance_prepare(
+                        root,
+                        &c.name,
+                        &c.ws_path,
+                        &c.head_before,
+                        branch_oid,
+                        &ff_paths,
+                    ) {
+                        Ok(p) => p,
+                        Err(skip) => {
+                            notes.push(format!(
+                                "  {}: left stale (NOT fast-forwarded) \u{2014} {} \u{2014} \
+                                 run: maw ws sync {}",
+                                c.name, skip.reason, c.name
+                            ));
+                            if !skip.stale_paths.is_empty() {
+                                record_ff_absorb_skip_op(
+                                    root,
+                                    &c.name,
+                                    &c.base_epoch,
+                                    branch_oid,
+                                    &skip.stale_paths,
+                                    &trigger,
+                                );
+                            }
+                            continue;
+                        }
+                    };
+                    let dirty_paths = &prepared.dirty_paths;
                     let dirty = !dirty_paths.is_empty();
-                    let epoch_ref = maw_core::refs::workspace_epoch_ref(&c.name);
-                    if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
-                        tracing::warn!(
-                            workspace = %c.name,
-                            error = %e,
-                            "failed to advance workspace epoch ref after FF absorb"
-                        );
-                    }
-                    let ff_sync = sync_ff_paths_in_worktree(
+                    let ff_sync = match sync_ff_paths_in_worktree(
                         &c.ws_path,
                         &c.name,
+                        prepared.expected_head,
                         branch_oid,
                         &ff_paths,
                         dirty_paths,
-                    );
+                    ) {
+                        Ok(sync) => sync,
+                        Err(reason) => {
+                            notes.push(format!(
+                                "  {}: left stale (NOT fast-forwarded) \u{2014} {reason}; its \
+                                 epoch ref was not moved \u{2014} run: maw ws sync {}",
+                                c.name, c.name
+                            ));
+                            continue;
+                        }
+                    };
+                    // bn-302v: HEAD is at the absorbed tip; the epoch ref
+                    // follows LAST. A failure here leaves the ref BEHIND HEAD
+                    // (the safe direction: the workspace reads as stale).
+                    let ref_result =
+                        maw::fp!("FP_FF_ABSORB_BEFORE_SIBLING_EPOCH_REF").and_then(|()| {
+                            maw_core::refs::write_ref(
+                                root,
+                                &maw_core::refs::workspace_epoch_ref(&c.name),
+                                branch_oid,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                        });
+                    if let Err(e) = ref_result {
+                        tracing::warn!(
+                            workspace = %c.name,
+                            error = %e,
+                            "FF absorb: HEAD advanced but the workspace epoch ref write failed"
+                        );
+                        notes.push(format!(
+                            "  {}: WARNING: HEAD advanced but its epoch ref could not be \
+                             written ({e}); the workspace reads as stale \u{2014} run: \
+                             maw ws sync {}",
+                            c.name, c.name
+                        ));
+                    }
+                    if ff_sync.index_not_reset {
+                        notes.push(format!(
+                            "  {}: WARNING: the index could not be reset to the new HEAD \
+                             \u{2014} run: git -C {} reset (before committing)",
+                            c.name,
+                            c.ws_path.display()
+                        ));
+                    }
                     // bn-3gba: a sibling that was CLEAN before the FF-absorb
                     // must be clean at the absorbed tip afterwards. Assert it;
                     // `sync_ff_paths_in_worktree` only materializes the paths
@@ -4379,6 +4482,135 @@ struct FfWorktreeSync {
     /// NOT touched — the local edit wins — but the workspace is left with a
     /// worktree that does not match its new HEAD, so the caller must say so.
     extra_skipped_dirty: Vec<PathBuf>,
+    /// bn-302v: HEAD moved but the index could not be reset to it. The
+    /// caller warns: a `git commit` of that index would revert the range.
+    index_not_reset: bool,
+}
+
+/// bn-302v: a fast-forward sibling that passed the re-check under its lock.
+struct FfPrepared {
+    /// The sibling's rebase lock, held until the advance (materialize, HEAD
+    /// CAS, epoch ref, verify) is finished.
+    _lock: super::sync::lock::WorkspaceRebaseLock,
+    /// HEAD as classified; the HEAD CAS expects it.
+    expected_head: maw_git::GitOid,
+    /// The dirty set re-read under the lock. Materialization never writes a
+    /// path that conflicts with it.
+    dirty_paths: std::collections::BTreeSet<PathBuf>,
+}
+
+/// bn-302v: why an FF sibling was left stale at the re-check.
+struct FfSkip {
+    reason: String,
+    /// Non-empty when the skip is a stale-dirty overlap (recorded in the
+    /// workspace op log like the classification-time bn-mq3b skip).
+    stale_paths: Vec<PathBuf>,
+}
+
+/// bn-302v: take the FF sibling's rebase lock and re-check it immediately
+/// before it is written.
+///
+/// Re-runs the pure, Kani-verified [`classify_sibling`] on FRESH facts, with
+/// the classification-time HEAD as the base: a HEAD that moved (a concurrent
+/// commit) reads as committed-ahead, an unreadable HEAD fails closed, and a
+/// new uncommitted edit to any path the advance would write (the sibling's
+/// own HEAD..target delta plus the global FF range) is a stale-dirty
+/// overlap. Only [`SiblingDecision::FastForward`] proceeds; everything else
+/// leaves the sibling exactly in place.
+///
+/// A held lock (another maw process is rewriting this workspace) is a skip,
+/// like the auto-rebase's `SkippedInUse`.
+fn ff_advance_prepare(
+    root: &Path,
+    ws_name: &str,
+    ws_path: &Path,
+    expected_head: &str,
+    branch_oid: &GitOid,
+    ff_paths: &std::collections::BTreeSet<PathBuf>,
+) -> std::result::Result<FfPrepared, FfSkip> {
+    let skip = |reason: String| FfSkip {
+        reason,
+        stale_paths: Vec::new(),
+    };
+    let lock = match super::sync::lock::WorkspaceRebaseLock::try_acquire(root, ws_name) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return Err(skip(
+                "in use by another maw process (its rebase lock is held)".to_owned(),
+            ));
+        }
+        Err(e) => return Err(skip(format!("cannot take its rebase lock: {e}"))),
+    };
+    let expected: maw_git::GitOid = expected_head
+        .parse()
+        .map_err(|e| skip(format!("invalid classified HEAD {expected_head}: {e}")))?;
+    let target_git: maw_git::GitOid = branch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| skip(format!("invalid absorb target: {e}")))?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| skip(format!("cannot open the workspace repo: {e}")))?;
+    let head = repo.rev_parse_opt("HEAD").ok().flatten();
+    let dirty = dirty_paths_in_workspace(ws_path)
+        .map_err(|e| skip(format!("cannot inspect it for local edits: {e:#}")))?;
+
+    let mut stale_paths: Vec<PathBuf> = Vec::new();
+    let Ok(decision) = classify_sibling::<std::convert::Infallible>(
+        false,
+        || {
+            Ok(SiblingProbe {
+                head: match head {
+                    None => SiblingHead::Unreadable,
+                    Some(h) if h == expected => SiblingHead::AtBase,
+                    Some(_) => SiblingHead::Ahead,
+                },
+                dirty: !dirty.is_empty(),
+            })
+        },
+        || {
+            let delta = ff_own_stale_paths(&repo, ws_name, target_git).map(|mut own| {
+                for p in ff_paths {
+                    if !own.contains(p) {
+                        own.push(p.clone());
+                    }
+                }
+                own
+            });
+            stale_paths = maw_core::merge::ff_plan::stale_dirty_filter(delta, &dirty);
+            !stale_paths.is_empty()
+        },
+    );
+    match decision {
+        SiblingDecision::FastForward => Ok(FfPrepared {
+            _lock: lock,
+            expected_head: expected,
+            dirty_paths: dirty,
+        }),
+        SiblingDecision::SkipStaleDirty => Err(FfSkip {
+            reason: format!(
+                "{} uncommitted path(s) edited after classification also change in the \
+                 absorbed epoch(s): {} \u{2014} commit or stash them",
+                stale_paths.len(),
+                stale_paths
+                    .iter()
+                    .take(5)
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            stale_paths,
+        }),
+        SiblingDecision::SkipUnreadableHead => Err(skip(
+            "its HEAD became unreadable after classification".to_owned(),
+        )),
+        SiblingDecision::AlreadySynced | SiblingDecision::Replay | SiblingDecision::BlockAbsorb => {
+            Err(skip(format!(
+                "its HEAD moved after classification ({} -> {}): a concurrent commit landed",
+                &expected_head[..expected_head.len().min(12)],
+                head.map_or_else(|| "?".to_owned(), |h| h.to_string()[..12].to_owned())
+            )))
+        }
+    }
 }
 
 /// Update a non-target workspace's worktree to reflect an absorbed FF range.
@@ -4410,19 +4642,30 @@ struct FfWorktreeSync {
 /// from `ff_paths`, so paths outside that range may carry genuine local
 /// edits. Those are skipped (never clobbered) and reported back to the caller.
 ///
-/// Failures are logged but non-fatal; the merge re-snapshots before BUILD
-/// and any drift will surface as a normal merge artefact rather than data
-/// loss.
+/// bn-302v: HEAD moves by compare-and-swap from `expected_head` and only
+/// after materialization. Any failure before the HEAD move returns `Err`
+/// with a reason; the caller then leaves the sibling's epoch ref at its old
+/// base (stale, never "ref new, files old"). The caller holds the sibling's
+/// rebase lock and passes the dirty set it re-read under that lock.
+#[expect(
+    clippy::too_many_lines,
+    reason = "bn-302v: materialize -> HEAD CAS -> index reset is one ordered sequence; splitting it hides the ordering"
+)]
 fn sync_ff_paths_in_worktree(
     ws_path: &Path,
     ws_name: &str,
+    expected_head: maw_git::GitOid,
     target_oid: &GitOid,
     ff_paths: &std::collections::BTreeSet<PathBuf>,
     dirty_paths: &std::collections::BTreeSet<PathBuf>,
-) -> FfWorktreeSync {
+) -> std::result::Result<FfWorktreeSync, String> {
     let mut report = FfWorktreeSync::default();
     if !ws_path.exists() {
-        return report;
+        return Err("the workspace directory is missing".to_owned());
+    }
+    if let Err(e) = maw::fp!("FP_FF_ABSORB_BEFORE_SIBLING_MATERIALIZE") {
+        tracing::warn!(workspace = %ws_name, error = %e, "FF absorb: materialize failed");
+        return Err(format!("materialize failed ({e}); nothing was written"));
     }
     let oid = target_oid.as_str();
 
@@ -4435,7 +4678,9 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "failed to open workspace repo during FF absorb"
             );
-            return report;
+            return Err(format!(
+                "cannot open the workspace repo ({e}); nothing was written"
+            ));
         }
     };
 
@@ -4449,7 +4694,7 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "invalid target OID during FF absorb"
             );
-            return report;
+            return Err(format!("invalid absorb target ({e}); nothing was written"));
         }
     };
     let target_attrs = ws_repo.load_gitattributes_at_commit(oid);
@@ -4523,13 +4768,24 @@ fn sync_ff_paths_in_worktree(
     // bn-rah2: the guarded native `set_head` primitive (atomic write +
     // reflog) replaces the old raw `std::fs::write(HEAD)` — no production
     // HEAD movement outside guarded native primitives (bn-8flz).
-    if let Err(e) = ws_repo.set_head_detached(target_git) {
+    // bn-302v: a compare-and-swap from the classified HEAD under git's own
+    // HEAD.lock, so a commit that landed after the re-check is never moved
+    // off. On failure the caller leaves the epoch ref at the old base.
+    let cas = maw::fp!("FP_FF_ABSORB_BEFORE_SIBLING_SETHEAD").and_then(|()| {
+        ws_repo
+            .set_head_detached_cas(expected_head, target_git)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    });
+    if let Err(e) = cas {
         tracing::warn!(
             workspace = %ws_name,
             error = %e,
-            "failed to detach worktree HEAD during FF absorb"
+            "FF absorb: HEAD compare-and-swap failed; sibling left stale"
         );
-        return report;
+        return Err(format!(
+            "HEAD was not moved ({e}); absorbed paths already written into the \
+             worktree remain as uncommitted changes"
+        ));
     }
 
     // Re-open after HEAD rewrite so unstage_all() sees the new HEAD.
@@ -4541,11 +4797,19 @@ fn sync_ff_paths_in_worktree(
                 error = %e,
                 "failed to re-open workspace repo after FF HEAD rewrite"
             );
-            return report;
+            report.index_not_reset = true;
+            return Ok(report);
         }
     };
-    let _ = ws_repo_post.unstage_all();
-    report
+    if let Err(e) = ws_repo_post.unstage_all() {
+        tracing::warn!(
+            workspace = %ws_name,
+            error = %e,
+            "FF absorb: failed to reset the index to the new HEAD"
+        );
+        report.index_not_reset = true;
+    }
+    Ok(report)
 }
 
 /// bn-mq3b: the uncommitted paths in `ws_path` that ALSO changed between the

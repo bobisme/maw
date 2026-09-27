@@ -204,14 +204,18 @@ pub enum SiblingDecision {
     /// bn-mq3b: dirty with uncommitted edits that are stale against the
     /// absorb target. Leave it exactly where it is.
     SkipStaleDirty,
+    /// bn-302v: `HEAD` could not be read, so whether committed work sits
+    /// ahead of the base epoch is unknown. Fails closed: leave the sibling
+    /// exactly where it is (clean or dirty), never fast-forward it.
+    SkipUnreadableHead,
 }
 
 /// Whether the classifier consults the stale-dirty check for this probe.
 ///
-/// True only for a dirty sibling that is not committed-ahead.
+/// True only for a dirty sibling whose `HEAD` is at its base epoch.
 #[must_use]
 pub const fn needs_stale_dirty_check(probe: SiblingProbe) -> bool {
-    probe.dirty && !matches!(probe.head, SiblingHead::Ahead)
+    probe.dirty && matches!(probe.head, SiblingHead::AtBase)
 }
 
 /// Classify one non-target sibling for the FF-absorb.
@@ -230,13 +234,18 @@ pub const fn needs_stale_dirty_check(probe: SiblingProbe) -> bool {
 /// Rules:
 /// - `HEAD` ahead + dirty: [`SiblingDecision::BlockAbsorb`].
 /// - `HEAD` ahead + clean: [`SiblingDecision::Replay`].
-/// - `HEAD` at base or unreadable + dirty + stale overlap:
+/// - `HEAD` unreadable (clean or dirty):
+///   [`SiblingDecision::SkipUnreadableHead`] (bn-302v: fails closed; it
+///   used to fast-forward a clean sibling, which could detach a `HEAD` that
+///   a transient read failure hid, orphaning its commits).
+/// - `HEAD` at base + dirty + stale overlap:
 ///   [`SiblingDecision::SkipStaleDirty`].
-/// - otherwise: [`SiblingDecision::FastForward`].
+/// - otherwise (`HEAD` at base): [`SiblingDecision::FastForward`].
 ///
-/// Note: a CLEAN sibling with an unreadable `HEAD` is fast-forwarded (the
-/// historical behaviour). A dirty one with an unreadable `HEAD` is not,
-/// because [`stale_dirty_filter`] fails closed.
+/// The same function is the bn-302v re-check: immediately before an FF
+/// sibling is written, the caller re-probes it under the sibling lock
+/// (with the classification-time `HEAD` as the base) and proceeds only on
+/// [`SiblingDecision::FastForward`].
 ///
 /// # Errors
 /// Returns the error of `probe`, unchanged.
@@ -257,7 +266,8 @@ pub fn classify_sibling<E>(
                 SiblingDecision::Replay
             }
         }
-        SiblingHead::AtBase | SiblingHead::Unreadable => {
+        SiblingHead::Unreadable => SiblingDecision::SkipUnreadableHead,
+        SiblingHead::AtBase => {
             if needs_stale_dirty_check(probe) && stale_dirty_nonempty() {
                 SiblingDecision::SkipStaleDirty
             } else {
@@ -425,8 +435,9 @@ mod tests {
         assert_eq!(c(H::AtBase, false, true), D::FastForward);
         assert_eq!(c(H::AtBase, true, false), D::FastForward);
         assert_eq!(c(H::AtBase, true, true), D::SkipStaleDirty);
-        assert_eq!(c(H::Unreadable, true, true), D::SkipStaleDirty);
-        assert_eq!(c(H::Unreadable, false, false), D::FastForward);
+        assert_eq!(c(H::Unreadable, true, true), D::SkipUnreadableHead);
+        assert_eq!(c(H::Unreadable, true, false), D::SkipUnreadableHead);
+        assert_eq!(c(H::Unreadable, false, false), D::SkipUnreadableHead);
         assert_eq!(
             classify_sibling::<()>(true, || panic!("probe"), || panic!("stale")).unwrap(),
             D::AlreadySynced

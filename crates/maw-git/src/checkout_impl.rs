@@ -635,6 +635,100 @@ pub fn set_head(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Compare-and-swap detached HEAD move (bn-302v).
+///
+/// Moves HEAD to `new` only if it currently resolves to `expected`, using
+/// git's own lock protocol: `HEAD.lock` is created exclusively, HEAD is
+/// re-read while the lock is held, the new value is written into the lock
+/// file and the lock is renamed over HEAD. A concurrent `git commit` in the
+/// same worktree also takes `HEAD.lock` to move a detached HEAD, so it either
+/// lands before this call (the re-read sees it and the CAS fails) or fails
+/// itself with "Unable to create HEAD.lock" (the agent sees an error). It can
+/// never be silently moved off.
+///
+/// A symbolic HEAD (`ref: refs/heads/x`) is compared by its resolved OID; the
+/// branch ref keeps its commits reachable, so detaching it cannot orphan work.
+///
+/// # Errors
+/// * [`GitError::RefConflict`] when `HEAD.lock` already exists (another git
+///   operation is in progress; the lock is NOT removed) or HEAD does not
+///   resolve to `expected`. HEAD is unchanged.
+/// * I/O errors writing the lock or renaming it. HEAD is unchanged.
+pub fn set_head_detached_cas(
+    repo: &GixRepo,
+    expected: GitOid,
+    new: GitOid,
+) -> Result<(), GitError> {
+    use crate::repo::GitRepo as _;
+    use std::io::Write as _;
+
+    let git_dir = repo.repo.git_dir();
+    let head_path = git_dir.join("HEAD");
+    let lock_path = git_dir.join("HEAD.lock");
+
+    let mut lock = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(GitError::RefConflict {
+                ref_name: "HEAD".to_owned(),
+                message: format!(
+                    "{} exists: another git operation is in progress",
+                    lock_path.display()
+                ),
+            });
+        }
+        Err(e) => return Err(GitError::IoError(e)),
+    };
+    // From here on the lock is ours: remove it on every non-success path.
+    let release = |err: GitError| -> GitError {
+        let _ = std::fs::remove_file(&lock_path);
+        err
+    };
+
+    let raw = match std::fs::read_to_string(&head_path) {
+        Ok(r) => r,
+        Err(e) => return Err(release(GitError::IoError(e))),
+    };
+    let raw = raw.trim();
+    let current: Option<GitOid> = if raw.starts_with("ref:") {
+        repo.rev_parse_opt("HEAD").ok().flatten()
+    } else {
+        raw.parse().ok()
+    };
+    if current != Some(expected) {
+        return Err(release(GitError::RefConflict {
+            ref_name: "HEAD".to_owned(),
+            message: format!(
+                "expected {expected}, found {}",
+                current.map_or_else(|| format!("unreadable ({raw})"), |c| c.to_string())
+            ),
+        }));
+    }
+
+    if let Err(e) = lock
+        .write_all(format!("{new}\n").as_bytes())
+        .and_then(|()| lock.sync_all())
+    {
+        return Err(release(GitError::IoError(e)));
+    }
+    drop(lock);
+    if let Err(e) = std::fs::rename(&lock_path, &head_path) {
+        return Err(release(GitError::BackendError {
+            message: format!(
+                "failed to rename {} into place at {}: {e}",
+                lock_path.display(),
+                head_path.display()
+            ),
+        }));
+    }
+    append_head_reflog(git_dir, Some(&expected.to_string()), &new.to_string());
+    Ok(())
+}
+
 /// Append a reflog entry for the worktree HEAD file.
 ///
 /// Format (git files-backend): `<old> <new> <ident> <ts> <tz>\t<message>\n`
@@ -955,6 +1049,100 @@ mod tests {
         }
         let content = fs::read_to_string(log_path).unwrap();
         !content.trim().is_empty()
+    }
+
+    // -----------------------------------------------------------------------
+    // set_head_detached_cas tests (bn-302v)
+    // -----------------------------------------------------------------------
+
+    fn admin_dir(wt: &Path) -> std::path::PathBuf {
+        let content = fs::read_to_string(wt.join(".git")).unwrap();
+        std::path::PathBuf::from(content.strip_prefix("gitdir: ").unwrap().trim())
+    }
+
+    #[test]
+    fn set_head_detached_cas_moves_head_when_expected_matches() {
+        let (_dir, _root, wt, c1, c2) = setup_repo_with_linked_worktree();
+        let repo = GixRepo::open(&wt).unwrap();
+        let (o1, o2): (GitOid, GitOid) = (c1.parse().unwrap(), c2.parse().unwrap());
+        repo.set_head_detached_cas(o1, o2).unwrap();
+        assert_eq!(read_head(&wt), c2);
+        assert!(
+            !admin_dir(&wt).join("HEAD.lock").exists(),
+            "lock must be released"
+        );
+        assert!(reflog_has_entry(&wt));
+    }
+
+    #[test]
+    fn set_head_detached_cas_refuses_when_head_moved() {
+        let (_dir, _root, wt, c1, c2) = setup_repo_with_linked_worktree();
+        let repo = GixRepo::open(&wt).unwrap();
+        let (o1, o2): (GitOid, GitOid) = (c1.parse().unwrap(), c2.parse().unwrap());
+        // HEAD is at c1; claim we expected c2.
+        let err = repo.set_head_detached_cas(o2, o1).unwrap_err();
+        assert!(
+            matches!(err, crate::error::GitError::RefConflict { .. }),
+            "{err}"
+        );
+        assert_eq!(read_head(&wt), c1, "HEAD must be unchanged");
+        assert!(
+            !admin_dir(&wt).join("HEAD.lock").exists(),
+            "lock must be released"
+        );
+    }
+
+    #[test]
+    fn set_head_detached_cas_refuses_and_keeps_foreign_head_lock() {
+        let (_dir, _root, wt, c1, c2) = setup_repo_with_linked_worktree();
+        let repo = GixRepo::open(&wt).unwrap();
+        let (o1, o2): (GitOid, GitOid) = (c1.parse().unwrap(), c2.parse().unwrap());
+        let lock = admin_dir(&wt).join("HEAD.lock");
+        fs::write(&lock, "held by a concurrent git process\n").unwrap();
+        let err = repo.set_head_detached_cas(o1, o2).unwrap_err();
+        assert!(
+            matches!(err, crate::error::GitError::RefConflict { .. }),
+            "{err}"
+        );
+        assert_eq!(read_head(&wt), c1, "HEAD must be unchanged");
+        assert!(
+            lock.exists(),
+            "a lock we did not create must never be removed"
+        );
+    }
+
+    /// While the CAS holds HEAD.lock, a real `git commit` in the worktree
+    /// cannot move HEAD: git refuses on the same lock file.
+    #[test]
+    fn git_commit_refuses_while_head_lock_is_held() {
+        let (_dir, _root, wt, c1, _c2) = setup_repo_with_linked_worktree();
+        let lock = admin_dir(&wt).join("HEAD.lock");
+        fs::write(&lock, "").unwrap();
+        fs::write(wt.join("new.txt"), "x\n").unwrap();
+        let add = Command::new("git")
+            .args(["add", "new.txt"])
+            .current_dir(&wt)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "race",
+            ])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "git commit must refuse while HEAD.lock is held"
+        );
+        assert_eq!(read_head(&wt), c1);
     }
 
     // -----------------------------------------------------------------------
