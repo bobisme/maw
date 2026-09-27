@@ -8,11 +8,14 @@
 //!
 //! ```text
 //! Prepare → Build → Validate → Commit → Cleanup → Complete
-//!                                  │
-//!                                  └→ Aborted
+//!    │        │         │         │
+//!    └────────┴─────────┴─────────┴→ Aborted
 //! ```
 //!
-//! Any phase can also transition to `Aborted` on unrecoverable error.
+//! Any phase up to and including `Commit` can transition to `Aborted` on
+//! unrecoverable error. `Cleanup` cannot: it is entered only after the ref
+//! CAS succeeded, so aborting there would label committed work as aborted
+//! (bn-s8ti).
 
 #![allow(clippy::missing_errors_doc)]
 
@@ -34,7 +37,7 @@ use crate::model::types::{EpochId, GitOid, WorkspaceId};
 ///
 /// Phases progress strictly forward: `Prepare → Build → Validate → Commit →
 /// Cleanup → Complete`. The `Aborted` state can be entered from any phase
-/// except `Complete`.
+/// up to and including `Commit` (never from `Cleanup`, which is post-CAS).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergePhase {
@@ -63,7 +66,8 @@ impl MergePhase {
 
     /// Returns the set of valid next phases from this phase.
     ///
-    /// `Aborted` can be reached from any non-terminal phase.
+    /// `Aborted` can be reached from every pre-CAS phase (`Prepare` through
+    /// `Commit`), never from `Cleanup` or a terminal phase.
     #[must_use]
     pub const fn valid_transitions(&self) -> &'static [Self] {
         match self {
@@ -84,7 +88,11 @@ impl MergePhase {
             // refs have moved, `abort_merge_state` refuses to clear the
             // state (Prime-Invariant gate) and the merge converges forward.
             Self::Commit => &[Self::Cleanup, Self::Aborted],
-            Self::Cleanup => &[Self::Complete, Self::Aborted],
+            // No `Cleanup -> Aborted` (bn-s8ti): Cleanup is entered only after
+            // the ref CAS succeeded, so the merge is committed and must
+            // converge forward (crash recovery maps Cleanup to RetryCleanup).
+            // Labelling it `Aborted` would misreport committed work.
+            Self::Cleanup => &[Self::Complete],
             Self::Complete | Self::Aborted => &[],
         }
     }
@@ -331,10 +339,11 @@ impl MergeStateFile {
     /// Abort the merge with a reason.
     ///
     /// # Errors
-    /// Returns [`MergeStateError::InvalidTransition`] if the merge is
-    /// already in a terminal state.
+    /// Returns [`MergeStateError::InvalidTransition`] if `Aborted` is not a
+    /// legal edge from the current phase: a terminal phase, or `Cleanup`
+    /// (post-CAS — the merge is committed, bn-s8ti).
     pub fn abort(&mut self, reason: impl Into<String>, now: u64) -> Result<(), MergeStateError> {
-        if self.phase.is_terminal() {
+        if !self.phase.can_transition_to(&MergePhase::Aborted) {
             return Err(MergeStateError::InvalidTransition {
                 from: self.phase.clone(),
                 to: MergePhase::Aborted,
@@ -950,12 +959,32 @@ mod tests {
         assert!(MergePhase::Commit.can_transition_to(&MergePhase::Cleanup));
         assert!(MergePhase::Cleanup.can_transition_to(&MergePhase::Complete));
 
-        // Abort from any non-terminal
+        // Abort from any pre-CAS phase
         assert!(MergePhase::Prepare.can_transition_to(&MergePhase::Aborted));
         assert!(MergePhase::Build.can_transition_to(&MergePhase::Aborted));
         assert!(MergePhase::Validate.can_transition_to(&MergePhase::Aborted));
         assert!(MergePhase::Commit.can_transition_to(&MergePhase::Aborted));
-        assert!(MergePhase::Cleanup.can_transition_to(&MergePhase::Aborted));
+    }
+
+    // bn-s8ti: Cleanup is post-CAS; aborting it would mislabel committed work.
+    #[test]
+    fn cleanup_cannot_abort() {
+        assert!(!MergePhase::Cleanup.can_transition_to(&MergePhase::Aborted));
+        let mut s = MergeStateFile::new(test_sources(), test_epoch(), 1);
+        s.advance(MergePhase::Build, 2).expect("build");
+        s.advance(MergePhase::Validate, 3).expect("validate");
+        s.advance(MergePhase::Commit, 4).expect("commit");
+        s.advance(MergePhase::Cleanup, 5).expect("cleanup");
+        assert!(matches!(
+            s.abort("late", 6),
+            Err(MergeStateError::InvalidTransition {
+                from: MergePhase::Cleanup,
+                to: MergePhase::Aborted
+            })
+        ));
+        assert_eq!(s.phase, MergePhase::Cleanup);
+        assert_eq!(s.abort_reason, None);
+        assert_eq!(s.updated_at, 5);
     }
 
     #[test]
@@ -2036,7 +2065,7 @@ mod kani_proofs {
     }
 
     /// Over all 7x7 phase pairs: terminal phases have no successors, every
-    /// non-terminal phase may abort, every edge moves strictly forward in
+    /// pre-CAS phase (rank <= Commit) may abort, every edge moves strictly forward in
     /// the lifecycle (so the table is acyclic, no self-loops), and the only
     /// non-abort edge from a live phase is to the next lifecycle phase.
     #[kani::proof]
@@ -2047,7 +2076,7 @@ mod kani_proofs {
         if p.is_terminal() {
             assert!(p.valid_transitions().is_empty());
             assert!(!p.can_transition_to(&q));
-        } else {
+        } else if rank(&p) <= rank(&MergePhase::Commit) {
             assert!(p.can_transition_to(&MergePhase::Aborted));
         }
         if p.can_transition_to(&q) {
@@ -2056,9 +2085,10 @@ mod kani_proofs {
         }
     }
 
-    /// Every non-terminal phase reaches both `Complete` and `Aborted`
-    /// through the production table (reachability by fixpoint over all 7
-    /// phases, using `can_transition_to` for every edge).
+    /// Every non-terminal phase reaches `Complete`, and reaches `Aborted`
+    /// exactly when it is pre-CAS (rank <= Commit), through the production
+    /// table (reachability by fixpoint over all 7 phases, using
+    /// `can_transition_to` for every edge).
     #[kani::proof]
     #[kani::unwind(8)]
     fn merge_phase_every_live_phase_reaches_complete_and_aborted() {
@@ -2087,7 +2117,33 @@ mod kani_proofs {
             round += 1;
         }
         assert!(reach[rank(&MergePhase::Complete)]);
-        assert!(reach[rank(&MergePhase::Aborted)]);
+        assert_eq!(
+            reach[rank(&MergePhase::Aborted)],
+            rank(&start) <= rank(&MergePhase::Commit)
+        );
+    }
+
+    /// bn-s8ti: no transition into `Aborted` from any phase after COMMIT
+    /// (the ref CAS happens inside COMMIT; `Cleanup` is entered only once it
+    /// succeeded). Checked on both the table and `MergeStateFile::abort`,
+    /// which must refuse and leave the state untouched.
+    #[kani::proof]
+    #[kani::unwind(42)]
+    fn no_transition_to_aborted_after_commit_phase_all_phases() {
+        let Ok(epoch) = EpochId::new("0000000000000000000000000000000000000000") else {
+            unreachable!("valid epoch")
+        };
+        let p = any_phase();
+        if p.can_transition_to(&MergePhase::Aborted) {
+            assert!(rank(&p) <= rank(&MergePhase::Commit));
+        }
+        if rank(&p) > rank(&MergePhase::Commit) {
+            let mut st = MergeStateFile::new(Vec::new(), epoch, 0);
+            st.phase = p.clone();
+            assert!(st.abort("kani", 1).is_err());
+            assert!(st.phase == p);
+            assert!(st.abort_reason.is_none());
+        }
     }
 
     /// Crash-recovery dispatch agrees with the transition table:

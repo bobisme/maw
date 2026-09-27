@@ -935,6 +935,31 @@ mod tests {
         assert!(result.stderr.contains("leading bytes omitted"));
     }
 
+    /// Poll `/proc/<pid>/stat` until the process is gone or a zombie, up to
+    /// a 2s deadline, returning the last observed state (`None` = gone).
+    ///
+    /// Production (`kill_command_tree`) guarantees SIGKILL is *sent* to the
+    /// whole process group before validation returns; kill(2) is
+    /// asynchronous and the orphaned descendant is reaped by init/subreaper,
+    /// so on a loaded machine it can still show 'R' for a moment while it
+    /// finishes exiting (bn-2xqt). The deadline is far below the
+    /// descendant's own `sleep 60`, so an unkilled descendant still fails.
+    #[cfg(target_os = "linux")]
+    fn wait_for_descendant_death(pid: &str) -> Option<char> {
+        let stat_path = Path::new("/proc").join(pid).join("stat");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let state = std::fs::read_to_string(&stat_path)
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
+                .and_then(|rest| rest.chars().next());
+            if state.is_none_or(|state| state == 'Z') || Instant::now() >= deadline {
+                return state;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn validate_timeout_preserves_partial_output_and_kills_descendants() {
@@ -959,11 +984,7 @@ mod tests {
                 .expect("read descendant pid")
                 .trim()
                 .to_owned();
-            let stat_path = Path::new("/proc").join(pid).join("stat");
-            let state = std::fs::read_to_string(stat_path)
-                .ok()
-                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
-                .and_then(|rest| rest.chars().next());
+            let state = wait_for_descendant_death(&pid);
             assert!(
                 state.is_none_or(|state| state == 'Z'),
                 "validation descendant remained live after timeout: {state:?}"
@@ -995,11 +1016,7 @@ mod tests {
                 .expect("read descendant pid")
                 .trim()
                 .to_owned();
-            let stat_path = Path::new("/proc").join(pid).join("stat");
-            let state = std::fs::read_to_string(stat_path)
-                .ok()
-                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
-                .and_then(|rest| rest.chars().next());
+            let state = wait_for_descendant_death(&pid);
             assert!(
                 state.is_none_or(|state| state == 'Z'),
                 "validation descendant remained live after parent exit: {state:?}"

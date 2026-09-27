@@ -169,11 +169,11 @@ fn concurrent_different_name_creates_all_succeed_in_parallel() {
     // dispatching different workspace names to different agent *processes*
     // at (nearly) the same time. We spawn all five `maw ws create`
     // subprocesses up-front and then wait for them, so their critical
-    // sections genuinely overlap, without an in-process `Barrier` that
-    // would pin every `git worktree add` into the exact same nanosecond
-    // (that artificial timing collides on gix's *shared bare-repo index
-    // lock* — a pre-existing concern orthogonal to the per-name create
-    // lock, and not how real concurrent agents are scheduled).
+    // sections genuinely overlap. (An earlier note here blamed a "shared
+    // bare-repo index lock" for barrier-synchronized failures; the real
+    // cause was a concurrent create's worktree prune deleting another
+    // create's half-built admin dir — bn-1u93, see
+    // `concurrent_distinct_creates_stress_with_barrier` below.)
     let repo = TestRepo::new();
     let names = ["a", "b", "c", "d", "e"];
 
@@ -270,6 +270,81 @@ fn second_create_of_existing_name_fails_and_preserves_state() {
     assert!(
         doctor.status.success(),
         "maw doctor failed after a rejected duplicate create.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr),
+    );
+}
+
+/// bn-1u93 stress: many distinct-name creates released through a `Barrier`
+/// so their critical sections genuinely overlap. Every `maw ws create` runs
+/// a worktree prune before adding its own worktree; before the fix a prune
+/// could land while another create had written `.git/worktrees/<n>/gitdir`
+/// but not yet the worktree dir, delete that admin dir as "stale", and the
+/// victim died with `failed to acquire git index lock for worktree '<n>':
+/// No such file or directory`.
+///
+/// Scale with `MAW_CREATE_STRESS_N` / `MAW_CREATE_STRESS_ITERS` (defaults
+/// 16 x 20, the bone's acceptance bound).
+#[test]
+fn concurrent_distinct_creates_stress_with_barrier() {
+    let n: usize = std::env::var("MAW_CREATE_STRESS_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let iters: usize = std::env::var("MAW_CREATE_STRESS_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
+    let repo = TestRepo::new();
+    for iter in 0..iters {
+        let barrier = Arc::new(Barrier::new(n));
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let root = repo.root().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                let name = format!("s{iter}-{i}");
+                thread::spawn(move || {
+                    barrier.wait();
+                    let out = Command::new(maw_bin())
+                        .args(["ws", "create", &name, "--from", "main"])
+                        .current_dir(&root)
+                        .output()
+                        .expect("failed to execute maw");
+                    (
+                        name,
+                        out.status.success(),
+                        String::from_utf8_lossy(&out.stderr).to_string(),
+                    )
+                })
+            })
+            .collect();
+
+        let failures: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("create thread panicked"))
+            .filter(|(_, ok, _)| !ok)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "iteration {iter}: {} of {n} concurrent distinct-name creates failed: {failures:#?}",
+            failures.len(),
+        );
+
+        let workspaces = repo.list_workspaces();
+        for i in 0..n {
+            let name = format!("s{iter}-{i}");
+            assert!(
+                workspaces.iter().any(|w| *w == name) && repo.workspace_exists(&name),
+                "iteration {iter}: workspace '{name}' missing or unhealthy: {workspaces:?}",
+            );
+        }
+    }
+
+    let doctor = repo.maw_raw_exact(&["doctor"]);
+    assert!(
+        doctor.status.success(),
+        "maw doctor failed after create stress.\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&doctor.stdout),
         String::from_utf8_lossy(&doctor.stderr),
     );

@@ -13,6 +13,28 @@ use crate::error::GitError;
 use crate::gix_repo::GixRepo;
 use crate::types::{GitOid, WorktreeInfo};
 
+/// Name of git's per-worktree lock marker (`<admin>/locked`). While it
+/// exists, `git worktree prune` (and maw's [`worktree_prune`]) must leave the
+/// admin dir alone. `git worktree add` writes it with the reason
+/// [`INITIALIZING_REASON`] for the duration of the add; maw does the same
+/// (bn-1u93).
+const LOCKED_FILE: &str = "locked";
+
+/// Lock reason git itself uses while a worktree is being created.
+const INITIALIZING_REASON: &str = "initializing\n";
+
+/// Removes the `<admin>/locked` "initializing" marker when `worktree_add`
+/// returns, successfully or not (bn-1u93).
+struct InitializingLock {
+    path: PathBuf,
+}
+
+impl Drop for InitializingLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Maximum number of attempts to acquire the git index lock (`index.lock`)
 /// before giving up.
 ///
@@ -69,10 +91,22 @@ fn write_index_with_retry(
             Err(gix::index::file::write::Error::AcquireLock(gix::lock::acquire::Error::Io(
                 io_error,
             ))) => {
+                // bn-1u93: if the admin dir itself is gone, say so — that is
+                // a concurrent prune/remove, not a lock problem.
+                let admin_gone = index_file
+                    .path()
+                    .parent()
+                    .is_some_and(|admin| !admin.exists());
+                let hint = if admin_gone {
+                    " (the worktree admin dir was removed while the create was in progress, \
+                     e.g. by a concurrent `git worktree prune`)"
+                } else {
+                    ""
+                };
                 return Err(GitError::BackendError {
                     message: format!(
                         "failed to acquire git index lock for worktree '{workspace_name}': \
-                         {io_error}"
+                         {io_error}{hint}"
                     ),
                 });
             }
@@ -163,13 +197,28 @@ pub fn worktree_add(
     let git_dir = repo.repo.git_dir().to_path_buf();
     let admin_dir = git_dir.join("worktrees").join(name);
 
-    // 1. Create admin directory
+    // 1. Create admin directory and immediately mark it `locked` with git's
+    //    own "initializing" reason (bn-1u93). Every other `maw ws create` /
+    //    `destroy` runs a worktree prune; without the marker a prune landing
+    //    mid-create treated this half-built admin dir as stale and deleted
+    //    it, and the create then died with ENOENT on `<admin>/index.lock`.
+    //    Both maw's `worktree_prune` and `git worktree prune` skip locked
+    //    admin dirs. The guard removes the marker on every exit path so a
+    //    failed create stays prunable exactly as before.
     std::fs::create_dir_all(&admin_dir).map_err(|e| GitError::BackendError {
         message: format!(
             "failed to create worktree admin dir {}: {e}",
             admin_dir.display()
         ),
     })?;
+    std::fs::write(admin_dir.join(LOCKED_FILE), INITIALIZING_REASON).map_err(|e| {
+        GitError::BackendError {
+            message: format!("failed to write worktree initializing lock: {e}"),
+        }
+    })?;
+    let _initializing = InitializingLock {
+        path: admin_dir.join(LOCKED_FILE),
+    };
 
     // 2. Write HEAD with target OID (detached HEAD)
     std::fs::write(admin_dir.join("HEAD"), format!("{target}\n")).map_err(|e| {
@@ -183,36 +232,42 @@ pub fn worktree_add(
         message: format!("failed to write worktree commondir: {e}"),
     })?;
 
-    // 4. Write gitdir (absolute path to worktree's .git file)
+    // 4. Create the worktree directory and its `.git` file BEFORE writing
+    //    `<admin>/gitdir` (bn-1u93, defense in depth for pruners that do not
+    //    honor the `locked` marker, e.g. older maw binaries): once `gitdir`
+    //    exists it always names a `.git` file that exists, so no prune can
+    //    classify the admin dir as stale.
     let wt_gitfile = path.join(".git");
-    let abs_path =
-        std::fs::canonicalize(path.parent().unwrap_or(path)).unwrap_or_else(|_| path.to_path_buf());
-    let abs_gitfile = if path.is_absolute() {
-        wt_gitfile.clone()
-    } else {
-        abs_path
-            .join(path.file_name().unwrap_or_default())
-            .join(".git")
-    };
-    std::fs::write(
-        admin_dir.join("gitdir"),
-        format!("{}\n", abs_gitfile.display()),
-    )
-    .map_err(|e| GitError::BackendError {
-        message: format!("failed to write worktree gitdir: {e}"),
-    })?;
-
-    // 5. Create the worktree directory
     std::fs::create_dir_all(path).map_err(|e| GitError::BackendError {
         message: format!("failed to create worktree dir {}: {e}", path.display()),
     })?;
 
-    // 6. Write .git file in worktree (not a directory, a file pointing back)
+    // 5. Write .git file in worktree (not a directory, a file pointing back)
     std::fs::write(&wt_gitfile, format!("gitdir: {}\n", admin_dir.display())).map_err(|e| {
         GitError::BackendError {
             message: format!("failed to write worktree .git file: {e}"),
         }
     })?;
+
+    // 6. Write gitdir (absolute path to worktree's .git file)
+    let abs_path =
+        std::fs::canonicalize(path.parent().unwrap_or(path)).unwrap_or_else(|_| path.to_path_buf());
+    let abs_gitfile = if path.is_absolute() {
+        wt_gitfile
+    } else {
+        abs_path
+            .join(path.file_name().unwrap_or_default())
+            .join(".git")
+    };
+    //    Written via temp file + rename: a plain `fs::write` truncates first,
+    //    and a concurrent prune reading the empty/partial path would judge
+    //    the admin dir stale (bn-1u93, observed in the stress test).
+    let gitdir_tmp = admin_dir.join("gitdir.tmp");
+    std::fs::write(&gitdir_tmp, format!("{}\n", abs_gitfile.display()))
+        .and_then(|()| std::fs::rename(&gitdir_tmp, admin_dir.join("gitdir")))
+        .map_err(|e| GitError::BackendError {
+            message: format!("failed to write worktree gitdir: {e}"),
+        })?;
 
     // 7. Resolve target OID to a commit, get its tree
     let gix_oid = gix::ObjectId::from_bytes_or_panic(target.as_bytes());
@@ -477,6 +532,9 @@ fn canonicalize_existing(path: &Path) -> Result<PathBuf, GitError> {
 
 /// Prune worktree admin directories whose linked worktree no longer exists.
 ///
+/// Admin dirs carrying a `locked` marker (user `git worktree lock`, or a
+/// `worktree_add` still in progress) are skipped, mirroring git.
+///
 /// Scans `<common-git-dir>/worktrees/<name>/` and removes each admin
 /// directory whose `gitdir` file points at a `.git` link that has been
 /// deleted out of band (e.g., a stale worktree directory was removed
@@ -508,13 +566,26 @@ pub fn worktree_prune(repo: &GixRepo) -> Result<(), GitError> {
         if !admin_dir.is_dir() {
             continue;
         }
+        // A locked worktree is never pruned — the same rule as
+        // `git worktree prune`. `worktree_add` holds this marker while it
+        // builds the admin dir, so a prune racing a concurrent create cannot
+        // delete the half-built admin dir out from under it (bn-1u93).
+        if admin_dir.join(LOCKED_FILE).exists() {
+            continue;
+        }
         let gitdir_file = admin_dir.join("gitdir");
         // No gitdir file means a partially-constructed or non-conforming
         // admin dir — leave it alone.
         let Ok(content) = std::fs::read_to_string(&gitdir_file) else {
             continue;
         };
-        let gitdir_path = PathBuf::from(content.trim());
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            // Empty gitdir: being written by some other tool, or corrupt.
+            // Never treat "no path" as "path is missing".
+            continue;
+        }
+        let gitdir_path = PathBuf::from(trimmed);
         // The stored path is <worktree>/.git (either a file or a directory).
         // If that path does not exist (or its parent worktree dir is gone),
         // the admin dir is stale and should be removed.
@@ -788,6 +859,120 @@ mod tests {
         assert!(
             !message.contains("another git or maw operation"),
             "a permanent I/O error must not be misreported as lock contention: {message}"
+        );
+    }
+
+    // --- bn-1u93: create vs. concurrent prune --------------------------
+
+    /// A concurrent `worktree_prune` (run by every other `maw ws create` /
+    /// `destroy`) must never delete the admin dir of a create that is still
+    /// in progress. Before bn-1u93, `worktree_add` wrote `<admin>/gitdir`
+    /// before creating the worktree directory, so a prune landing in that
+    /// window saw a gitdir pointing at a non-existent worktree, deleted the
+    /// admin dir, and the create then died with ENOENT on
+    /// `.git/worktrees/<name>/index.lock`.
+    #[test]
+    fn worktree_add_survives_concurrent_prune_stress() {
+        let (dir, repo, head) = setup_repo();
+        let git_dir = repo.repo.git_dir().to_path_buf();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pruner = {
+            let stop = std::sync::Arc::clone(&stop);
+            let git_dir = git_dir.clone();
+            std::thread::spawn(move || {
+                let repo = GixRepo::open(&git_dir).expect("open repo for pruner");
+                let mut rounds = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = worktree_prune(&repo);
+                    rounds += 1;
+                }
+                rounds
+            })
+        };
+
+        let mut failures = Vec::new();
+        for i in 0..60 {
+            let name = format!("stress-{i}");
+            let wt_path = dir.path().join("ws").join(&name);
+            if let Err(e) = worktree_add(&repo, &name, head, &wt_path) {
+                failures.push(format!("{name}: {e}"));
+            } else if !git_dir.join("worktrees").join(&name).join("index").exists() {
+                failures.push(format!("{name}: admin dir pruned after successful add"));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let rounds = pruner.join().expect("pruner thread must not panic");
+        assert!(rounds > 0, "pruner never ran; the stress test is vacuous");
+        assert!(
+            failures.is_empty(),
+            "worktree_add raced a concurrent prune ({} of 60 failed, {rounds} prune rounds): {:#?}",
+            failures.len(),
+            failures
+        );
+    }
+
+    /// Deterministic slice of the race: an admin dir mid-create (its
+    /// `gitdir` names a worktree that does not exist yet) carries git's
+    /// `locked` marker, and both maw's prune and real `git worktree prune`
+    /// must leave it alone.
+    #[test]
+    fn prune_spares_locked_in_progress_admin_dir() {
+        let (dir, repo, _head) = setup_repo();
+        let admin_dir = repo.repo.git_dir().join("worktrees").join("in-progress");
+        std::fs::create_dir_all(&admin_dir).expect("create admin dir");
+        std::fs::write(admin_dir.join(LOCKED_FILE), INITIALIZING_REASON).expect("write locked");
+        std::fs::write(
+            admin_dir.join("gitdir"),
+            format!("{}\n", dir.path().join("ws/in-progress/.git").display()),
+        )
+        .expect("write gitdir");
+
+        worktree_prune(&repo).expect("prune");
+        assert!(
+            admin_dir.join("gitdir").exists(),
+            "maw prune must not delete a locked (in-progress) admin dir"
+        );
+
+        let out = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(repo.repo.git_dir())
+            .output()
+            .expect("run git worktree prune");
+        assert!(out.status.success(), "git worktree prune failed: {out:?}");
+        assert!(
+            admin_dir.join("gitdir").exists(),
+            "git worktree prune must not delete a locked (in-progress) admin dir"
+        );
+
+        // Once the marker is gone the same dir is stale and pruned as before.
+        std::fs::remove_file(admin_dir.join(LOCKED_FILE)).expect("unlock");
+        worktree_prune(&repo).expect("prune");
+        assert!(
+            !admin_dir.exists(),
+            "unlocked stale admin dir must be pruned"
+        );
+    }
+
+    #[test]
+    fn worktree_add_removes_initializing_lock_on_success_and_failure() {
+        let (dir, repo, head) = setup_repo();
+        let wt_path = dir.path().join("ws").join("ok");
+        worktree_add(&repo, "ok", head, &wt_path).expect("add worktree");
+        let admin_ok = repo.repo.git_dir().join("worktrees").join("ok");
+        assert!(
+            !admin_ok.join(LOCKED_FILE).exists(),
+            "a finished create must not leave the worktree locked"
+        );
+
+        // Failure after the admin dir exists (bad target OID) must also drop
+        // the marker so the partial admin dir stays prunable.
+        let bogus = GitOid::from_bytes([0xab; 20]);
+        let bad_path = dir.path().join("ws").join("bad");
+        worktree_add(&repo, "bad", bogus, &bad_path).expect_err("bogus target must fail");
+        let admin_bad = repo.repo.git_dir().join("worktrees").join("bad");
+        assert!(
+            !admin_bad.join(LOCKED_FILE).exists(),
+            "a failed create must not leave the admin dir locked forever"
         );
     }
 
