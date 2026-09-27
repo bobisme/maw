@@ -115,6 +115,29 @@ fn is_marker(line: &[u8], ch: u8) -> bool {
         && matches!(line.get(7), None | Some(b' ' | b'\r' | b'\n'))
 }
 
+fn check_marker_inputs(
+    base: &[u8],
+    sides: &[(String, &[u8])],
+) -> Result<(), ResolutionChoiceError> {
+    // Git uses the same delimiters as literal marker-like source lines.
+    // Parsing such output could consume chosen content as a base section.
+    // Keep file-level resolution available, but refuse ambiguous atom splices.
+    if std::iter::once(base)
+        .chain(sides.iter().map(|(_, content)| *content))
+        .any(|content| {
+            content
+                .split_inclusive(|b| *b == b'\n')
+                .any(|line| b"<|=>".iter().any(|ch| is_marker(line, *ch)))
+        })
+    {
+        return Err(ResolutionChoiceError::Layout(
+            "input contains literal conflict markers; use a file-level choice or content:PATH"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Split diff3 marker output into context and conflict blocks, keeping
 /// every byte (line endings included).
 ///
@@ -404,6 +427,7 @@ fn resolve_line_atoms(
             "line atoms need every side to carry content".to_owned(),
         ));
     }
+    check_marker_inputs(base, &sides)?;
     // Atom edits are [p0, p1, ..., pn] in side order (kway_conflict_atoms).
     for atom in &record.atoms {
         let names: Vec<&str> = atom.edits.iter().map(|e| e.workspace.as_str()).collect();
@@ -501,8 +525,8 @@ fn resolve_line_atoms(
 /// Byte-range atoms (AST merge): splice the chosen edit text over the base
 /// byte range. AST atoms carry exact byte ranges and exact edit text.
 ///
-/// Known limitation: clean edits outside the AST atoms are not re-applied
-/// here (AST merge is opt-in and off by default).
+/// The producer checks that these atoms reconstruct every participant's
+/// full file. Otherwise it emits diff3 atoms, which preserve clean edits.
 fn splice_region_atoms(
     record: &ConflictRecord,
     base: &[u8],
@@ -545,6 +569,24 @@ fn splice_region_atoms(
     }
     out.extend_from_slice(&base[pos..]);
     Ok(out)
+}
+
+/// AST coordinates alone cannot describe clean edits outside the atoms or
+/// insertions whose reported base range actually belongs to a variant.
+/// Only expose these atoms when selecting each side reconstructs its bytes.
+#[cfg(feature = "ast-merge")]
+pub(super) fn ast_atoms_reconstruct_sides(record: &ConflictRecord) -> bool {
+    let Some(base) = record.base.as_deref() else {
+        return false;
+    };
+    !record.atoms.is_empty()
+        && record.sides.iter().all(|side| {
+            let Some(content) = side.content.as_deref() else {
+                return false;
+            };
+            let choices = vec![side.workspace_id.as_str(); record.atoms.len()];
+            matches!(splice_region_atoms(record, base, &choices), Ok(bytes) if bytes == content)
+        })
 }
 
 #[cfg(test)]

@@ -1126,14 +1126,20 @@ fn resolve_shared_path_with_ast(
                 } else {
                     probe_participants()
                 };
-                return Ok(SharedOutcome::Conflict(conflict_record_with_bystanders(
+                let record = conflict_record_with_bystanders(
                     path,
                     entries,
                     &chosen,
                     Some(base_bytes),
                     ConflictReason::Diff3Conflict,
                     atoms,
-                )));
+                );
+                // AST atoms omit clean participant edits and may use variant
+                // coordinates for added nodes. Fall back to diff3 atoms unless
+                // base splicing can reconstruct every participant exactly.
+                if super::apply_resolution::ast_atoms_reconstruct_sides(&record) {
+                    return Ok(SharedOutcome::Conflict(record));
+                }
             }
             AstMergeResult::Unsupported => {
                 // Fall through to diff3 conflict.
@@ -1910,6 +1916,88 @@ mod tests {
             ResolvedChange::Upsert { content, .. } => content,
             ResolvedChange::Delete { .. } => panic!("expected upsert"),
         }
+    }
+
+    /// AST resolution must keep participant edits outside the conflicting node.
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn ast_atom_resolution_keeps_clean_participant_edits() {
+        let base = b"fn clash() { old(); }\n\nfn clean() { old(); }\n";
+        let a = b"fn clash() { alpha(); }\n\nfn clean() { changed(); }\n";
+        let b = b"fn clash() { beta(); }\n\nfn clean() { old(); }\n";
+        let partition = shared_only(
+            "f.rs",
+            vec![
+                entry("a", ChangeKind::Modified, Some(a)),
+                entry("b", ChangeKind::Modified, Some(b)),
+            ],
+        );
+        let bases = BTreeMap::from([(PathBuf::from("f.rs"), base.to_vec())]);
+        let result =
+            resolve_partition_with_ast(&partition, &bases, &AstMergeConfig::all_languages())
+                .unwrap();
+        let record = &result.conflicts[0];
+        let choices = vec!["b"; record.atoms.len()];
+        assert_eq!(
+            crate::merge::apply_resolution::resolve_record_atoms(record, &choices).unwrap(),
+            b"fn clash() { beta(); }\n\nfn clean() { changed(); }\n",
+        );
+    }
+
+    /// Added AST nodes have variant coordinates, not replacement ranges in base.
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn ast_atom_resolution_added_node_keeps_following_base() {
+        let base = b"fn keep() { untouched(); }\n";
+        let a = b"fn added() { alpha(); }\nfn keep() { untouched(); }\n";
+        let b = b"fn added() { beta(); }\nfn keep() { untouched(); }\n";
+        let partition = shared_only(
+            "f.rs",
+            vec![
+                entry("a", ChangeKind::Modified, Some(a)),
+                entry("b", ChangeKind::Modified, Some(b)),
+            ],
+        );
+        let bases = BTreeMap::from([(PathBuf::from("f.rs"), base.to_vec())]);
+        let result =
+            resolve_partition_with_ast(&partition, &bases, &AstMergeConfig::all_languages())
+                .unwrap();
+        let record = &result.conflicts[0];
+        let choices = vec!["b"; record.atoms.len()];
+        assert_eq!(
+            crate::merge::apply_resolution::resolve_record_atoms(record, &choices).unwrap(),
+            b,
+        );
+    }
+
+    #[test]
+    fn atom_resolution_refuses_ambiguous_literal_markers() {
+        let base = b"old\n";
+        let a = b"||||||| literal documentation\nalpha\n";
+        let b = b"beta\n";
+        let partition = shared_only(
+            "f.txt",
+            vec![
+                entry("a", ChangeKind::Modified, Some(a)),
+                entry("b", ChangeKind::Modified, Some(b)),
+            ],
+        );
+        let bases = BTreeMap::from([(PathBuf::from("f.txt"), base.to_vec())]);
+        let result = resolve_partition(&partition, &bases).unwrap();
+        let record = &result.conflicts[0];
+        let choices = vec!["a"; record.atoms.len()];
+        let resolved = crate::merge::apply_resolution::resolve_record_atoms(record, &choices);
+        assert!(
+            matches!(
+                resolved,
+                Err(crate::merge::apply_resolution::ResolutionChoiceError::Layout(_))
+            ),
+            "literal marker bytes must not be consumed as delimiters: {resolved:?}",
+        );
+        assert_eq!(
+            crate::merge::apply_resolution::resolve_record_to_side(record, "a").unwrap(),
+            Some(a.to_vec()),
+        );
     }
 
     #[test]
