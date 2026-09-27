@@ -130,9 +130,13 @@ pub fn preview(name: &str, force: bool, format: Option<OutputFormat>) -> Result<
         bail!("Cannot destroy the default workspace");
     }
     let root = ensure_repo_root()?;
-    if let Ok(config) = MawConfig::load(&root)
-        && name == config.default_workspace()
-    {
+    // bn-1losw: the preview takes no epoch lock, so this is its only config
+    // read. It must not be fail-open: a typo hiding a customized
+    // `default_workspace` would otherwise preview "would destroy" for the
+    // default workspace. The real destroy refuses on an invalid .maw.toml, so
+    // the preview refuses too.
+    let config = MawConfig::require(&root, "maw ws destroy --dry-run")?;
+    if name == config.default_workspace() {
         bail!("Cannot destroy the default workspace");
     }
 

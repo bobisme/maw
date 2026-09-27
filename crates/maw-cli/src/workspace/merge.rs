@@ -6406,38 +6406,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         {
             let default_ws_id = WorkspaceId::new(default_ws)
                 .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
-
-            match write_patch_set_blob(&root, patch_set) {
-                Ok(patch_set_oid) => {
-                    match ensure_workspace_oplog_head(&root, &default_ws_id, &merge_base_epoch) {
-                        Ok(head) => {
-                            let snapshot_op = Operation {
-                                parent_ids: vec![head.clone()],
-                                workspace_id: default_ws_id.clone(),
-                                timestamp: super::now_timestamp_iso8601(),
-                                payload: OpPayload::Snapshot { patch_set_oid },
-                            };
-
-                            if let Err(e) = append_operation_with_runtime_checkpoint(
-                                &root,
-                                &default_ws_id,
-                                &snapshot_op,
-                                Some(&head),
-                            ) {
-                                tracing::warn!(
-                                    "Could not record default workspace snapshot op: {e}"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Could not bootstrap default workspace oplog: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Could not write default workspace patch-set blob: {e}");
-                }
-            }
+            record_target_snapshot_op(&root, &default_ws_id, &merge_base_epoch, patch_set);
         }
     }
 
@@ -6687,6 +6656,43 @@ fn record_snapshot_operations<B: WorkspaceBackend>(
     }
 
     Ok(())
+}
+
+/// Record the merge TARGET's pre-checkout dirty state as a Snapshot op
+/// (appended after the target's Merge op). Best-effort: the merge has already
+/// committed, so failures only warn. Shared by the live merge and crash
+/// recovery (bn-1losw) so both leave the same op trail.
+pub(super) fn record_target_snapshot_op(
+    root: &Path,
+    target_id: &WorkspaceId,
+    merge_base_epoch: &EpochId,
+    patch_set: &ModelPatchSet,
+) {
+    let patch_set_oid = match write_patch_set_blob(root, patch_set) {
+        Ok(oid) => oid,
+        Err(e) => {
+            tracing::warn!("Could not write default workspace patch-set blob: {e}");
+            return;
+        }
+    };
+    let head = match ensure_workspace_oplog_head(root, target_id, merge_base_epoch) {
+        Ok(head) => head,
+        Err(e) => {
+            tracing::warn!("Could not bootstrap default workspace oplog: {e}");
+            return;
+        }
+    };
+    let snapshot_op = Operation {
+        parent_ids: vec![head.clone()],
+        workspace_id: target_id.clone(),
+        timestamp: super::now_timestamp_iso8601(),
+        payload: OpPayload::Snapshot { patch_set_oid },
+    };
+    if let Err(e) =
+        append_operation_with_runtime_checkpoint(root, target_id, &snapshot_op, Some(&head))
+    {
+        tracing::warn!("Could not record default workspace snapshot op: {e}");
+    }
 }
 
 /// Record Merge operations in source workspace histories after a successful COMMIT.

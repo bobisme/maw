@@ -745,15 +745,15 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
         }
         bail!("Cannot destroy the default workspace");
     }
-    // Also check config in case default_workspace is customized
-    if let Ok(root) = repo_root()
-        && let Ok(config) = MawConfig::load(&root)
-        && name == config.default_workspace()
-    {
+    let root = ensure_repo_root()?;
+    // Also check config in case default_workspace is customized. bn-1losw:
+    // required, not fail-open — the residual-state purge below runs before the
+    // epoch lock (the other place the config is required), so an invalid
+    // .maw.toml must refuse here rather than skip the guard.
+    let config = MawConfig::require(&root, "maw ws destroy")?;
+    if name == config.default_workspace() {
         bail!("Cannot destroy the default workspace");
     }
-
-    let root = ensure_repo_root()?;
     let path = workspace_path(name)?;
 
     if !path.exists() {

@@ -285,15 +285,47 @@ pub fn run_locked(root: &Path, trigger: Trigger, text_mode: bool) -> Result<Outc
     }
 }
 
-/// `true` when the target workspace's op log already records this merge.
-fn merge_op_already_recorded(root: &Path, target: &WorkspaceId, merged: &GitOid) -> bool {
-    let Ok(Some(head)) = maw_core::oplog::read::read_head(root, target) else {
-        return false;
+/// Where the target's op log stands relative to this merge's records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetOps {
+    /// The Merge op for this merge is not recorded yet.
+    Unrecorded,
+    /// The Merge op is the head: the post-checkout Snapshot op (if any) is
+    /// not recorded yet.
+    AtHead,
+    /// The Merge op is recorded and followed by the target Snapshot op.
+    SnapshotFollows,
+}
+
+/// Classify the target's op-log head against this merge.
+///
+/// bn-1losw: the live merge appends a Snapshot op after the target's Merge op
+/// when the target was dirty. Looking only at the head op missed the Merge op
+/// behind that Snapshot, so recovering a crash that happened after the
+/// checkout recorded the merge a SECOND time.
+fn target_ops(root: &Path, target: &WorkspaceId, merged: &GitOid) -> TargetOps {
+    let is_this_merge = |oid: &GitOid| {
+        matches!(
+            read_operation(root, oid).map(|op| op.payload),
+            Ok(OpPayload::Merge { epoch_after, .. }) if epoch_after.oid() == merged
+        )
     };
-    matches!(
-        read_operation(root, &head).map(|op| op.payload),
-        Ok(OpPayload::Merge { epoch_after, .. }) if epoch_after.oid() == merged
-    )
+    let Ok(Some(head)) = maw_core::oplog::read::read_head(root, target) else {
+        return TargetOps::Unrecorded;
+    };
+    if is_this_merge(&head) {
+        return TargetOps::AtHead;
+    }
+    match read_operation(root, &head) {
+        Ok(op) if matches!(op.payload, OpPayload::Snapshot { .. }) => {
+            if op.parent_ids.first().is_some_and(is_this_merge) {
+                TargetOps::SnapshotFollows
+            } else {
+                TargetOps::Unrecorded
+            }
+        }
+        _ => TargetOps::Unrecorded,
+    }
 }
 
 /// Finish CLEANUP for a merge whose CAS landed, then clear the journal.
@@ -336,19 +368,20 @@ fn finalize(
     // Merge op records (the merge writes them right after the CAS).
     let epoch_before = EpochId::new(state.epoch_before.as_str())
         .map_err(|e| anyhow::anyhow!("invalid epoch_before in journal: {e}"))?;
-    if let Ok(target_id) = WorkspaceId::new(&target_ws) {
-        if merge_op_already_recorded(root, &target_id, candidate) {
-            tracing::debug!("merge op already recorded; skipping");
-        } else {
+    let target_id = WorkspaceId::new(&target_ws).ok();
+    if let Some(target_id) = &target_id {
+        if target_ops(root, target_id, candidate) == TargetOps::Unrecorded {
             for warning in record_merge_operations(
                 root,
                 &state.sources,
-                Some(&target_id),
+                Some(target_id),
                 &epoch_before,
                 candidate,
             ) {
                 tracing::warn!("{warning}");
             }
+        } else {
+            tracing::debug!("merge op already recorded; skipping");
         }
     }
 
@@ -390,11 +423,35 @@ fn finalize(
             maw_core::refs::read_ref(root, &maw_core::refs::workspace_epoch_ref(&target_ws))
                 .ok()
                 .flatten();
-        let anchor_before = if ws_epoch.as_ref() == Some(candidate) {
+        let checkout_done = ws_epoch.as_ref() == Some(candidate);
+        let anchor_before = if checkout_done {
             candidate.as_str().to_owned()
         } else {
             state.epoch_before.as_str().to_owned()
         };
+        // bn-1losw: the live merge records the target's pre-checkout dirty
+        // state as a Snapshot op right after its Merge op. Do the same while
+        // the checkout has not run (the tree still holds the pre-merge
+        // state) and nothing follows the Merge op yet. Recorded BEFORE the
+        // checkout so a crash inside it cannot lead a second recovery to
+        // snapshot the already-merged tree.
+        if !checkout_done
+            && let Some(target_id) = &target_id
+            && target_ops(root, target_id, candidate) == TargetOps::AtHead
+            && let Ok(patch_set) =
+                maw_core::model::diff::compute_patchset(&target_path, &epoch_before)
+            && !patch_set.is_empty()
+        {
+            super::record_target_snapshot_op(root, target_id, &epoch_before, &patch_set);
+        }
+        // `workspace_base_before` is None here, as in the live merge for
+        // the consolidated layout (target = repo root). Only the legacy v2
+        // layout (target under ws/) passes the backend's pre-merge base
+        // epoch live; `update_default_workspace` then falls back to the
+        // target's per-workspace epoch ref, which is the same value unless
+        // that ref is missing or lagging behind a HEAD at epoch_before
+        // (backend self-heal). Post-CAS, the backend can no longer
+        // reproduce the pre-merge answer, so this is left as is (bn-1losw).
         update_default_workspace(
             &target_path,
             &target_ws,

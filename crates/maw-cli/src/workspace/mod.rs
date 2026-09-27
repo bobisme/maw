@@ -41,6 +41,7 @@ mod list;
 // hand-built index-stat-cache mask without needing a `--features failpoints`
 // binary — i.e. so that regression runs in the DEFAULT `just check` lane.
 pub mod materialize_verify;
+mod maw_toml_keys;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 mod names;
@@ -254,10 +255,21 @@ impl MawConfig {
                     path: candidate.clone(),
                     detail: format!("cannot read: {e}"),
                 })?;
-                return toml::from_str(&content).map_err(|e| InvalidMawToml {
+                let config: Self = toml::from_str(&content).map_err(|e| InvalidMawToml {
                     path: candidate.clone(),
                     detail: e.to_string().trim_end().to_owned(),
-                });
+                })?;
+                // bn-1losw: a misspelled key is valid TOML that serde ignores,
+                // so maw would silently run on the default. Warn (never fail:
+                // a config written for a newer maw must keep working).
+                if let Ok(table) = content.parse::<toml::Table>() {
+                    let warnings: Vec<String> = maw_toml_keys::unknown_keys(&table)
+                        .iter()
+                        .map(|k| format!("{}: {}", candidate.display(), k.describe()))
+                        .collect();
+                    emit_config_warnings(&warnings);
+                }
+                return Ok(config);
             }
         }
         Ok(Self::default())

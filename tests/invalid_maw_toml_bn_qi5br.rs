@@ -162,3 +162,123 @@ fn doctor_reports_invalid_maw_toml() {
     );
     assert_actionable(&all);
 }
+
+/// bn-1losw: `ws destroy --dry-run` takes no epoch lock, so its
+/// default-workspace guard was the only config read — and it was fail-open
+/// (`if let Ok(config)`). With a customized `default_workspace` hidden behind
+/// a typo, the preview would silently say "would destroy". It must refuse like
+/// the real destroy does.
+#[test]
+fn ws_destroy_dry_run_refuses_invalid_maw_toml() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n")]);
+    repo.maw_ok(&["ws", "create", "alice"]);
+    write_maw_toml(&repo, BROKEN_MAW_TOML);
+
+    let stderr = repo.maw_fails(&["ws", "destroy", "alice", "--dry-run"]);
+    assert_actionable(&stderr);
+    assert!(
+        stderr.contains("refuses"),
+        "destroy preview must refuse, not preview on defaults:\n{stderr}"
+    );
+    assert!(repo.workspace_exists("alice"));
+}
+
+/// bn-1losw: `ws destroy --force` of a workspace whose directory is gone
+/// purges residual registry/metadata state BEFORE the epoch lock (which is
+/// where the config would otherwise be required). The default-workspace guard
+/// in front of it must not be fail-open on an invalid `.maw.toml`.
+#[test]
+fn ws_destroy_force_residual_refuses_invalid_maw_toml() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n")]);
+    repo.maw_ok(&["ws", "create", "alice"]);
+    let ws_path = repo.workspace_path("alice");
+    std::fs::remove_dir_all(&ws_path).expect("remove worktree dir");
+    write_maw_toml(&repo, BROKEN_MAW_TOML);
+
+    let stderr = repo.maw_fails(&["ws", "destroy", "alice", "--force"]);
+    assert_actionable(&stderr);
+    assert!(
+        stderr.contains("refuses"),
+        "destroy must refuse before purging residual state:\n{stderr}"
+    );
+}
+
+/// bn-1losw: a misspelled key is valid TOML, so bn-qi5br's parse-error policy
+/// never fires and serde silently ignores it — `brnach = "trunk"` would mean
+/// branch `main`. Unknown keys must WARN (not fail: forward compatibility with
+/// config written for a newer maw), naming the key path and the nearest valid
+/// key, on both read-only and mutating commands.
+#[test]
+fn unknown_maw_toml_keys_warn_with_path_and_suggestion() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n")]);
+    write_maw_toml(
+        &repo,
+        "[repo]\nbrnach = \"trunk\"\n\n[lokc]\nno_wait = true\n\n[hooks]\npost_sycn = []\n",
+    );
+
+    let out = repo.maw_raw(&["ws", "status"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "unknown keys must not fail a read-only command:\n{stderr}"
+    );
+    for (key, nearest) in [
+        ("repo.brnach", "repo.branch"),
+        ("lokc", "lock"),
+        ("hooks.post_sycn", "hooks.post_sync"),
+    ] {
+        assert!(
+            stderr.contains(&format!("`{key}`")),
+            "warning must name the unknown key path `{key}`:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("did you mean `{nearest}`")),
+            "warning must suggest the nearest valid key `{nearest}`:\n{stderr}"
+        );
+    }
+    assert!(
+        stderr.contains(".maw.toml"),
+        "must name the file:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("`repo.brnach`").count(),
+        1,
+        "each unknown key warned once per process:\n{stderr}"
+    );
+
+    // Mutating commands warn too, but still run (forward compatibility).
+    let out = repo.maw_raw(&["ws", "create", "bob"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "unknown keys must not fail a mutating command:\n{stderr}"
+    );
+    assert!(stderr.contains("`repo.brnach`"), "{stderr}");
+    assert!(repo.workspace_exists("bob"));
+}
+
+/// A valid `.maw.toml` using every known key produces no unknown-key warning
+/// (guards the known-key list against false positives).
+#[test]
+fn known_maw_toml_keys_do_not_warn() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n")]);
+    write_maw_toml(
+        &repo,
+        "[repo]\nbranch = \"main\"\ndefault_workspace = \"default\"\n\n\
+         [lock]\nno_wait = false\nwait_seconds = 10\n\n\
+         [invariant]\naudit = true\n\n\
+         [hooks]\npre_merge = []\npost_merge = []\npost_sync = []\nhook_timeout_seconds = 300\n\n\
+         [merge]\nauto_resolve_from_main = []\n",
+    );
+    let out = repo.maw_raw(&["ws", "status"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("unknown key"),
+        "known keys must not warn:\n{stderr}"
+    );
+}
