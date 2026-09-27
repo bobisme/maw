@@ -23,6 +23,7 @@ pub(crate) mod conflict_state;
 pub(crate) mod create;
 mod create_lock;
 mod describe;
+pub(crate) mod destroy_content_check;
 pub(crate) mod destroy_guidance;
 pub(crate) mod destroy_preview;
 pub(crate) mod destroy_record;

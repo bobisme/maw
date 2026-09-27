@@ -815,7 +815,22 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
         // the workspace as DirtyUncommitted (still refuses, still
         // surfaces the safer "commit then merge" path).
         let commits_ahead = workspace_commits_ahead(&path, base_epoch.as_str()).unwrap_or(0);
-        let refusal = DestroyRefusal::new(name, touched_count, commits_ahead, status.dirty_count());
+        // bn-2eszz: diagnose (never relax) — commits whose content already
+        // landed under different hashes (cherry-picks) still refuse, but the
+        // message says so. Best-effort: any inspection failure = no hint.
+        let content_note = manifold_refs::read_epoch_current(&root)
+            .ok()
+            .flatten()
+            .and_then(|epoch| {
+                super::destroy_content_check::detect(
+                    &path,
+                    base_epoch.as_str(),
+                    epoch.as_str(),
+                    status.dirty_count(),
+                )
+            });
+        let refusal = DestroyRefusal::new(name, touched_count, commits_ahead, status.dirty_count())
+            .with_content_already_in_epoch(content_note);
         let fmt = OutputFormat::resolve(format);
         match fmt {
             OutputFormat::Json => {

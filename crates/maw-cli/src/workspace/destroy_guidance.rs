@@ -34,6 +34,7 @@
 
 use serde::Serialize;
 
+use super::destroy_content_check::ContentAlreadyInEpoch;
 use super::lifecycle::LifecycleState;
 
 /// Structured payload for a `maw ws destroy` refusal.
@@ -96,6 +97,11 @@ pub struct DestroyRefusal {
     /// consumer reads `recommended_action`, the text renderer skips
     /// the duplicate line).
     pub merge_destroy_alternative: String,
+    /// bn-2eszz: set when the refused workspace's committed content is
+    /// already in the epoch under different commit hashes (e.g. the
+    /// commits were cherry-picked elsewhere and merged). Purely
+    /// diagnostic — destroy still refuses. `null` when not detected.
+    pub content_already_in_epoch: Option<ContentAlreadyInEpoch>,
 }
 
 /// Named kinds of recommended action, so machine consumers don't
@@ -216,7 +222,15 @@ impl DestroyRefusal {
             inspect_command: format!("maw ws touched {workspace} --format json"),
             dry_run_hint,
             merge_destroy_alternative,
+            content_already_in_epoch: None,
         }
+    }
+
+    /// Attach the bn-2eszz "content already in epoch" diagnostic.
+    #[must_use]
+    pub fn with_content_already_in_epoch(mut self, note: Option<ContentAlreadyInEpoch>) -> Self {
+        self.content_already_in_epoch = note;
+        self
     }
 
     /// Render the refusal as human-readable text. Lines are indented
@@ -254,9 +268,15 @@ impl DestroyRefusal {
             ..
         } = self;
         let state_slug = self.lifecycle_state.slug();
+        // bn-2eszz: explain hash-only divergence right under the lead.
+        let content_note = self
+            .content_already_in_epoch
+            .as_ref()
+            .map(|c| format!("\n  {}", c.render_note(workspace)))
+            .unwrap_or_default();
         format!(
             "Workspace '{workspace}' has {touched_count} unmerged change(s) \
-             (state: {state_slug}). Refusing destroy to avoid data loss.\n  \
+             (state: {state_slug}). Refusing destroy to avoid data loss.{content_note}\n  \
              Recommended: {recommended_action}\n  \
              Preview options: {dry_run_hint}   (bn-29fi)\n  \
              Or force-destroy: {force_command}\n    \
@@ -281,6 +301,37 @@ impl DestroyRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_already_in_epoch_note_renders_only_when_set() {
+        use super::super::destroy_content_check::{ContentAlreadyInEpoch, ContentMatch};
+        let plain = DestroyRefusal::new("orig", 2, 2, 0);
+        assert!(!plain.render_text().contains("content already in epoch"));
+        assert!(
+            plain
+                .render_json()
+                .unwrap()
+                .contains("\"content_already_in_epoch\": null")
+        );
+
+        let noted = plain.with_content_already_in_epoch(Some(ContentAlreadyInEpoch {
+            evidence: ContentMatch::PatchIdsMatch,
+            epoch: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            unreachable_commits: 2,
+        }));
+        let text = noted.render_text();
+        assert!(text.contains("Refusing destroy"), "{text}");
+        assert!(
+            text.contains("content already in epoch 0123456789ab"),
+            "{text}"
+        );
+        assert!(text.contains("maw ws destroy orig --force"), "{text}");
+        let json = noted.render_json().unwrap();
+        assert!(
+            json.contains("\"evidence\": \"patches-in-epoch\""),
+            "{json}"
+        );
+    }
 
     #[test]
     fn committed_unintegrated_leads_with_merge_and_destroy() {
