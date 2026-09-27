@@ -106,6 +106,7 @@ use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 
+use crate::infra::{self, InfraFailure};
 use crate::oracle::{AssuranceViolation, WorkspaceStatus, capture_state};
 use crate::oracle_a::{OracleA, StepReport};
 use crate::oracle_b::{self, OracleBViolation};
@@ -350,7 +351,14 @@ impl InProcDriver {
         let last_idx = plan.steps.len().saturating_sub(1);
         for (i, step) in plan.steps.iter().enumerate() {
             steps_replayed = i + 1;
-            let _ = self.apply_op(step);
+            // Apply is best-effort (a faulted step may legitimately fail),
+            // but a host resource failure (EDQUOT/ENOSPC/EMFILE/ENFILE)
+            // means the repo no longer reflects the plan: abort the seed as
+            // INFRA rather than let the oracles judge a half-applied step
+            // (bn-30v6e). Non-infra errors keep the old best-effort path.
+            if let Err(err) = self.apply_op(step) {
+                infra::raise_if_infra_io(&err, &format!("in-proc apply step {i}"));
+            }
 
             // Per-step Oracle A harvest is REQUIRED even in fast mode:
             // Oracle A is incremental (`W` accretes across steps from
@@ -398,7 +406,10 @@ impl InProcDriver {
         let root = self.repo.path();
         let mut state = match capture_state(root) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(err) => {
+                infra::raise_if_infra_text(&err.to_string(), "capture_state");
+                return;
+            }
         };
         state.workspaces.clear();
         if let Ok(entries) = std::fs::read_dir(root.join("ws")) {
@@ -422,7 +433,17 @@ impl InProcDriver {
                 );
             }
         }
-        let _ = self.oracle_a.check_step(&state, step_index);
+        match self.oracle_a.check_step(&state, step_index) {
+            Err(err) => infra::raise_if_infra_text(&err.to_string(), "oracle A harvest"),
+            Ok(StepReport {
+                violation: Some(v), ..
+            }) => {
+                if let Some(f) = oracle_a_infra(&v) {
+                    infra::raise(f);
+                }
+            }
+            Ok(_) => {}
+        }
     }
 
     // -- impl details below --
@@ -894,7 +915,9 @@ impl InProcDriver {
         // (`make_state` sets head_oid manually from the ws state ref).
         let mut state = match capture_state(root) {
             Ok(s) => s,
-            Err(_) => {
+            Err(err) => {
+                // A host resource failure must not read as "clean".
+                infra::raise_if_infra_text(&err.to_string(), "capture_state");
                 return StepVerdict::Clean; // best-effort
             }
         };
@@ -936,6 +959,9 @@ impl InProcDriver {
             Ok(StepReport {
                 violation: Some(v), ..
             }) => {
+                if let Some(f) = oracle_a_infra(&v) {
+                    infra::raise(f);
+                }
                 return StepVerdict::OracleA(OracleAClass::from_violation(&v));
             }
             Ok(rep) => {
@@ -946,14 +972,14 @@ impl InProcDriver {
                     );
                 }
             }
-            Err(_) => {}
+            Err(err) => infra::raise_if_infra_text(&err.to_string(), "oracle A check"),
         }
         // Oracle B.
-        let bvs = oracle_b::check(root);
-        if let Some(v) = bvs.into_iter().next() {
-            return StepVerdict::OracleB(OracleBClass::from_violation(&v));
+        match first_oracle_b_finding(oracle_b::check(root)) {
+            Ok(Some(v)) => StepVerdict::OracleB(OracleBClass::from_violation(&v)),
+            Ok(None) => StepVerdict::Clean,
+            Err(f) => infra::raise(f),
         }
-        StepVerdict::Clean
     }
 }
 
@@ -968,8 +994,82 @@ pub struct DriveOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Infra triage of oracle tooling failures (bn-30v6e)
+// ---------------------------------------------------------------------------
+
+/// `Some` iff `v` is Oracle A's own tooling failure (`GitError`) AND its
+/// stderr positively classifies as a host resource failure. Every oracle
+/// finding, and every other `GitError`, is `None` (fail closed).
+fn oracle_a_infra(v: &AssuranceViolation) -> Option<InfraFailure> {
+    match v {
+        AssuranceViolation::GitError {
+            check,
+            command,
+            stderr,
+        } => infra::classify_text(stderr).map(|kind| InfraFailure {
+            kind,
+            detail: format!("oracle A {check}: `{command}`: {}", stderr.trim()),
+        }),
+        _ => None,
+    }
+}
+
+/// Pick the Oracle B verdict to report.
+///
+/// Returns the first violation that is NOT an infra-classified `GitError`
+/// (a real finding always wins, and a non-infra `GitError` stays a
+/// violation). Only when every violation is an infra `GitError` does it
+/// return `Err`, so the harness aborts the seed as INFRA.
+fn first_oracle_b_finding(
+    bvs: Vec<OracleBViolation>,
+) -> Result<Option<OracleBViolation>, InfraFailure> {
+    let mut first_infra = None;
+    for v in bvs {
+        let infra = match &v {
+            OracleBViolation::GitError {
+                check,
+                command,
+                stderr,
+            } => infra::classify_text(stderr).map(|kind| InfraFailure {
+                kind,
+                detail: format!("oracle B {check}: `{command}`: {}", stderr.trim()),
+            }),
+            _ => None,
+        };
+        match infra {
+            Some(f) => {
+                first_infra.get_or_insert(f);
+            }
+            None => return Ok(Some(v)),
+        }
+    }
+    first_infra.map_or(Ok(None), Err)
+}
+
+// ---------------------------------------------------------------------------
 // Small git helpers (driver-private; not the oracle's verifier carveout)
 // ---------------------------------------------------------------------------
+
+/// Run `cmd` and return its output. A spawn error, or a non-zero exit whose
+/// stderr names a host resource failure, aborts the seed as INFRA
+/// (bn-30v6e); a non-infra spawn error panics as before.
+fn git_output(cmd: &mut Command, args: &[&str]) -> std::process::Output {
+    match cmd.output() {
+        Ok(out) => {
+            if !out.status.success() {
+                infra::raise_if_infra_text(
+                    &String::from_utf8_lossy(&out.stderr),
+                    &format!("git {}", args.join(" ")),
+                );
+            }
+            out
+        }
+        Err(err) => {
+            infra::raise_if_infra_io(&err, &format!("spawn git {}", args.join(" ")));
+            panic!("git spawn: {err:?}");
+        }
+    }
+}
 
 fn pinned_env(git_time: i64) -> Vec<(String, String)> {
     // The pinned-clock contract (`notes/sg1-dst-architecture.md` §5.2):
@@ -1027,20 +1127,12 @@ fn run_git_env(root: &Path, args: &[&str], env: &[(String, String)]) -> std::io:
 }
 
 fn git_capture(root: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .expect("git spawn");
+    let out = git_output(Command::new("git").args(args).current_dir(root), args);
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn git_capture_or(root: &Path, args: &[&str], default: &str) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .expect("git spawn");
+    let out = git_output(Command::new("git").args(args).current_dir(root), args);
     if out.status.success() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     } else {
@@ -1049,11 +1141,19 @@ fn git_capture_or(root: &Path, args: &[&str], default: &str) -> String {
 }
 
 fn git_capture_opt(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok()?;
+    let out = match Command::new("git").args(args).current_dir(root).output() {
+        Ok(out) => out,
+        Err(err) => {
+            infra::raise_if_infra_io(&err, &format!("spawn git {}", args.join(" ")));
+            return None;
+        }
+    };
+    if !out.status.success() {
+        infra::raise_if_infra_text(
+            &String::from_utf8_lossy(&out.stderr),
+            &format!("git {}", args.join(" ")),
+        );
+    }
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -1075,12 +1175,35 @@ fn git_pipe_env(root: &Path, args: &[&str], stdin: &[u8], env: &[(String, String
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().expect("git spawn");
-    if !stdin.is_empty() {
-        child.stdin.as_mut().unwrap().write_all(stdin).unwrap();
+    let ctx = format!("git {}", args.join(" "));
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            infra::raise_if_infra_io(&err, &format!("spawn {ctx}"));
+            panic!("git spawn: {err:?}");
+        }
+    };
+    // A git that dies early (e.g. on EDQUOT) closes stdin → EPIPE here;
+    // the real cause is in its stderr, so collect that before panicking.
+    let write_err = if stdin.is_empty() {
+        None
+    } else {
+        child.stdin.as_mut().unwrap().write_all(stdin).err()
+    };
+    let out = match child.wait_with_output() {
+        Ok(out) => out,
+        Err(err) => {
+            infra::raise_if_infra_io(&err, &format!("wait {ctx}"));
+            panic!("git wait: {err:?}");
+        }
+    };
+    if let Some(err) = write_err {
+        infra::raise_if_infra_text(&String::from_utf8_lossy(&out.stderr), &ctx);
+        infra::raise_if_infra_io(&err, &format!("{ctx} stdin"));
+        panic!("{ctx}: stdin write failed: {err:?}");
     }
-    let out = child.wait_with_output().expect("git wait");
     if !out.status.success() {
+        infra::raise_if_infra_text(&String::from_utf8_lossy(&out.stderr), &ctx);
         panic!(
             "git {} failed: {}",
             args.join(" "),
@@ -1120,4 +1243,103 @@ fn list_refs(root: &Path) -> BTreeSet<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod infra_triage_tests {
+    //! bn-30v6e: infra classification of oracle tooling failures must never
+    //! swallow an oracle finding.
+    use super::*;
+    use crate::infra::InfraKind;
+
+    fn b_git_error(stderr: &str) -> OracleBViolation {
+        OracleBViolation::GitError {
+            check: "B4",
+            command: "git cat-file --batch-check".into(),
+            stderr: stderr.into(),
+        }
+    }
+    fn b1() -> OracleBViolation {
+        OracleBViolation::DanglingHeadRef {
+            workspace: "ws-0".into(),
+            ref_name: "refs/manifold/head/ws-0".into(),
+            oid: "abc".into(),
+        }
+    }
+
+    #[test]
+    fn oracle_b_empty_is_clean() {
+        assert!(matches!(first_oracle_b_finding(vec![]), Ok(None)));
+    }
+
+    #[test]
+    fn oracle_b_real_finding_is_kept() {
+        let got = first_oracle_b_finding(vec![b1()]).expect("not infra");
+        assert!(matches!(
+            got,
+            Some(OracleBViolation::DanglingHeadRef { .. })
+        ));
+    }
+
+    #[test]
+    fn oracle_b_real_finding_wins_over_infra_git_error() {
+        let got = first_oracle_b_finding(vec![b_git_error("Disk quota exceeded"), b1()])
+            .expect("a real finding must never be reclassified as infra");
+        assert!(matches!(
+            got,
+            Some(OracleBViolation::DanglingHeadRef { .. })
+        ));
+    }
+
+    #[test]
+    fn oracle_b_non_infra_git_error_stays_a_violation() {
+        let got = first_oracle_b_finding(vec![b_git_error("fatal: bad object abc")])
+            .expect("non-infra GitError is not infra");
+        assert!(matches!(got, Some(OracleBViolation::GitError { .. })));
+    }
+
+    #[test]
+    fn oracle_b_only_infra_git_errors_is_infra() {
+        let err = first_oracle_b_finding(vec![
+            b_git_error("fatal: unable to write: No space left on device"),
+            b_git_error("Disk quota exceeded"),
+        ])
+        .expect_err("all-infra GitErrors classify as infra");
+        assert_eq!(err.kind, InfraKind::StorageFull);
+    }
+
+    #[test]
+    fn oracle_a_only_git_error_with_infra_stderr_classifies() {
+        let infra_err = AssuranceViolation::GitError {
+            check: "oracle_a::rev_list_objects".into(),
+            command: "git rev-list".into(),
+            stderr: "fatal: Too many open files".into(),
+        };
+        assert_eq!(
+            oracle_a_infra(&infra_err).map(|f| f.kind),
+            Some(InfraKind::TooManyOpenFiles)
+        );
+        let plain = AssuranceViolation::GitError {
+            check: "oracle_a::rev_list_objects".into(),
+            command: "git rev-list".into(),
+            stderr: "fatal: bad object".into(),
+        };
+        assert_eq!(oracle_a_infra(&plain), None);
+        // A finding whose text happens to mention quota is still a finding.
+        let finding = AssuranceViolation::ReachabilityLost {
+            oid: "Disk quota exceeded".into(),
+            previous_ref: "No space left on device".into(),
+        };
+        assert_eq!(oracle_a_infra(&finding), None);
+    }
+
+    /// A real planted violation still surfaces as a violation through the
+    /// infra-aware driver (the classifier did not swallow it).
+    #[test]
+    fn planted_work_loss_still_trips_through_infra_aware_driver() {
+        let (plan, planted) = crate::shrinker_tests::planted_oracle_a_fixture();
+        let mut driver = InProcDriver::new().expect("driver").with_planted(planted);
+        let out = driver.drive(&plan);
+        assert!(out.verdict.is_violation(), "{:?}", out.verdict);
+    }
 }

@@ -44,7 +44,7 @@ use crate::shrinker::{ShrinkerCorpusEntry, TARGET_MIN_STEPS, shrink};
 ///
 /// This is the **Oracle A determinism fixture** — replaying this 10×
 /// MUST yield a `ReachabilityLost` on the exact same blob OID every time.
-fn planted_oracle_a_fixture() -> (crate::scenario::ScenarioPlan, Vec<PlantedDefect>) {
+pub fn planted_oracle_a_fixture() -> (crate::scenario::ScenarioPlan, Vec<PlantedDefect>) {
     use crate::scenario::{
         BaseRef, FaultSpec, FileEdit, Op, PlannedStep, ScenarioPlan, Seeded, WsId,
     };

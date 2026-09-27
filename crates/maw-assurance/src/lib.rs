@@ -46,6 +46,11 @@ pub mod fault;
 /// determinism guarantee tests and the T1.6 shrinker run against.
 #[cfg(feature = "oracles")]
 pub mod in_proc;
+/// **Infrastructure-failure classifier** for the SG1 harness (bn-30v6e).
+///
+/// Tells host resource exhaustion (EDQUOT/ENOSPC/EMFILE/ENFILE) apart
+/// from Oracle A/B violations. Fail closed: unmatched errors stay errors.
+pub mod infra;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;

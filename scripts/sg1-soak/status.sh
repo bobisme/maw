@@ -10,6 +10,8 @@ cum=$(cat "$STATE/cumulative" 2>/dev/null || echo 0)
 ledger="$STATE/ledger.jsonl"
 clean_slots=$(grep -c '"status":"clean"' "$ledger" 2>/dev/null); clean_slots=${clean_slots:-0}
 viol=$(grep -c '"status":"VIOLATION_OR_ERROR"' "$ledger" 2>/dev/null); viol=${viol:-0}
+infra=$(grep -c '"status":"infra"' "$ledger" 2>/dev/null); infra=${infra:-0}
+infra_streak=$(cat "$STATE/infra_consecutive" 2>/dev/null || echo 0)
 
 first_ts=$(grep -oP '"ts":"\K[^"]+' "$ledger" 2>/dev/null | head -1)
 rate=""; eta=""
@@ -35,7 +37,22 @@ echo "  clean slots:        $clean_slots   (SLOT_SEEDS=$SLOT_SEEDS x STEPS=$STEP
 echo "  Wilson 95% UB:      $wilson    (gate requires <= 3.84e-8 at 1e8, 0 violations)"
 [ -n "$rate" ] && echo "  observed rate:      $rate op-steps/sec wall   (ETA to 1e8: ${eta:-n/a})"
 echo "  violations:         $viol"
+echo "  infra failures:     $infra   (EDQUOT/ENOSPC/EMFILE/ENFILE; not verdicts, no op-steps; consecutive now: $infra_streak / ${INFRA_HALT_AFTER:-3})"
+stop_msg=""; [ -e "$STATE/STOP" ] && stop_msg=$(head -1 "$STATE/STOP" 2>/dev/null)
 if   [ -e "$STATE/DONE" ]; then echo "  STATUS: ✅ DONE — 1e8 reached with 0 violations. Fill notes/sg1-soak-campaign.md §7.1/§8 from the ledger."
-elif [ -e "$STATE/STOP" ]; then echo "  STATUS: ⛔ STOPPED — see $STATE/violations/ (Oracle violation = a finding; shrink → fix → reset → restart)."
+elif [ -e "$STATE/STOP" ]; then
+  case "$stop_msg" in
+    INFRA-HALT:*)
+      echo "  STATUS: ⚠ INFRA-HALT — the HOST failed, not an oracle. See $STATE/infra/."
+      echo "          $stop_msg"
+      echo "          Free disk/quota/fds, then: rm $STATE/STOP   (accrual is intact)." ;;
+    VIOLATION:*)
+      echo "  STATUS: ⛔ STOPPED (VIOLATION) — see $STATE/violations/ (Oracle violation = a finding; shrink → fix → reset → restart)."
+      echo "          $stop_msg" ;;
+    *)
+      # Empty/unknown STOP = manual pause or a pre-bn-30v6e halt: treat as
+      # a possible violation until a human checks (fail closed).
+      echo "  STATUS: ⛔ STOPPED — manual pause or violation; check $STATE/violations/ before removing STOP." ;;
+  esac
 else                            echo "  STATUS: ▶ accruing (cron active if installed; or run scripts/sg1-soak/slot.sh)."
 fi

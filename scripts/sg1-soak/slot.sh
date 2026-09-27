@@ -6,7 +6,20 @@
 # A non-zero exit from the pinned binary = an Oracle A/B violation (the gate
 # firing). That HALTS the campaign (writes STOP + a violation log) — it is a
 # Prime-Invariant finding to investigate, not a flake to retry.
+#
+# ONE exception (bn-30v6e): exit 75 (EX_TEMPFAIL) together with a
+# `[sg1] INFRA-FAILURE:` marker line means the HOST ran out of disk quota /
+# space / file descriptors — not an oracle verdict. That slot is logged to
+# infra/, recorded in ledger.jsonl as status "infra" (its seed range is
+# consumed, never reused, and accrues NO op-steps), and the campaign keeps
+# going. INFRA_HALT_AFTER (default 3) consecutive infra slots write STOP with
+# an "INFRA-HALT" message so a full disk still gets human attention.
+# Anything else non-zero — including exit 75 WITHOUT the marker, or the marker
+# with any other exit code — is still a violation (fail closed).
 set -uo pipefail
+
+INFRA_EXIT_CODE=75
+INFRA_MARKER='[sg1] INFRA-FAILURE:'
 
 STATE="${SG1_SOAK_STATE:-$HOME/.local/state/maw-sg1-soak}"
 [ -f "$STATE/config.env" ] || { echo "no $STATE/config.env — run scripts/sg1-soak/setup.sh first" >&2; exit 1; }
@@ -16,6 +29,14 @@ source "$STATE/config.env"
 [ -e "$STATE/DONE" ] && exit 0
 [ -e "$STATE/STOP" ] && exit 0
 [ -x "$STATE/sg1_dst.pinned" ] || { echo "pinned binary missing — re-run setup.sh" >&2; exit 1; }
+INFRA_HALT_AFTER="${INFRA_HALT_AFTER:-3}"
+
+# Temp repos go to TMPDIR. Keep them OFF /tmp: on this box /tmp is a
+# per-user-quota tmpfs, and filling it halted the pre.6 campaign (bn-30v6e).
+# The systemd unit sets TMPDIR=/var/tmp/maw-sg1-soak; this is the default for
+# hand runs.
+export TMPDIR="${TMPDIR:-/var/tmp/maw-sg1-soak}"
+mkdir -p "$TMPDIR" || { echo "cannot create TMPDIR=$TMPDIR" >&2; exit 1; }
 
 # --- acquire one of PARALLEL slot locks (held for this slot's duration) -------
 slot=""
@@ -40,6 +61,39 @@ out=$(SG1_BASE_SEED="$base" SG1_NIGHTLY_SEEDS="$SLOT_SEEDS" SG1_NIGHTLY_STEPS="$
 rc=$?
 end_ts=$(date -uIs)
 clean=$(grep -oP 'nightly soak end: seeds=[0-9]+ clean=\K[0-9]+' <<<"$out" | head -1)
+infra_line=$(grep -m1 '^\[sg1\] INFRA-FAILURE:' <<<"$out" || true)
+# Belt and braces: any sign of an oracle violation in the output vetoes the
+# infra path (the harness already refuses to exit 75 after a violation).
+viol_seen=""
+grep -qE 'violations=[1-9]|soak FAILED|random budget FAILED' <<<"$out" && viol_seen=1
+
+# --- infrastructure failure: record, do not accrue, do not halt (bounded) ---
+# Requires the dedicated exit code AND the marker line AND no violation sign
+# (fail closed: everything else falls through to the violation path below).
+if [ "$rc" -eq "$INFRA_EXIT_CODE" ] && [ -n "$infra_line" ] && [ -z "$viol_seen" ]; then
+  mkdir -p "$STATE/infra"
+  log="$STATE/infra/base-${base}-${ts//[:]/-}.log"
+  printf '%s\n' "$out" > "$log"
+  # JSON-safe one-line reason (drop quotes, backslashes, control chars).
+  reason=$(printf '%s' "${infra_line#"$INFRA_MARKER"}" | tr -d '"\\' | tr -d '\000-\037' | sed 's/^ *//')
+  printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"op_steps":0,"status":"infra","rc":%s,"reason":"%s","log":"%s"}\n' \
+    "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$rc" "$reason" "$log" >> "$STATE/ledger.jsonl"
+
+  exec {tf}>"$STATE/total.lock"; flock "$tf"
+  streak=$(( $(cat "$STATE/infra_consecutive" 2>/dev/null || echo 0) + 1 ))
+  echo "$streak" > "$STATE/infra_consecutive"
+  flock -u "$tf"; exec {tf}>&-
+
+  echo "SG1 soak slot hit an INFRASTRUCTURE failure at base_seed=$base (rc=$rc): $reason" >&2
+  echo "  not an Oracle verdict; no op-steps accrued; seed range recorded as infra. log: $log" >&2
+  if [ "$streak" -ge "$INFRA_HALT_AFTER" ]; then
+    printf 'INFRA-HALT: %s consecutive infrastructure failures (last: base_seed=%s, %s). Free disk/quota/fds, check TMPDIR=%s, then rm STOP to resume. Last log: %s\n' \
+      "$streak" "$base" "$reason" "$TMPDIR" "$log" > "$STATE/STOP"
+    echo "SG1 SOAK INFRA-HALT: $streak consecutive infra failures (limit $INFRA_HALT_AFTER). Campaign STOPped for a human." >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 if [ "$rc" -ne 0 ] || [ -z "$clean" ]; then
   mkdir -p "$STATE/violations"
@@ -47,7 +101,8 @@ if [ "$rc" -ne 0 ] || [ -z "$clean" ]; then
   printf '%s\n' "$out" > "$log"
   printf '{"ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"status":"VIOLATION_OR_ERROR","rc":%s,"log":"%s"}\n' \
     "$ts" "$base" "$SLOT_SEEDS" "$STEPS" "$rc" "$log" >> "$STATE/ledger.jsonl"
-  touch "$STATE/STOP"
+  printf 'VIOLATION: Oracle violation or unclassified error at base_seed=%s (rc=%s). Log: %s\n' \
+    "$base" "$rc" "$log" > "$STATE/STOP"
   echo "SG1 SOAK HALTED: violation/error at base_seed=$base (rc=$rc). Campaign STOPped." >&2
   echo "  details: $log" >&2
   echo "  replay:  SG1_SEED=<seed> just sg1-per-commit   (seeds in [$base, $((base+SLOT_SEEDS))))" >&2
@@ -60,6 +115,7 @@ printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clea
 
 exec {tf}>"$STATE/total.lock"; flock "$tf"
 cum=$(( $(cat "$STATE/cumulative") + op )); echo "$cum" > "$STATE/cumulative"
+echo 0 > "$STATE/infra_consecutive"   # a clean slot ends an infra streak
 flock -u "$tf"; exec {tf}>&-
 
 if [ "$cum" -ge "$TARGET_OPSTEPS" ]; then

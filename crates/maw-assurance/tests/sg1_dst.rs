@@ -47,6 +47,28 @@
 //! present. The test then fails normally (exit 101 from cargo test),
 //! which is how T1.7 acceptance criterion §5 verifies "a planted-
 //! violation seed turns the run red".
+//!
+//! ## Infrastructure failures (bn-30v6e)
+//!
+//! A seed that dies because the HOST ran out of disk quota, disk space or
+//! file descriptors (EDQUOT/ENOSPC/EMFILE/ENFILE, see
+//! `maw_assurance::infra`) is not an oracle verdict. The random-budget and
+//! nightly-soak tests catch such a failure, print ONE marker line
+//! `[sg1] INFRA-FAILURE: <reason>` and exit the process with code 75
+//! (`EX_TEMPFAIL`). `scripts/sg1-soak/slot.sh` records such a slot as
+//! `infra` (no op-steps accrued, no violation) instead of halting.
+//!
+//! Fail closed:
+//! - only errors the classifier positively matches are infra; any other
+//!   panic still fails the test (exit 101) as before;
+//! - an oracle violation seen earlier in the same run always wins: the
+//!   run then fails with the violations, never exits 75;
+//! - infra never counts a seed as clean.
+//!
+//! Test hooks (used by `sg1_infra_exit_contract`): `SG1_SIMULATE_INFRA_AT=<i>`
+//! raises a simulated EDQUOT at seed index `i`; `SG1_SIMULATE_PANIC_AT=<i>`
+//! raises an ordinary (non-infra) panic there. Neither can produce a clean
+//! seed, so they cannot inflate soak accrual.
 
 #![cfg(feature = "oracles")]
 #![allow(
@@ -71,10 +93,13 @@
 )]
 
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use maw_assurance::in_proc::{InProcDriver, PlantedDefect, StepVerdict};
+use maw_assurance::infra::{self, INFRA_EXIT_CODE, INFRA_MARKER, InfraFailure};
 use maw_assurance::scenario::{
     CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
     generate_plan,
@@ -285,11 +310,19 @@ struct SeedOutcome {
     elapsed: Duration,
 }
 
+fn new_driver() -> InProcDriver {
+    match InProcDriver::new() {
+        Ok(d) => d,
+        Err(err) => {
+            infra::raise_if_infra_io(&err, "in-proc driver init");
+            panic!("in-proc driver init: {err:?}");
+        }
+    }
+}
+
 fn drive_one(seed: u64, n_steps: usize, planted: &[PlantedDefect]) -> SeedOutcome {
     let plan = generate_plan(seed, &ConditionProfile::default(), n_steps);
-    let mut driver = InProcDriver::new()
-        .expect("in-proc driver init")
-        .with_planted(planted.to_vec());
+    let mut driver = new_driver().with_planted(planted.to_vec());
     let started = Instant::now();
     let out = driver.drive(&plan);
     SeedOutcome {
@@ -300,15 +333,92 @@ fn drive_one(seed: u64, n_steps: usize, planted: &[PlantedDefect]) -> SeedOutcom
 }
 
 fn drive_corpus_scenario_plan(entry: &ShrinkerCorpusEntry) -> SeedOutcome {
-    let mut driver = InProcDriver::new()
-        .expect("in-proc driver init")
-        .with_planted(entry.planted.clone());
+    let mut driver = new_driver().with_planted(entry.planted.clone());
     let started = Instant::now();
     let out = driver.drive(&entry.plan);
     SeedOutcome {
         steps: out.steps_replayed,
         verdict: out.verdict,
         elapsed: started.elapsed(),
+    }
+}
+
+fn env_index(key: &str) -> Option<usize> {
+    std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+/// Drive one seed, separating infrastructure failures from everything else.
+///
+/// `Err` ONLY for a panic whose payload `maw_assurance::infra` positively
+/// classifies (EDQUOT/ENOSPC/EMFILE/ENFILE). Every other panic resumes
+/// unwinding unchanged (fail closed), and oracle verdicts are returned in
+/// `Ok` untouched. Only the drive is wrapped: shrinking/bundling a real
+/// violation is never reclassified.
+fn drive_one_checked(
+    index: usize,
+    seed: u64,
+    n_steps: usize,
+    planted: &[PlantedDefect],
+) -> Result<SeedOutcome, InfraFailure> {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        if env_index("SG1_SIMULATE_INFRA_AT") == Some(index) {
+            infra::raise_if_infra_io(
+                &std::io::Error::from(std::io::ErrorKind::QuotaExceeded),
+                "SG1_SIMULATE_INFRA_AT (simulated)",
+            );
+        }
+        assert!(
+            env_index("SG1_SIMULATE_PANIC_AT") != Some(index),
+            "SG1_SIMULATE_PANIC_AT: simulated non-infra harness failure"
+        );
+        drive_one(seed, n_steps, planted)
+    }));
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(payload) => match infra::classify_panic_payload(payload.as_ref()) {
+            Some(failure) => Err(failure),
+            None => panic::resume_unwind(payload),
+        },
+    }
+}
+
+/// What a run does when a seed hits an infrastructure failure.
+#[derive(Debug, PartialEq, Eq)]
+enum InfraDisposition {
+    /// No violation so far: print the marker and exit 75.
+    ExitInfra,
+    /// A violation was already observed: stop and fail with the
+    /// violations (a real finding always outranks a full disk).
+    FailWithViolations,
+}
+
+const fn infra_disposition(violations_so_far: usize) -> InfraDisposition {
+    if violations_so_far == 0 {
+        InfraDisposition::ExitInfra
+    } else {
+        InfraDisposition::FailWithViolations
+    }
+}
+
+/// Handle an infra failure at `seed`. Exits the process with
+/// [`INFRA_EXIT_CODE`] unless violations were already seen, in which case
+/// it returns so the caller's violation assert fires.
+fn on_infra_failure(failure: &InfraFailure, seed: u64, clean: u64, violations_so_far: usize) {
+    match infra_disposition(violations_so_far) {
+        InfraDisposition::ExitInfra => {
+            eprintln!(
+                "{}",
+                failure.marker_line(&format!(
+                    "seed={seed}, after {clean} clean seeds; run is NOT counted"
+                ))
+            );
+            std::process::exit(INFRA_EXIT_CODE);
+        }
+        InfraDisposition::FailWithViolations => {
+            eprintln!(
+                "[sg1] infrastructure failure at seed={seed} ({failure}) AFTER                  {violations_so_far} oracle violation(s); reporting the violations                  (fail closed)"
+            );
+        }
     }
 }
 
@@ -508,7 +618,7 @@ fn sg1_per_commit_random_budget() {
     let mut clean = 0usize;
     let mut elapsed_total = Duration::ZERO;
 
-    for seed in &seeds {
+    for (index, seed) in seeds.iter().enumerate() {
         assert!(
             started.elapsed() <= wall_cap,
             "SG1 per-commit budget exceeded wall-clock cap of {:?} \
@@ -519,7 +629,13 @@ fn sg1_per_commit_random_budget() {
             clean,
             violations.len()
         );
-        let outcome = drive_one(*seed, steps, &planted);
+        let outcome = match drive_one_checked(index, *seed, steps, &planted) {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                on_infra_failure(&failure, *seed, clean as u64, violations.len());
+                break;
+            }
+        };
         elapsed_total += outcome.elapsed;
         if outcome.verdict.is_violation() {
             // Shrink and emit a minimal bundle.
@@ -631,7 +747,13 @@ fn sg1_nightly_soak() {
                 started.elapsed()
             );
         }
-        let outcome = drive_one(*seed, steps, &[]);
+        let outcome = match drive_one_checked(i, *seed, steps, &[]) {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                on_infra_failure(&failure, *seed, clean, violations.len());
+                break;
+            }
+        };
         elapsed_total += outcome.elapsed;
         if outcome.verdict.is_violation() {
             let original_plan = generate_plan(*seed, &ConditionProfile::default(), steps);
@@ -710,4 +832,175 @@ fn sg1_generator_is_byte_identical_per_seed() {
         "DefaultScenarioGenerator is NOT byte-identical for seed 123 — \
          the §5 determinism contract is broken; SG1 cannot trust replay"
     );
+}
+
+// ---------------------------------------------------------------------------
+// bn-30v6e: infra-vs-violation exit contract (what scripts/sg1-soak/slot.sh
+// relies on). Runs THIS test binary as a child on `sg1_nightly_soak`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sg1_infra_disposition_prefers_violations() {
+    assert_eq!(infra_disposition(0), InfraDisposition::ExitInfra);
+    assert_eq!(infra_disposition(1), InfraDisposition::FailWithViolations);
+    assert_eq!(infra_disposition(7), InfraDisposition::FailWithViolations);
+}
+
+fn run_nightly_child(extra_env: &[(&str, &str)]) -> (Option<i32>, String) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = Command::new(exe);
+    cmd.args(["sg1_nightly_soak", "--ignored", "--exact", "--nocapture"]);
+    for key in [
+        "SG1_SEED",
+        "SG1_BASE_SEED",
+        "SG1_SIMULATE_INFRA_AT",
+        "SG1_SIMULATE_PANIC_AT",
+        "SG1_PLANT_VIOLATION",
+        "SG1_PLANT_AND_FAIL",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.env("SG1_NIGHTLY_SEEDS", "1")
+        .env("SG1_NIGHTLY_STEPS", "4");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("spawn sg1_dst child");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), text)
+}
+
+fn has_marker_line(text: &str) -> bool {
+    text.lines().any(|l| l.starts_with(INFRA_MARKER))
+}
+
+#[test]
+fn sg1_infra_exit_contract() {
+    // Infra at seed index 1 (index 0 is the canonical bn-cm63 seed):
+    // exit 75 + exactly the marker, and no "soak end" accrual line.
+    let (code, text) = run_nightly_child(&[("SG1_SIMULATE_INFRA_AT", "1")]);
+    assert_eq!(
+        code,
+        Some(INFRA_EXIT_CODE),
+        "infra run must exit 75:\n{text}"
+    );
+    assert!(has_marker_line(&text), "missing marker line:\n{text}");
+    assert!(text.contains("EDQUOT"), "{text}");
+    assert!(
+        !text.contains("nightly soak end:"),
+        "an infra run must not print the accrual line:\n{text}"
+    );
+
+    // Fail closed: an ordinary panic is NOT infra.
+    let (code, text) = run_nightly_child(&[("SG1_SIMULATE_PANIC_AT", "1")]);
+    assert_ne!(code, Some(0), "{text}");
+    assert_ne!(
+        code,
+        Some(INFRA_EXIT_CODE),
+        "non-infra panic exited 75:\n{text}"
+    );
+    assert!(
+        !has_marker_line(&text),
+        "non-infra panic printed marker:\n{text}"
+    );
+
+    // Baseline: a clean run exits 0 and prints the accrual line.
+    let (code, text) = run_nightly_child(&[]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("nightly soak end: seeds=2 clean=2"), "{text}");
+    assert!(!has_marker_line(&text), "{text}");
+}
+
+/// Run the nightly soak child with a `git` shim first on PATH. The shim
+/// fails any git invocation whose argv starts with `when` by printing
+/// `stderr` and exiting 128; everything else runs the real git. This drives
+/// the REAL driver code paths (driver init, apply_op, git helpers) with the
+/// exact stderr shapes that halted the pre.6 campaign.
+fn run_nightly_child_with_git_shim(when: &str, stderr: &str, steps: &str) -> (Option<i32>, String) {
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .expect("locate git");
+    assert!(!real_git.is_empty(), "git not on PATH");
+    let shim_dir = tempfile::TempDir::new().expect("shim dir");
+    let shim = shim_dir.path().join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/usr/bin/env bash\n\
+             if [[ \"$*\" == \"$SHIM_GIT_WHEN\"* ]]; then printf '%s\\n' \"$SHIM_GIT_STDERR\" >&2; exit 128; fi\n\
+             exec {real_git} \"$@\"\n"
+        ),
+    )
+    .expect("write shim");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
+    }
+    let path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_nightly_child(&[
+        ("PATH", path.as_str()),
+        ("SHIM_GIT_WHEN", when),
+        ("SHIM_GIT_STDERR", stderr),
+        ("SG1_NIGHTLY_STEPS", steps),
+    ])
+}
+
+#[cfg(unix)]
+#[test]
+fn sg1_infra_real_git_failures_classify_both_directions() {
+    // 1. `git init` hits EDQUOT (the first pre.6 halt) => infra, exit 75.
+    let (code, text) = run_nightly_child_with_git_shim(
+        "init",
+        "fatal: cannot mkdir .git: Disk quota exceeded",
+        "4",
+    );
+    assert_eq!(code, Some(INFRA_EXIT_CODE), "{text}");
+    assert!(has_marker_line(&text), "{text}");
+    assert!(
+        text.contains("EDQUOT") && text.contains("driver init"),
+        "{text}"
+    );
+
+    // 2. A workspace-ref write inside a plan step hits ENOSPC => the driver's
+    //    apply_op path aborts the seed as infra instead of letting the
+    //    oracles judge a half-applied step.
+    let (code, text) = run_nightly_child_with_git_shim(
+        "update-ref refs/manifold/ws/",
+        "fatal: update_ref failed: unable to write: No space left on device",
+        "8",
+    );
+    assert_eq!(code, Some(INFRA_EXIT_CODE), "{text}");
+    assert!(has_marker_line(&text), "{text}");
+    assert!(
+        text.contains("ENOSPC") && text.contains("apply step"),
+        "{text}"
+    );
+
+    // 3. Fail closed: a NON-infra `git init` failure still panics (exit 101,
+    //    no marker) exactly as before.
+    let (code, text) =
+        run_nightly_child_with_git_shim("init", "fatal: bad config line 1 in file", "4");
+    assert_ne!(code, Some(0), "{text}");
+    assert_ne!(code, Some(INFRA_EXIT_CODE), "{text}");
+    assert!(!has_marker_line(&text), "{text}");
+
+    // 4. A non-infra step failure keeps the old best-effort semantics: never
+    //    classified as infra.
+    let (code, text) = run_nightly_child_with_git_shim(
+        "update-ref refs/manifold/ws/",
+        "fatal: cannot lock ref 'refs/manifold/ws/ws-0'",
+        "8",
+    );
+    assert_ne!(code, Some(INFRA_EXIT_CODE), "{text}");
+    assert!(!has_marker_line(&text), "{text}");
 }

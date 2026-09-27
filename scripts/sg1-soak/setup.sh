@@ -8,6 +8,8 @@
 #
 # Env overrides: MAW_REPO, SG1_SOAK_STATE, SG1_SOAK_STEPS, SG1_SOAK_SLOT_SEEDS,
 #                SG1_SOAK_PARALLEL, SG1_SOAK_TARGET, SG1_SOAK_BASE_START,
+#                SG1_SOAK_INFRA_HALT_AFTER (consecutive infra slots before
+#                an INFRA-HALT STOP; default 3),
 #                SG1_SOAK_FORCE=1 (allow re-pin mid-campaign without reset).
 set -euo pipefail
 
@@ -18,6 +20,7 @@ SLOT_SEEDS="${SG1_SOAK_SLOT_SEEDS:-500}"
 PARALLEL="${SG1_SOAK_PARALLEL:-2}"
 TARGET="${SG1_SOAK_TARGET:-100000000}"           # 1e8 — v1.0 release-gate floor
 BASE_START="${SG1_SOAK_BASE_START:-4294967296}"  # 0x1_0000_0000, clear of corpus/canonical seeds
+INFRA_HALT_AFTER="${SG1_SOAK_INFRA_HALT_AFTER:-3}"
 
 mkdir -p "$STATE"
 
@@ -35,8 +38,9 @@ if [ -f "$STATE/config.env" ] && [ "${CUM:-0}" -gt 0 ] && [ "${SG1_SOAK_FORCE:-0
   OLD_BINSHA=$(grep -oP '^PINNED_BIN_SHA256=\K.*' "$STATE/config.env" || true)
   if [ "$NEW_BINSHA" != "$OLD_BINSHA" ]; then
     echo "REFUSING: harness binary changed but cumulative=$CUM (>0)." >&2
-    echo "A surface change resets accrual (campaign §2). To start a FRESH campaign:" >&2
-    echo "    rm -rf '$STATE' && $0" >&2
+    echo "A surface change resets accrual (campaign §2). To start a FRESH campaign," >&2
+    echo "ARCHIVE the old state (its ledger is evidence) and re-run:" >&2
+    echo "    mv '$STATE' '$STATE.archive-$(date -u +%Y%m%dT%H%M%SZ)' && $0" >&2
     echo "Or to force re-pin and KEEP the counter (only if the change is provably" >&2
     echo "behaviour-neutral): SG1_SOAK_FORCE=1 $0" >&2
     exit 1
@@ -53,6 +57,7 @@ STEPS=$STEPS
 SLOT_SEEDS=$SLOT_SEEDS
 PARALLEL=$PARALLEL
 TARGET_OPSTEPS=$TARGET
+INFRA_HALT_AFTER=$INFRA_HALT_AFTER
 PINNED_SRC=$BIN
 PINNED_SRC_SHA=$SRC_SHA
 PINNED_BIN_SHA256=$NEW_BINSHA
@@ -61,6 +66,7 @@ EOF
 
 [ -f "$STATE/cursor" ]     || echo "$BASE_START" > "$STATE/cursor"
 [ -f "$STATE/cumulative" ] || echo 0 > "$STATE/cumulative"
+echo 0 > "$STATE/infra_consecutive"
 touch "$STATE/ledger.jsonl"
 rm -f "$STATE/DONE" "$STATE/STOP"
 
