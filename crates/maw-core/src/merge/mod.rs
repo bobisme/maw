@@ -10,6 +10,7 @@
 pub mod apply;
 pub mod build;
 pub mod diff_extract;
+pub mod ff_plan;
 pub mod materialize;
 pub mod partition;
 pub mod plan;

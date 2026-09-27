@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use maw_core::merge::ff_plan::{
+    AbsorbVerdict, SiblingDecision, SiblingHead, SiblingProbe, absorb_verdict, classify_sibling,
+};
 use maw_git::GitRepo as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -3766,8 +3769,22 @@ fn reconcile_epoch_with_branch(
                 head_before: String,
             }
 
-            let mut classes: Vec<SiblingClass> = Vec::new();
-            let mut blocked: Vec<String> = Vec::new();
+            // bn-27n7: the per-sibling decision is the pure, Kani-verified
+            // `maw_core::merge::ff_plan::classify_sibling`; this loop only
+            // gathers its facts (lazily, in the same order as before) and
+            // turns the decision into a plan.
+            #[allow(clippy::items_after_statements)]
+            struct SiblingCandidate {
+                name: String,
+                ws_path: PathBuf,
+                decision: SiblingDecision,
+                dirty_paths: std::collections::BTreeSet<PathBuf>,
+                stale_paths: Vec<PathBuf>,
+                base_epoch: String,
+                head_before: String,
+            }
+
+            let mut candidates: Vec<SiblingCandidate> = Vec::new();
             for ws in &ws_touched {
                 // The merge target (default) has dedicated handling below
                 // (`sync_target_worktree_to_epoch`). It only appears in
@@ -3787,84 +3804,109 @@ fn reconcile_epoch_with_branch(
                         .flatten()
                         .map_or_else(|| epoch_oid.as_str().to_owned(), |o| o.as_str().to_owned());
 
-                // Already synced to the absorbed tip — nothing to do.
-                if base_epoch == branch_oid.as_str() {
+                let mut head: Option<String> = None;
+                // RefCell: both lazy closures below touch the dirty set.
+                let dirty_paths = std::cell::RefCell::new(std::collections::BTreeSet::new());
+                let mut stale_paths: Vec<PathBuf> = Vec::new();
+                let decision = classify_sibling(
+                    // Already synced to the absorbed tip — nothing to do.
+                    base_epoch == branch_oid.as_str(),
+                    || -> Result<SiblingProbe> {
+                        head = maw_git::GixRepo::open(&ws_path)
+                            .ok()
+                            .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
+                            .map(|h| h.to_string());
+                        let inspected = dirty_paths_in_workspace(&ws_path).with_context(|| {
+                            format!(
+                                "cannot inspect sibling workspace '{}' for local edits; refusing \
+                                 automatic FF absorb",
+                                ws.name
+                            )
+                        })?;
+                        *dirty_paths.borrow_mut() = inspected;
+                        Ok(SiblingProbe {
+                            // HEAD unreadable falls back to the non-destructive
+                            // FF path, which preserves the worktree.
+                            head: match &head {
+                                None => SiblingHead::Unreadable,
+                                Some(h) if *h == base_epoch => SiblingHead::AtBase,
+                                Some(_) => SiblingHead::Ahead,
+                            },
+                            dirty: !dirty_paths.borrow().is_empty(),
+                        })
+                    },
+                    // bn-mq3b: a dirty FF sibling is safe to advance ONLY when
+                    // none of its uncommitted paths changed between its HEAD
+                    // and the absorb target. `ff_paths` (the global
+                    // epoch..branch diff) is too narrow to prove this: a
+                    // sibling more than one epoch behind can be dirty in a path
+                    // that changed in an EARLIER epoch — inside its own
+                    // HEAD..target diff but outside `ff_paths`. On overlap,
+                    // leave it stale instead of stranding the content behind a
+                    // moved HEAD.
+                    || {
+                        stale_paths = ff_dirty_stale_conflict(
+                            &ws_path,
+                            &ws.name,
+                            branch_oid,
+                            &dirty_paths.borrow(),
+                        );
+                        !stale_paths.is_empty()
+                    },
+                )?;
+                if decision == SiblingDecision::AlreadySynced {
                     continue;
                 }
-
-                let head = maw_git::GixRepo::open(&ws_path)
-                    .ok()
-                    .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
-                    .map(|h| h.to_string());
-                let dirty_paths = dirty_paths_in_workspace(&ws_path).with_context(|| {
-                    format!(
-                        "cannot inspect sibling workspace '{}' for local edits; refusing \
-                         automatic FF absorb",
-                        ws.name
-                    )
-                })?;
-                let dirty = !dirty_paths.is_empty();
                 // bn-2fto: remembered for the op-log entry this absorb writes
                 // (`maw ws history <ws>` must show the FF-absorb advance/skip).
-                let head_before = head.clone().unwrap_or_else(|| base_epoch.clone());
-
-                match head {
-                    // Committed-ahead: HEAD advanced past the base epoch.
-                    Some(h) if h != base_epoch => {
-                        if dirty {
-                            // Cannot replay a dirty worktree; block the absorb.
-                            blocked.push(ws.name.clone());
-                        } else {
-                            classes.push(SiblingClass {
-                                name: ws.name.clone(),
-                                ws_path,
-                                head_before,
-                                base_epoch: base_epoch.clone(),
-                                plan: SiblingPlan::Replay { base_epoch },
-                            });
-                        }
-                    }
-                    // HEAD at base epoch (or unreadable — fall back to the
-                    // non-destructive FF path, which preserves the worktree).
-                    _ => {
-                        // bn-mq3b: a dirty FF sibling is safe to advance ONLY
-                        // when none of its uncommitted paths changed between its
-                        // HEAD and the absorb target. `ff_paths` (the global
-                        // epoch..branch diff) is too narrow to prove this: a
-                        // sibling more than one epoch behind can be dirty in a
-                        // path that changed in an EARLIER epoch — inside its own
-                        // HEAD..target diff but outside `ff_paths`. Check the
-                        // sibling's own stale set here; on overlap, leave it
-                        // stale instead of stranding the content behind a moved
-                        // HEAD.
-                        let stale_dirty = if dirty {
-                            ff_dirty_stale_conflict(&ws_path, &ws.name, branch_oid, &dirty_paths)
-                        } else {
-                            Vec::new()
-                        };
-                        let plan = if stale_dirty.is_empty() {
-                            SiblingPlan::FastForward { dirty_paths }
-                        } else {
-                            SiblingPlan::SkipStaleDirty {
-                                stale_paths: stale_dirty,
-                            }
-                        };
-                        classes.push(SiblingClass {
-                            name: ws.name.clone(),
-                            ws_path,
-                            plan,
-                            base_epoch,
-                            head_before,
-                        });
-                    }
-                }
+                let head_before = head.unwrap_or_else(|| base_epoch.clone());
+                candidates.push(SiblingCandidate {
+                    name: ws.name.clone(),
+                    ws_path,
+                    decision,
+                    dirty_paths: dirty_paths.into_inner(),
+                    stale_paths,
+                    base_epoch,
+                    head_before,
+                });
             }
 
             // A committed-ahead + dirty sibling blocks the absorb. Bail BEFORE
             // any ref/HEAD mutation so nothing is left half-moved.
-            if !blocked.is_empty() {
-                return bail_diverged(&blocked);
+            let decisions: Vec<SiblingDecision> = candidates.iter().map(|c| c.decision).collect();
+            if let AbsorbVerdict::Block { blocked } = absorb_verdict(&decisions) {
+                let names: Vec<String> = blocked
+                    .into_iter()
+                    .map(|i| candidates[i].name.clone())
+                    .collect();
+                return bail_diverged(&names);
             }
+            let classes: Vec<SiblingClass> = candidates
+                .into_iter()
+                .map(|c| {
+                    let plan = match c.decision {
+                        SiblingDecision::Replay => SiblingPlan::Replay {
+                            base_epoch: c.base_epoch.clone(),
+                        },
+                        SiblingDecision::SkipStaleDirty => SiblingPlan::SkipStaleDirty {
+                            stale_paths: c.stale_paths,
+                        },
+                        SiblingDecision::FastForward => SiblingPlan::FastForward {
+                            dirty_paths: c.dirty_paths,
+                        },
+                        SiblingDecision::AlreadySynced | SiblingDecision::BlockAbsorb => {
+                            unreachable!("filtered above: synced skipped, block bailed")
+                        }
+                    };
+                    SiblingClass {
+                        name: c.name,
+                        ws_path: c.ws_path,
+                        plan,
+                        base_epoch: c.base_epoch,
+                        head_before: c.head_before,
+                    }
+                })
+                .collect();
 
             let mut notes: Vec<String> = Vec::new();
             let trigger = format!(
@@ -4377,10 +4419,6 @@ struct FfWorktreeSync {
 /// Failures are logged but non-fatal; the merge re-snapshots before BUILD
 /// and any drift will surface as a normal merge artefact rather than data
 /// loss.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one ordered FF materialization and HEAD/index realignment sequence"
-)]
 fn sync_ff_paths_in_worktree(
     ws_path: &Path,
     ws_name: &str,
@@ -4429,22 +4467,13 @@ fn sync_ff_paths_in_worktree(
     let own_paths = ff_own_stale_paths(&ws_repo, ws_name, target_git);
     let mut to_apply: std::collections::BTreeSet<PathBuf> = ff_paths.clone();
     if let Some(own) = own_paths {
-        for rel in own {
-            if ff_paths.contains(&rel) {
-                continue;
-            }
-            if dirty_paths
-                .iter()
-                .any(|dirty_path| super::ff_absorb::paths_conflict(&rel, dirty_path))
-            {
-                // A local edit outside the absorbed range. Never clobber it;
-                // the caller warns so the operator can run a real sync.
-                report.extra_skipped_dirty.push(rel);
-                continue;
-            }
-            report.extra_refreshed += 1;
-            to_apply.insert(rel);
-        }
+        // bn-27n7: the pure, Kani-verified split. A dirty-conflicting path
+        // outside the absorbed range is never clobbered; the caller warns so
+        // the operator can run a real sync.
+        let split = maw_core::merge::ff_plan::split_own_delta(own, ff_paths, dirty_paths);
+        report.extra_refreshed += split.refresh.len();
+        report.extra_skipped_dirty.extend(split.skipped_dirty);
+        to_apply.extend(split.refresh);
     }
 
     if !to_apply.is_empty() {
@@ -4554,19 +4583,13 @@ fn ff_dirty_stale_conflict(
     let Ok(target_git) = branch_oid.as_str().parse::<maw_git::GitOid>() else {
         return all_dirty();
     };
-    // `None` means the stale set could not be computed — fail closed by
-    // returning every dirty path so the caller never advances a dirty worktree
-    // it cannot prove safe.
-    ff_own_stale_paths(&ws_repo, ws_name, target_git).map_or_else(all_dirty, |stale| {
-        stale
-            .into_iter()
-            .filter(|stale_path| {
-                dirty
-                    .iter()
-                    .any(|dirty_path| super::ff_absorb::paths_conflict(stale_path, dirty_path))
-            })
-            .collect()
-    })
+    // `None` means the stale set could not be computed. bn-27n7: the pure
+    // filter fails closed by returning every dirty path so the caller never
+    // advances a dirty worktree it cannot prove safe.
+    maw_core::merge::ff_plan::stale_dirty_filter(
+        ff_own_stale_paths(&ws_repo, ws_name, target_git),
+        dirty,
+    )
 }
 
 /// bn-2fto: record an FF-absorb fast-forward of a sibling in its op log so

@@ -88,12 +88,8 @@ pub fn evaluate_ff_safety(
 
 /// Whether two Git paths conflict by equality or directory/file ancestry.
 ///
-/// [`Path::starts_with`] compares whole path components, so similar names such
-/// as `shape` and `shapely/file.txt` remain independent.
-#[must_use]
-pub fn paths_conflict(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
-}
+/// bn-27n7: lives in `maw-core` as a pure function verified by Kani.
+pub use maw_core::merge::ff_plan::paths_conflict;
 
 /// Strict-ancestor predicate: returns `true` iff `epoch != branch` AND
 /// `epoch` is reachable from `branch` via parent links.
