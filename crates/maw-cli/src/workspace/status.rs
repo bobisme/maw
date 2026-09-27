@@ -192,11 +192,14 @@ pub fn status(format: OutputFormat) -> Result<()> {
     // signal, not a hard gate; status() should never error out because of
     // it. Likewise for any classify_drift error: surface as "no drift
     // report" rather than crashing.
-    let epoch_drift = super::MawConfig::load(&root).ok().and_then(|cfg| {
+    // bn-qi5br: an invalid .maw.toml warns (once) instead of silently
+    // classifying drift against the default branch.
+    let epoch_drift = {
+        let cfg = super::MawConfig::load_or_warn(&root);
         super::epoch_drift::classify_drift(&root, cfg.branch(), &backend)
             .ok()
             .flatten()
-    });
+    };
 
     // Build workspace entries
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces

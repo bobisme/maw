@@ -418,8 +418,7 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
 
     super::refuse_quarantine_operand(&workspace_name, "maw ws sync")?;
     if is_default_workspace(&workspace_name) {
-        let branch = MawConfig::load(&root)
-            .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+        let branch = MawConfig::load_or_warn(&root).branch().to_string();
         return Ok(SyncJsonOutput {
             workspace: workspace_name.clone(),
             action: "default_skip".to_string(),
@@ -823,8 +822,7 @@ fn sync_all(no_rebase: bool) -> Result<()> {
 /// The default workspace tracks the configured branch and never does a
 /// detached-epoch sync — explain why instead of silently no-oping.
 fn print_default_sync_skip(root: &Path, workspace_name: &str) {
-    let branch =
-        MawConfig::load(root).map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+    let branch = MawConfig::load_or_warn(root).branch().to_string();
     println!("Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}').");
     println!("Skipping detached-epoch sync for default workspace.");
 }

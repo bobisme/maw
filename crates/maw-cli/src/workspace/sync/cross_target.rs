@@ -106,8 +106,9 @@ pub(super) fn cross_target_sync_risk(
         return Ok(None);
     }
 
-    let trunk_branch =
-        MawConfig::load(root).map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+    let trunk_branch = MawConfig::require(root, "maw ws sync")?
+        .branch()
+        .to_string();
 
     let Some(active_change) = active_change_tracking_epoch(root, epoch_oid, &trunk_branch)? else {
         return Ok(None);

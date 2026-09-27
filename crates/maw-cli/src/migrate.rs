@@ -507,8 +507,9 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
     tracing::info!("phase D: set core.bare=false");
 
     // Step 8: set HEAD to refs/heads/<branch> (symbolic ref).
-    let branch = crate::workspace::MawConfig::load(root)
-        .map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
+    let branch = crate::workspace::MawConfig::require(root, "maw migrate")?
+        .branch()
+        .to_string();
     let target = format!("refs/heads/{branch}");
     let set = Command::new("git")
         .current_dir(root)

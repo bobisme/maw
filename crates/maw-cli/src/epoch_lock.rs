@@ -140,9 +140,15 @@ impl WaitPolicy {
     /// `MAW_LOCK_WAIT_SECS` (integer seconds). Orchestrators that prefer an
     /// immediate distinct-exit-code failure set `no_wait` (config) or
     /// `MAW_LOCK_NO_WAIT=1` (env).
-    #[must_use]
-    pub fn resolve(root: &Path) -> Self {
-        let config = MawConfig::load(root).unwrap_or_default();
+    ///
+    /// # Errors
+    ///
+    /// bn-qi5br: refuses (naming the file, the parse error and the fix) when
+    /// `.maw.toml` is invalid. Every epoch mutator resolves its wait policy
+    /// here, so an invalid config can never let one run on default settings
+    /// (branch `main`, default lock wait, audit on).
+    pub fn resolve(root: &Path, command: &str) -> Result<Self> {
+        let config = MawConfig::require(root, &format!("maw {command}"))?;
         let mut no_wait = config.lock_no_wait();
         let mut secs = config.lock_wait_seconds();
 
@@ -157,10 +163,10 @@ impl WaitPolicy {
             secs = v;
         }
 
-        Self {
+        Ok(Self {
             wait: !no_wait,
             timeout: Duration::from_secs(secs),
-        }
+        })
     }
 }
 
@@ -203,7 +209,7 @@ impl EpochLock {
     /// within the wait window (or immediately, under `no_wait`). Returns other
     /// errors if the lock directory or file cannot be created/opened.
     pub fn acquire(root: &Path, command: &str) -> Result<Self> {
-        Self::acquire_with(root, command, WaitPolicy::resolve(root))
+        Self::acquire_with(root, command, WaitPolicy::resolve(root, command)?)
     }
 
     /// Acquire with an explicit [`WaitPolicy`] (used by tests).

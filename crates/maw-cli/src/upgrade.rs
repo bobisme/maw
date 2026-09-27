@@ -321,8 +321,9 @@ fn fix_git_head() -> Result<()> {
         return Ok(());
     }
 
-    let branch = crate::workspace::MawConfig::load(Path::new("."))
-        .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+    let branch = crate::workspace::MawConfig::require(Path::new("."), "maw upgrade")?
+        .branch()
+        .to_string();
     let target = format!("refs/heads/{branch}");
 
     let set = Command::new("git")

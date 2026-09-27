@@ -226,7 +226,17 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
     };
 
     let root = root?;
-    let config = crate::workspace::MawConfig::load(root).ok()?;
+    // bn-qi5br: never repair on default settings; the epoch-drift check
+    // reports the config error itself.
+    let Ok(config) = crate::workspace::MawConfig::load(root) else {
+        return Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "warn".to_string(),
+            message: "epoch repair: skipped — .maw.toml is invalid (see the epoch drift check)"
+                .to_string(),
+            fix: None,
+        });
+    };
     let branch = config.branch();
     let default_ws = config.default_workspace();
     let backend = maw_core::backend::git::GitWorktreeBackend::new(root.to_path_buf());
@@ -694,13 +704,20 @@ fn check_epoch_drift(root: Option<&Path>) -> DoctorCheck {
         };
     };
 
-    let Ok(config) = crate::workspace::MawConfig::load(root) else {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "epoch drift: could not check (config unreadable)".to_string(),
-            fix: None,
-        };
+    // bn-qi5br: an invalid .maw.toml is a failure to report, not an "ok".
+    let config = match crate::workspace::MawConfig::load(root) {
+        Ok(config) => config,
+        Err(e) => {
+            return DoctorCheck {
+                name,
+                status: "fail".to_string(),
+                message: format!("epoch drift: could not check — {e}"),
+                fix: Some(
+                    "Correct .maw.toml (the parse error above names the line), then re-run: maw doctor"
+                        .to_string(),
+                ),
+            };
+        }
     };
     let branch = config.branch();
 
@@ -794,8 +811,9 @@ fn check_git_head() -> DoctorCheck {
     head_ref_name.map_or_else(
         || {
             let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
-            let branch = crate::workspace::MawConfig::load(&root)
-                .map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
+            let branch = crate::workspace::MawConfig::load_or_warn(&root)
+                .branch()
+                .to_string();
             DoctorCheck {
                 name: "git HEAD".to_string(),
                 status: "fail".to_string(),

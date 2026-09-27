@@ -125,7 +125,7 @@ pub fn run_post_sync_hooks(
     ws_path: &Path,
     epoch: &str,
 ) -> Option<PostSyncHookSummary> {
-    let config = MawConfig::load(root).ok()?;
+    let config = MawConfig::load_or_warn(root);
     let commands = config.post_sync_hooks();
     if commands.is_empty() {
         return None;

@@ -240,16 +240,54 @@ impl MawConfig {
     ///
     /// Returns an error if the config file cannot be read or parsed.
     pub fn load(repo_root: &Path) -> Result<Self> {
+        Self::try_load(repo_root).map_err(|e| anyhow::anyhow!("{e}\n  {}", e.fix_line()))
+    }
+
+    /// Load `.maw.toml`, keeping the failure typed so callers can phrase the
+    /// refusal/warning (bn-qi5br).
+    fn try_load(repo_root: &Path) -> std::result::Result<Self, InvalidMawToml> {
         let flavor = LayoutFlavor::detect_with_env(repo_root);
         for candidate in flavor.maw_toml_search_paths(repo_root, DEFAULT_WORKSPACE) {
             if candidate.exists() {
-                let content = std::fs::read_to_string(&candidate)
-                    .with_context(|| format!("Failed to read {}", candidate.display()))?;
-                return toml::from_str(&content)
-                    .with_context(|| format!("Failed to parse {}", candidate.display()));
+                let content = std::fs::read_to_string(&candidate).map_err(|e| InvalidMawToml {
+                    path: candidate.clone(),
+                    detail: format!("cannot read: {e}"),
+                })?;
+                return toml::from_str(&content).map_err(|e| InvalidMawToml {
+                    path: candidate.clone(),
+                    detail: e.to_string().trim_end().to_owned(),
+                });
             }
         }
         Ok(Self::default())
+    }
+
+    /// Load `.maw.toml` for a state-mutating command (bn-qi5br).
+    ///
+    /// An unparseable file is an error, never a silent fallback to defaults: a
+    /// typo would otherwise mean branch `main`, workspace `default`, default
+    /// epoch-lock wait and audit on. Call this before taking any lock or
+    /// mutating any state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable refusal naming the file, the parse error (with its
+    /// line) and the fix.
+    pub fn require(repo_root: &Path, command: &str) -> Result<Self> {
+        Self::try_load(repo_root).map_err(|e| e.refusal(command))
+    }
+
+    /// Load `.maw.toml` for a read-only command or a best-effort code path that
+    /// cannot refuse (bn-qi5br).
+    ///
+    /// An unparseable file falls back to defaults so status/list keep working,
+    /// but warns loudly (once per process) with the file and the parse error.
+    #[must_use]
+    pub fn load_or_warn(repo_root: &Path) -> Self {
+        Self::try_load(repo_root).unwrap_or_else(|e| {
+            emit_config_warnings(&[e.warning()]);
+            Self::default()
+        })
     }
 
     /// The configured branch name (default: "main").
@@ -290,6 +328,52 @@ impl MawConfig {
     /// bn-1lhb: per-hook wall-clock timeout in seconds (default 300).
     pub(crate) const fn hook_timeout_seconds(&self) -> u64 {
         self.hooks.hook_timeout_seconds
+    }
+}
+
+/// An unreadable or unparseable `.maw.toml` (bn-qi5br).
+#[derive(Debug)]
+struct InvalidMawToml {
+    path: PathBuf,
+    /// The read error, or the TOML parse error (which names line and column).
+    detail: String,
+}
+
+impl InvalidMawToml {
+    fn fix_line(&self) -> String {
+        format!(
+            "To fix: correct {} (the error above names the line), then retry.",
+            self.path.display()
+        )
+    }
+
+    fn refusal(&self, command: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "{self}\n  `{command}` refuses to run with default settings instead: a typo \
+             there could silently operate on branch \"main\" and workspace \"default\" \
+             ([repo]), or change [lock] / [invariant] / [hooks] settings.\n  {}",
+            self.fix_line()
+        )
+    }
+
+    fn warning(&self) -> String {
+        format!(
+            "{self}\n  Using default settings for this read-only command; commands \
+             that change state (merge, sync, create, epoch sync, ...) will refuse until \
+             it is fixed.\n  {}",
+            self.fix_line()
+        )
+    }
+}
+
+impl std::fmt::Display for InvalidMawToml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid maw config {}: {}",
+            self.path.display(),
+            self.detail
+        )
     }
 }
 
@@ -2214,7 +2298,9 @@ pub fn git_cwd() -> Result<PathBuf> {
 pub fn default_workspace_path() -> Result<PathBuf> {
     let root = repo_root()?;
     let flavor = LayoutFlavor::detect_with_env(&root);
-    let config = MawConfig::load(&root).unwrap_or_default();
+    // bn-qi5br: callers write into this path (`ws recover --restore-file`);
+    // an invalid .maw.toml must not silently redirect them to "default".
+    let config = MawConfig::require(&root, "maw ws recover")?;
     Ok(flavor.default_target_path(&root, config.default_workspace()))
 }
 
@@ -2242,7 +2328,7 @@ pub fn detect_layout() -> Result<LayoutFlavor> {
 pub fn resolve_workspace_path_for_cd(name: &str) -> Result<PathBuf> {
     let root = repo_root()?;
     let flavor = LayoutFlavor::detect_with_env(&root);
-    let config = MawConfig::load(&root).unwrap_or_default();
+    let config = MawConfig::load_or_warn(&root);
     let default = config.default_workspace().to_owned();
     let path = if name == default || name == DEFAULT_WORKSPACE {
         flavor.default_target_path(&root, &default)

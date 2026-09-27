@@ -62,6 +62,9 @@ fn create_with_output(
     emit_output: bool,
 ) -> Result<()> {
     let root = ensure_repo_root()?;
+    // bn-qi5br: an invalid .maw.toml refuses before anything is touched (the
+    // configured branch decides the base epoch and branch attachment).
+    MawConfig::require(&root, "maw ws create")?;
     let backend = get_backend()?;
     // `workspace_path` validates the name; do this before locking so an
     // invalid name fails fast without touching the lock directory.
@@ -401,7 +404,7 @@ fn resolve_attached_branch(
     let Some(branch) = local_branch_if_exists(root, source)? else {
         return Ok(None);
     };
-    let config = MawConfig::load(root).unwrap_or_default();
+    let config = MawConfig::require(root, "maw ws create")?;
     if branch == config.branch() {
         return Ok(None);
     }
@@ -560,7 +563,7 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
         // This handles both cases:
         // - epoch behind branch (direct commits advanced branch)
         // - epoch ahead of branch (merge commit was dropped/reset)
-        let config = MawConfig::load(root).unwrap_or_default();
+        let config = MawConfig::require(root, "maw ws create")?;
         let branch = config.branch();
         let branch_ref = format!("refs/heads/{branch}");
         if let Ok(Some(branch_oid)) = manifold_refs::read_ref(root, &branch_ref)
@@ -582,7 +585,7 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     }
 
     // Fall back to configured branch HEAD
-    let config = MawConfig::load(root).unwrap_or_default();
+    let config = MawConfig::require(root, "maw ws create")?;
     let branch = config.branch();
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;

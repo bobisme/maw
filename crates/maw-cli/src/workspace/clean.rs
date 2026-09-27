@@ -59,10 +59,14 @@ pub fn clean(
     let flavor = LayoutFlavor::detect_with_env(&root);
 
     let target = name.unwrap_or_else(|| DEFAULT_WORKSPACE.to_string());
-    let default_name = MawConfig::load(&root).map_or_else(
-        |_| DEFAULT_WORKSPACE.to_string(),
-        |c| c.default_workspace().to_owned(),
-    );
+    // bn-qi5br: `ws clean` deletes files — an invalid .maw.toml refuses
+    // (a --dry-run only warns).
+    let config = if dry_run {
+        MawConfig::load_or_warn(&root)
+    } else {
+        MawConfig::require(&root, "maw ws clean")?
+    };
+    let default_name = config.default_workspace().to_owned();
     let is_default = target == DEFAULT_WORKSPACE || target == default_name;
 
     // The default workspace (repo root in consolidated layout) also collects

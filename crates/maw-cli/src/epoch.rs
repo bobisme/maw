@@ -19,12 +19,14 @@ use maw_core::refs as manifold_refs;
 /// Returns an error if the epoch cannot be synchronized with repository state.
 pub fn sync() -> Result<()> {
     let root = repo_root()?;
+    // bn-qi5br: an invalid .maw.toml refuses (never re-point the epoch at the
+    // default branch "main"). Checked before the lock is taken.
+    let config = MawConfig::require(&root, "maw epoch sync")?;
     // bn-13rc: epoch sync rewrites refs/manifold/epoch/current and the default
     // workspace baseline — serialize it against every other epoch mutator.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "epoch sync")?;
     // bn-2rnq: snapshot sibling HEADs before the epoch advance.
     let invariant_pre = crate::workspace::invariant_audit::capture(&root);
-    let config = MawConfig::load(&root).unwrap_or_default();
     let branch = config.branch();
     let branch_ref = format!("refs/heads/{branch}");
 

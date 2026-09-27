@@ -150,9 +150,12 @@ impl Ctx {
         } else {
             root.clone()
         };
-        let (branch, default_workspace) = workspace::MawConfig::load(&root).map_or_else(
-            |_| ("main".to_string(), "default".to_string()),
-            |c| (c.branch().to_string(), c.default_workspace().to_string()),
+        // bn-qi5br: warn (once) on an invalid .maw.toml; `--repair` refuses
+        // earlier in `run`.
+        let config = workspace::MawConfig::load_or_warn(&root);
+        let (branch, default_workspace) = (
+            config.branch().to_string(),
+            config.default_workspace().to_string(),
         );
         Self {
             root,
@@ -424,6 +427,10 @@ pub fn run(format: Option<OutputFormat>, repair: bool, dry_run: bool) -> Result<
     let format = OutputFormat::resolve(format);
     let root = workspace::repo_root()
         .context("maw fsck must run inside a maw repository (could not locate the repo root)")?;
+    if repair && !dry_run {
+        // bn-qi5br: repairs write refs keyed by branch/default workspace.
+        workspace::MawConfig::require(&root, "maw fsck --repair")?;
+    }
     let outcomes = run_catalog(&root, repair, dry_run);
 
     match format {

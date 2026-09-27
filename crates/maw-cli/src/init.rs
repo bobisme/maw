@@ -1062,6 +1062,8 @@ pub enum BrownfieldInitError {
     RefSet { ref_name: String, message: String },
     /// An I/O error occurred.
     Io(io::Error),
+    /// `.maw.toml` is invalid (bn-qi5br); the message names file, line, fix.
+    Config(String),
 }
 
 impl fmt::Display for BrownfieldInitError {
@@ -1101,6 +1103,7 @@ impl fmt::Display for BrownfieldInitError {
                 write!(f, "failed to set ref {ref_name}: {message}")
             }
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Config(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -1442,7 +1445,7 @@ pub fn brownfield_init(
         // If the configured branch tip has moved ahead of epoch/current
         // (for example via direct commits outside maw), resync epoch/current
         // so merge COMMIT preflight does not fail with stale expected epoch.
-        let configured_branch = bf_configured_branch(&root);
+        let configured_branch = bf_configured_branch(&root)?;
         let branch_ref = format!("refs/heads/{configured_branch}");
         if let Some(branch_head) = bf_get_ref_oid(&root, &branch_ref)?
             && epoch0 != branch_head
@@ -1845,8 +1848,12 @@ fn bf_workspace_git_usable(ws_path: &Path) -> bool {
         .is_some()
 }
 
-fn bf_configured_branch(root: &Path) -> String {
-    MawConfig::load(root).map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string())
+/// The configured branch; an invalid `.maw.toml` refuses (bn-qi5br) rather
+/// than silently initializing against `main`.
+fn bf_configured_branch(root: &Path) -> Result<String, BrownfieldInitError> {
+    MawConfig::require(root, "maw init")
+        .map(|cfg| cfg.branch().to_string())
+        .map_err(|e| BrownfieldInitError::Config(e.to_string()))
 }
 
 fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
@@ -1934,7 +1941,7 @@ fn bf_align_default_workspace_to_configured_branch(
     root: &Path,
     ws_path: &Path,
 ) -> Result<(), BrownfieldInitError> {
-    let branch = bf_configured_branch(root);
+    let branch = bf_configured_branch(root)?;
     let branch_ref = format!("refs/heads/{branch}");
     if !bf_ref_exists(root, &branch_ref) {
         return Ok(());
@@ -1998,7 +2005,7 @@ fn bf_repair_default_workspace_registration(
     // Prune stale registration from the moved workspace before re-attaching.
     let _ = bf_prune_worktrees(root);
 
-    let branch = bf_configured_branch(root);
+    let branch = bf_configured_branch(root)?;
     // TODO(gix): `git worktree add <path> <branch>` is an attached-HEAD
     // operation. maw_git::worktree_add only supports detached HEAD; keep
     // CLI until an attached variant lands.
@@ -2168,7 +2175,7 @@ fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitEr
 
 /// Create the default workspace at `ws/default/` using `git worktree add`.
 fn bf_create_default_workspace(root: &Path, ws_path: &Path) -> Result<(), BrownfieldInitError> {
-    let branch = bf_configured_branch(root);
+    let branch = bf_configured_branch(root)?;
     // TODO(gix): `git worktree add <path> <branch>` is an attached-HEAD
     // operation. maw_git::worktree_add only supports detached HEAD; keep
     // CLI until an attached variant lands.

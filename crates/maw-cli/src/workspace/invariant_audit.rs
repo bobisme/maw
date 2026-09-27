@@ -226,7 +226,7 @@ impl AuditReport {
 /// Call this INSIDE the epoch lock, before the mutation begins.
 #[must_use]
 pub fn capture(root: &Path) -> PreCapture {
-    let audit_on = MawConfig::load(root).map_or(true, |c| c.invariant_audit());
+    let audit_on = MawConfig::load_or_warn(root).invariant_audit();
     if !audit_on {
         return PreCapture::disabled();
     }
@@ -311,7 +311,7 @@ pub fn audit(root: &Path, pre: &PreCapture, subjects: &[&str], op_label: &str) -
         push_oid(&mut shared_anchors, epoch.as_str());
     }
     let new_epoch = shared_anchors.first().copied();
-    let config = MawConfig::load(root).unwrap_or_default();
+    let config = MawConfig::load_or_warn(root);
     let branch_ref = format!("refs/heads/{}", config.branch());
     if let Ok(Some(tip)) = maw_core::refs::read_ref(root, &branch_ref) {
         push_oid(&mut shared_anchors, tip.as_str());

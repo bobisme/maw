@@ -356,7 +356,7 @@ where
         branch,
         default_workspace,
         backend,
-        crate::epoch_lock::WaitPolicy::resolve(root),
+        crate::epoch_lock::WaitPolicy::resolve(root, "doctor --repair")?,
     )
 }
 
