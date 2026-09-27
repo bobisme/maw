@@ -293,6 +293,43 @@ pub fn diff_trees_with_renames(
                     });
                     continue;
                 }
+                // bn-1ijl: gix's rewrite tracker matches whole directories
+                // (`Relation::Parent` trees) and reports them as a tree-level
+                // rewrite *in addition to* the per-file rewrites of their
+                // children. Callers of this API work at file granularity and
+                // dereference `new_oid` as a blob, so a tree entry here made
+                // `diff_patchset` fail with "supposed to be of kind blob, but
+                // was kind tree" (`maw ws sync` replaying a directory move).
+                // Drop the directory-level record; its children are emitted
+                // on their own. gix only pairs trees with trees, but stay
+                // total: a lone tree side degrades to a plain add/delete of
+                // the non-tree side.
+                match (source_entry_mode.is_tree(), entry_mode.is_tree()) {
+                    (true, true) => continue,
+                    (true, false) => {
+                        entries.push(DiffEntry {
+                            path: location.to_string(),
+                            change_type: ChangeType::Added,
+                            old_oid: GitOid::ZERO,
+                            new_oid: from_gix_oid(id),
+                            old_mode: None,
+                            new_mode: Some(convert_entry_mode(entry_mode)),
+                        });
+                        continue;
+                    }
+                    (false, true) => {
+                        entries.push(DiffEntry {
+                            path: source_location.to_string(),
+                            change_type: ChangeType::Deleted,
+                            old_oid: from_gix_oid(source_id),
+                            new_oid: GitOid::ZERO,
+                            old_mode: Some(convert_entry_mode(source_entry_mode)),
+                            new_mode: None,
+                        });
+                        continue;
+                    }
+                    (false, false) => {}
+                }
                 entries.push(DiffEntry {
                     path: location.to_string(),
                     change_type: ChangeType::Renamed {

@@ -237,9 +237,12 @@ fn file_changes_from_entry(
             let blob_core = git_to_core_oid(&entry.new_oid)?;
             let file_id = file_id_from_blob(&old_core);
             let mode = entry.new_mode.map(EntryMode::from);
-            // Submodule (gitlink) on either side: don't dereference as a blob.
-            // See `Added` branch for the full rationale (bn-3hqg).
-            let content = if is_submodule(entry.new_mode) || is_submodule(entry.old_mode) {
+            // Submodule (gitlink) on the NEW side: don't dereference as a
+            // blob. See `Added` branch for the full rationale (bn-3hqg). The
+            // old side is irrelevant here — only `new_oid` is read, and a
+            // gitlink replaced by a regular file (160000 -> 100644) must
+            // carry that file's bytes (bn-1ijl).
+            let content = if is_submodule(entry.new_mode) {
                 None
             } else {
                 Some(repo.read_blob(entry.new_oid)?)
@@ -282,10 +285,12 @@ fn file_changes_from_entry(
             let file_id = file_id_from_blob(&old_core);
             let new_mode = entry.new_mode.map(EntryMode::from);
             let old_mode = entry.old_mode.map(EntryMode::from);
-            // Skip blob read when either side is a submodule (bn-3hqg). A
-            // submodule rename is a path change of a gitlink, not a textual
-            // file move — treat the content as opaque.
-            let content = if is_submodule(entry.new_mode) || is_submodule(entry.old_mode) {
+            // Skip blob read when the destination is a submodule (bn-3hqg).
+            // A submodule rename is a path change of a gitlink, not a
+            // textual file move — treat the content as opaque. As for
+            // `Modified`, only `new_oid` is read, so only its mode matters
+            // (bn-1ijl).
+            let content = if is_submodule(entry.new_mode) {
                 None
             } else {
                 Some(repo.read_blob(entry.new_oid)?)
@@ -749,6 +754,210 @@ mod tests {
             sub_change.blob.is_some(),
             "submodule entry still carries the gitlink SHA as identity"
         );
+    }
+
+    #[test]
+    fn diff_patchset_directory_move_does_not_read_tree_as_blob_bn_1ijl() {
+        // bn-1ijl field report: a commit deleting `.crit/` and adding
+        // `.seal/` with an identical subtree moved across made `ws sync`
+        // fail with "supposed to be of kind blob, but was kind tree" —
+        // gix reported the directory itself as renamed.
+        let fx = Fixture::new();
+        fx.write(".crit/.gitignore", b"ignored\n");
+        fx.write(".crit/reviews/r1/events.jsonl", b"{\"e\":1}\n");
+        fx.write(".crit/version", b"1\n");
+        fx.write(".critignore", b"target\n");
+        fx.write("README", b"readme\n");
+        let from = fx.commit("crit");
+        fx.rename(".crit/reviews", ".seal/reviews");
+        fx.remove(".crit/.gitignore");
+        fx.remove(".crit/version");
+        fx.remove(".critignore");
+        fx.write(".seal/config.toml", b"x = 1\n");
+        let to = fx.commit("crit -> seal");
+
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("a directory move must not make diff_patchset read a tree as a blob");
+        for c in &ps.changes {
+            assert_ne!(c.mode, Some(EntryMode::Tree), "tree entry leaked: {c:?}");
+        }
+        let mut deleted: Vec<_> = ps
+            .changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Deleted)
+            .map(|c| c.path.to_string_lossy().into_owned())
+            .collect();
+        deleted.sort();
+        assert_eq!(
+            deleted,
+            vec![
+                ".crit/.gitignore",
+                ".crit/reviews/r1/events.jsonl",
+                ".crit/version",
+                ".critignore"
+            ]
+        );
+        let mut upserted: Vec<_> = ps
+            .changes
+            .iter()
+            .filter(|c| c.kind != ChangeKind::Deleted)
+            .map(|c| c.path.to_string_lossy().into_owned())
+            .collect();
+        upserted.sort();
+        assert_eq!(
+            upserted,
+            vec![".seal/config.toml", ".seal/reviews/r1/events.jsonl"]
+        );
+    }
+
+    // ----- bn-1ijl: property over directory/file/gitlink shapes -----------
+
+    type Flat = std::collections::BTreeMap<String, (maw_git::EntryMode, maw_git::GitOid)>;
+    type Leaf<'a> = (Vec<&'a str>, maw_git::EntryMode, maw_git::GitOid);
+
+    fn write_flat(repo: &dyn GitRepo, flat: &Flat) -> maw_git::GitOid {
+        fn go(repo: &dyn GitRepo, entries: &[Leaf<'_>]) -> maw_git::GitOid {
+            let mut out: Vec<maw_git::TreeEntry> = Vec::new();
+            let mut dirs: std::collections::BTreeMap<&str, Vec<Leaf<'_>>> =
+                std::collections::BTreeMap::new();
+            for (parts, mode, oid) in entries {
+                if parts.len() == 1 {
+                    out.push(maw_git::TreeEntry {
+                        name: parts[0].to_owned(),
+                        mode: *mode,
+                        oid: *oid,
+                    });
+                } else {
+                    dirs.entry(parts[0])
+                        .or_default()
+                        .push((parts[1..].to_vec(), *mode, *oid));
+                }
+            }
+            for (name, children) in dirs {
+                let sub = go(repo, &children);
+                out.push(maw_git::TreeEntry {
+                    name: name.to_owned(),
+                    mode: maw_git::EntryMode::Tree,
+                    oid: sub,
+                });
+            }
+            repo.write_tree(&out).expect("write_tree")
+        }
+        let entries: Vec<_> = flat
+            .iter()
+            .map(|(p, (m, o))| (p.split('/').collect::<Vec<_>>(), *m, *o))
+            .collect();
+        go(repo, &entries)
+    }
+
+    /// Universe of candidate leaf paths: overlapping file/dir names so the
+    /// generator produces dir<->file swaps, directory moves (identical
+    /// subtrees under `a/` and `b/`), and nested moves.
+    const PATHS: &[&str] = &[
+        "a", "b", "c", "a/x", "a/y", "b/x", "b/y", "a/s/x", "b/s/x", "c/s/x", "a/s", "s",
+    ];
+
+    fn leaf_strategy() -> impl proptest::strategy::Strategy<Value = (maw_git::EntryMode, u8)> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![
+                6 => Just(maw_git::EntryMode::Blob),
+                1 => Just(maw_git::EntryMode::BlobExecutable),
+                1 => Just(maw_git::EntryMode::Link),
+                1 => Just(maw_git::EntryMode::Commit),
+            ],
+            0u8..3,
+        )
+    }
+
+    fn tree_strategy()
+    -> impl proptest::strategy::Strategy<Value = Vec<(usize, (maw_git::EntryMode, u8))>> {
+        proptest::collection::vec((0..PATHS.len(), leaf_strategy()), 0..8)
+    }
+
+    /// Materialize a generated tree, dropping entries that would make the
+    /// tree invalid (a path that is both a file and a directory prefix).
+    fn realize(repo: &dyn GitRepo, picks: &[(usize, (maw_git::EntryMode, u8))]) -> Flat {
+        let mut chosen: std::collections::BTreeMap<&str, (maw_git::EntryMode, u8)> =
+            std::collections::BTreeMap::new();
+        for (idx, leaf) in picks {
+            chosen.insert(PATHS[*idx], *leaf);
+        }
+        let keys: Vec<&str> = chosen.keys().copied().collect();
+        let mut flat = Flat::new();
+        for (path, (mode, content)) in &chosen {
+            let is_dir_prefix = keys.iter().any(|k| {
+                k.len() > path.len() && k.starts_with(path) && k.as_bytes()[path.len()] == b'/'
+            });
+            if is_dir_prefix {
+                continue;
+            }
+            let oid = if *mode == maw_git::EntryMode::Commit {
+                // Fake submodule commit id: never dereferenced.
+                let mut bytes = [0xabu8; 20];
+                bytes[19] = *content;
+                maw_git::GitOid::from_bytes(bytes)
+            } else {
+                repo.write_blob(format!("content-{content}\n").as_bytes())
+                    .expect("write_blob")
+            };
+            flat.insert((*path).to_owned(), (*mode, oid));
+        }
+        flat
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(96))]
+
+        /// For any pair of trees over the dir/file/gitlink shape universe,
+        /// `diff_patchset` succeeds, never emits a tree-mode change, never
+        /// carries content for a gitlink, and replaying its changes over the
+        /// old tree's leaves reproduces the new tree's leaves exactly.
+        #[test]
+        fn diff_patchset_replays_every_shape_bn_1ijl(old_picks in tree_strategy(), new_picks in tree_strategy()) {
+            let fx = Fixture::new();
+            let repo = &*fx.repo;
+            let old = realize(repo, &old_picks);
+            let new = realize(repo, &new_picks);
+            let from_c = repo.create_commit(write_flat(repo, &old), &[], "old", None).expect("commit");
+            let to_c = repo.create_commit(write_flat(repo, &new), &[from_c], "new", None).expect("commit");
+            let from = GitOid::new(&from_c.to_string()).expect("oid");
+            let to = GitOid::new(&to_c.to_string()).expect("oid");
+
+            let ps = diff_patchset(repo, &from, &to, &ws(), &epoch_from(&from), 50)
+                .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("diff_patchset failed: {e}")))?;
+
+            let mut replay: std::collections::BTreeMap<String, (EntryMode, String)> = old
+                .iter()
+                .map(|(p, (m, o))| (p.clone(), (EntryMode::from(*m), o.to_string())))
+                .collect();
+            // Deletes first (a rename's Deleted(from) and a dir<->file swap's
+            // deletion must clear the slot before the upsert lands).
+            for c in ps.changes.iter().filter(|c| c.kind == ChangeKind::Deleted) {
+                proptest::prop_assert_ne!(c.mode, Some(EntryMode::Tree), "tree delete: {:?}", c);
+                let p = c.path.to_string_lossy().into_owned();
+                proptest::prop_assert!(replay.remove(&p).is_some(), "delete of absent path {}", p);
+            }
+            for c in ps.changes.iter().filter(|c| c.kind != ChangeKind::Deleted) {
+                proptest::prop_assert_ne!(c.mode, Some(EntryMode::Tree), "tree upsert: {:?}", c);
+                let mode = c.mode.expect("upsert carries a mode");
+                let blob = c.blob.as_ref().expect("upsert carries a blob").as_str().to_owned();
+                if mode == EntryMode::Commit {
+                    proptest::prop_assert!(c.content.is_none(), "gitlink with content: {:?}", c);
+                } else {
+                    let bytes = repo
+                        .read_blob(blob.parse().expect("oid"))
+                        .expect("upsert blob readable");
+                    proptest::prop_assert_eq!(c.content.as_deref(), Some(bytes.as_slice()));
+                }
+                replay.insert(c.path.to_string_lossy().into_owned(), (mode, blob));
+            }
+            let expected: std::collections::BTreeMap<String, (EntryMode, String)> = new
+                .iter()
+                .map(|(p, (m, o))| (p.clone(), (EntryMode::from(*m), o.to_string())))
+                .collect();
+            proptest::prop_assert_eq!(replay, expected);
+        }
     }
 
     #[test]
