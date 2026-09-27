@@ -498,9 +498,14 @@ pub fn promote_quarantine(
                     "advance epoch + branch '{}' from {}: {e}\n  \
                      The epoch or branch moved since this quarantine was created; \
                      neither ref was changed. Abandon it and re-run the merge: \
-                     maw merge abandon {merge_id}",
+                     maw merge abandon {merge_id}\n  \
+                     The quarantine's content (including any fix) is commit {}; \
+                     abandon deletes the worktree, so keep it first if needed: \
+                     git branch quarantine-{merge_id} {}",
                     state.branch,
-                    &epoch_before_oid.as_str()[..12]
+                    &epoch_before_oid.as_str()[..12],
+                    commit_oid.as_str(),
+                    commit_oid.as_str()
                 ))
             })?;
 
@@ -648,9 +653,37 @@ fn commit_quarantine_edits(
     let new_oid_opt = ws_repo
         .worktree_state_commit("quarantine: fix-forward")
         .map_err(|e| QuarantineError::Git(format!("worktree_state_commit failed: {e}")))?;
+    // bn-3rhz: the promoted commit is built on the worktree's CURRENT HEAD,
+    // not the recorded candidate. An agent that fixed the quarantine with
+    // `git commit` has HEAD ahead of the candidate and a clean worktree;
+    // returning the candidate here promoted the unfixed commit (validation
+    // had just run on the fixed worktree) and the cleanup then removed the
+    // worktree holding the only ref to the fix. HEAD must descend from the
+    // candidate: anything else would move the epoch to unrelated history.
+    let head = ws_repo
+        .rev_parse_opt("HEAD")
+        .map_err(|e| QuarantineError::Git(format!("read quarantine HEAD: {e}")))?
+        .ok_or_else(|| QuarantineError::Git("quarantine HEAD is unborn".to_owned()))?;
+    let candidate_git: maw_git::GitOid = original_candidate
+        .as_str()
+        .parse()
+        .map_err(|e| QuarantineError::Git(format!("parse candidate OID: {e}")))?;
+    if head != candidate_git
+        && !ws_repo
+            .is_ancestor(candidate_git, head)
+            .map_err(|e| QuarantineError::Git(format!("ancestry check: {e}")))?
+    {
+        return Err(QuarantineError::Git(format!(
+            "quarantine HEAD {head} does not descend from its candidate {}; \
+             refusing to promote unrelated history",
+            original_candidate.as_str()
+        )));
+    }
     let Some(new_head) = new_oid_opt else {
-        // No edits — keep original candidate.
-        return Ok(original_candidate.clone());
+        // No worktree edits — promote HEAD (the candidate, or the agent's
+        // commits on top of it).
+        return GitOid::new(&head.to_string())
+            .map_err(|e| QuarantineError::Git(format!("parse HEAD OID: {e}")));
     };
     // Quarantine worktrees are created detached (HEAD = raw OID), so we
     // advance HEAD by rewriting the file directly. We then rebuild the
@@ -1271,6 +1304,80 @@ mod tests {
             preset: None,
             on_failure: crate::config::OnFailure::Block,
         }
+    }
+
+    /// bn-3rhz: an agent that fixes a quarantine with `git commit` (clean
+    /// worktree, HEAD ahead of the candidate) must have THAT commit promoted.
+    /// Pre-fix, `commit_quarantine_edits` saw no worktree edits and returned
+    /// the ORIGINAL candidate: validation ran on the fixed worktree, the
+    /// unfixed candidate was promoted, and the cleanup then deleted the
+    /// worktree holding the only ref to the fix (Prime Invariant).
+    #[test]
+    fn promote_uses_commits_made_in_quarantine() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (_epoch_oid, merge_id) = setup_promotable_quarantine(root, &manifold_dir);
+        let ws_path = quarantine_workspace_path(root, &merge_id).unwrap();
+
+        fs::write(ws_path.join("fix.txt"), "the fix\n").unwrap();
+        run_git(&ws_path, &["add", "fix.txt"]);
+        run_git(
+            &ws_path,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "fix",
+            ],
+        );
+        let fix = run_git(&ws_path, &["rev-parse", "HEAD"]);
+
+        let result =
+            promote_quarantine(root, &manifold_dir, &merge_id, &passing_config()).expect("promote");
+        let PromoteResult::Committed { new_epoch } = result else {
+            panic!("expected Committed");
+        };
+        assert_eq!(
+            new_epoch.as_str(),
+            fix,
+            "the agent's fix commit must be promoted"
+        );
+        assert_eq!(run_git(root, &["rev-parse", "refs/heads/main"]), fix);
+        assert_eq!(
+            run_git(root, &["show", "refs/heads/main:fix.txt"]),
+            "the fix"
+        );
+    }
+
+    /// bn-3rhz: a quarantine HEAD that does not descend from the candidate
+    /// (e.g. reset back to the epoch) must be refused, refs untouched.
+    #[test]
+    fn promote_refuses_head_not_descending_from_candidate() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (epoch_oid, merge_id) = setup_promotable_quarantine(root, &manifold_dir);
+        let ws_path = quarantine_workspace_path(root, &merge_id).unwrap();
+        run_git(
+            &ws_path,
+            &["checkout", "-q", "--detach", epoch_oid.as_str()],
+        );
+
+        let err = promote_quarantine(root, &manifold_dir, &merge_id, &passing_config())
+            .expect_err("promote must refuse unrelated HEAD");
+        assert!(matches!(err, QuarantineError::Git(_)), "got {err}");
+        assert_eq!(
+            run_git(root, &["rev-parse", "refs/heads/main"]),
+            epoch_oid.as_str()
+        );
+        assert_eq!(
+            run_git(root, &["rev-parse", crate::refs::EPOCH_CURRENT]),
+            epoch_oid.as_str()
+        );
     }
 
     /// bn-3w2b: epoch + branch move in ONE atomic CAS. If the branch moved

@@ -60,6 +60,20 @@ pub fn sync() -> Result<()> {
         return Ok(());
     }
 
+    // bn-3rhz: refuse while an unfinished `ws merge` journal exists (same
+    // rule as FF-absorb, `doctor --repair` and `merge promote`). Under the
+    // epoch lock it is a crashed merge; its recovery (`maw ws merge --abort`)
+    // refuses once the epoch moved away from the journal's `epoch_before`, so
+    // moving it here would wedge the repo.
+    if let Some(phase) = crate::workspace::epoch_drift::unfinished_merge_phase(&root)? {
+        bail!(
+            "A previous `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
+             Moving the epoch now would strand its recovery; nothing was changed.\n  \
+             To fix: {}, then re-run `maw epoch sync`.",
+            maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+        );
+    }
+
     // Update epoch ref unconditionally. This handles both cases:
     // - epoch behind branch (direct commits advanced branch)
     // - epoch ahead of branch (merge commit was dropped/reset)

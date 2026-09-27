@@ -466,3 +466,277 @@ fn ff_absorb_refuses_under_crashed_commit_journal_and_recovery_converges() {
     assert_eq!(git(root, &["show", "main:trunk.txt"]), "trunk");
     assert_eq!(git(root, &["show", "main:b.txt"]), "work");
 }
+
+/// bn-3rhz: the same stranding as above, for a merge that crashed BEFORE
+/// COMMIT (journal in BUILD) whose owner PREPARE cannot prove dead (pid
+/// reused, or no /proc). `maw ws merge --abort` refuses to clear ANY journal
+/// once the epoch moved away from its `epoch_before` (the epoch-drift gate in
+/// `abort_merge_state`), so FF-absorbing a trunk commit under such a journal
+/// wedged the repo: PREPARE refused ("run --abort"), and --abort then refused
+/// forever. FF-absorb may only proceed under a pre-COMMIT journal that
+/// PREPARE will provably take over (owner dead).
+#[cfg(feature = "failpoints")]
+#[test]
+fn ff_absorb_refuses_under_crashed_build_journal_and_recovery_converges() {
+    crashed_build_journal_then_trunk_commit(true);
+}
+
+/// bn-3rhz control: a pre-COMMIT journal whose owner is provably dead is
+/// taken over by PREPARE, so FF-absorb must NOT refuse — the next merge
+/// absorbs the trunk commit and succeeds without any manual recovery.
+#[cfg(feature = "failpoints")]
+#[test]
+fn ff_absorb_proceeds_under_provably_orphaned_build_journal() {
+    crashed_build_journal_then_trunk_commit(false);
+}
+
+#[cfg(feature = "failpoints")]
+fn crashed_build_journal_then_trunk_commit(owner_pid_reused: bool) {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    git_quiet(root, &["init", "-b", "main"]);
+    git_quiet(root, &["config", "user.email", "test@example.com"]);
+    git_quiet(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("f1.txt"), "f1-base\n").expect("write f1");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "seed"]);
+    maw(root, &["init"]);
+    git_quiet(root, &["add", "-A"]);
+    if !git(root, &["status", "--porcelain"]).is_empty() {
+        git_quiet(root, &["commit", "-m", "maw init artifacts"]);
+        maw(root, &["epoch", "sync"]);
+    }
+    for ws in ["a", "b"] {
+        maw(root, &["ws", "create", ws, "--from", "main"]);
+        std::fs::write(ws_path(root, ws).join(format!("{ws}.txt")), "work\n").expect("write");
+        maw(root, &["exec", ws, "--", "git", "add", "-A"]);
+        maw(root, &["exec", ws, "--", "git", "commit", "-m", "work"]);
+    }
+    let epoch0 = git(root, &["rev-parse", "refs/manifold/epoch/current"]);
+
+    let out = maw_raw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "a",
+            "--into",
+            "default",
+            "--message",
+            "merge a",
+        ],
+        Some("FP_BUILD_AFTER_MERGE_COMPUTE=abort"),
+    );
+    assert!(
+        !out.status.success(),
+        "the injected abort must kill the merge"
+    );
+    // The crashed owner's pid is reused by a live process (stand-in: pid 1).
+    // PREPARE cannot prove the orphan dead and refuses; the same happens on a
+    // platform without /proc (liveness Unknown -> Indeterminate).
+    let journal = [".maw/manifold", ".manifold"]
+        .iter()
+        .map(|d| root.join(d).join("merge-state.json"))
+        .find(|p| p.exists())
+        .expect("crashed merge journal");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&journal).expect("read journal"))
+            .expect("parse journal");
+    assert_eq!(state["phase"], "build", "journal must be pre-COMMIT");
+    if owner_pid_reused {
+        state["owner_pid"] = serde_json::json!(1);
+        std::fs::write(&journal, state.to_string()).expect("write journal");
+    }
+
+    std::fs::write(root.join("trunk.txt"), "trunk\n").expect("write trunk");
+    git_quiet(root, &["add", "trunk.txt"]);
+    git_quiet(root, &["commit", "-m", "trunk"]);
+
+    let out = maw_raw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "b",
+            "--into",
+            "default",
+            "--message",
+            "merge b",
+        ],
+        None,
+    );
+    let text = combined(&out);
+    if !owner_pid_reused {
+        assert!(out.status.success(), "orphan must be taken over:\n{text}");
+        assert_eq!(git(root, &["show", "main:trunk.txt"]), "trunk");
+        assert_eq!(git(root, &["show", "main:b.txt"]), "work");
+        return;
+    }
+    assert!(
+        !out.status.success(),
+        "merge must refuse under the journal:\n{text}"
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "refs/manifold/epoch/current"]),
+        epoch0,
+        "the epoch must not be absorbed past the crashed merge's epoch_before:\n{text}"
+    );
+
+    maw(root, &["ws", "merge", "--abort"]);
+    maw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "b",
+            "--into",
+            "default",
+            "--message",
+            "merge b",
+        ],
+    );
+    assert_eq!(git(root, &["show", "main:trunk.txt"]), "trunk");
+    assert_eq!(git(root, &["show", "main:b.txt"]), "work");
+}
+
+/// bn-3rhz: `maw epoch sync` (the documented fix after a direct trunk commit)
+/// wrote the epoch unconditionally. Under a crashed COMMIT journal that moved
+/// the epoch away from the journal's `epoch_before`, after which
+/// `maw ws merge --abort` refuses forever. It must refuse like FF-absorb,
+/// `doctor --repair` and `merge promote` do.
+#[cfg(feature = "failpoints")]
+#[test]
+fn epoch_sync_refuses_under_crashed_commit_journal() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    git_quiet(root, &["init", "-b", "main"]);
+    git_quiet(root, &["config", "user.email", "test@example.com"]);
+    git_quiet(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("f1.txt"), "f1-base\n").expect("write f1");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "seed"]);
+    maw(root, &["init"]);
+    git_quiet(root, &["add", "-A"]);
+    if !git(root, &["status", "--porcelain"]).is_empty() {
+        git_quiet(root, &["commit", "-m", "maw init artifacts"]);
+        maw(root, &["epoch", "sync"]);
+    }
+    maw(root, &["ws", "create", "a", "--from", "main"]);
+    std::fs::write(ws_path(root, "a").join("a.txt"), "work\n").expect("write");
+    maw(root, &["exec", "a", "--", "git", "add", "-A"]);
+    maw(root, &["exec", "a", "--", "git", "commit", "-m", "work"]);
+    let epoch0 = git(root, &["rev-parse", "refs/manifold/epoch/current"]);
+
+    let out = maw_raw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "a",
+            "--into",
+            "default",
+            "--message",
+            "merge a",
+        ],
+        Some("FP_COMMIT_BEFORE_BRANCH_CAS=abort"),
+    );
+    assert!(
+        !out.status.success(),
+        "the injected abort must kill the merge"
+    );
+
+    std::fs::write(root.join("trunk.txt"), "trunk\n").expect("write trunk");
+    git_quiet(root, &["add", "trunk.txt"]);
+    git_quiet(root, &["commit", "-m", "trunk"]);
+
+    let out = maw_raw(root, &["epoch", "sync"], None);
+    let text = combined(&out);
+    assert!(
+        !out.status.success(),
+        "epoch sync must refuse under the journal:\n{text}"
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "refs/manifold/epoch/current"]),
+        epoch0,
+        "the epoch must not move past the crashed merge's epoch_before"
+    );
+
+    maw(root, &["ws", "merge", "--abort"]);
+    maw(root, &["epoch", "sync"]);
+    assert_eq!(
+        git(root, &["rev-parse", "refs/manifold/epoch/current"]),
+        git(root, &["rev-parse", "main"])
+    );
+}
+
+/// bn-3rhz: `maw undo` moves the epoch back (CAS) — under a crashed COMMIT
+/// journal that strands the journal's recovery exactly like epoch sync.
+#[cfg(feature = "failpoints")]
+#[test]
+fn undo_refuses_under_crashed_commit_journal() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let root = td.path();
+    git_quiet(root, &["init", "-b", "main"]);
+    git_quiet(root, &["config", "user.email", "test@example.com"]);
+    git_quiet(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("f1.txt"), "f1-base\n").expect("write f1");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "seed"]);
+    maw(root, &["init"]);
+    git_quiet(root, &["add", "-A"]);
+    if !git(root, &["status", "--porcelain"]).is_empty() {
+        git_quiet(root, &["commit", "-m", "maw init artifacts"]);
+        maw(root, &["epoch", "sync"]);
+    }
+    for ws in ["a", "b"] {
+        maw(root, &["ws", "create", ws, "--from", "main"]);
+        std::fs::write(ws_path(root, ws).join(format!("{ws}.txt")), "work\n").expect("write");
+        maw(root, &["exec", ws, "--", "git", "add", "-A"]);
+        maw(root, &["exec", ws, "--", "git", "commit", "-m", "work"]);
+    }
+    maw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "a",
+            "--into",
+            "default",
+            "--message",
+            "merge a",
+        ],
+    );
+    maw(root, &["ws", "sync", "b"]);
+    let epoch1 = git(root, &["rev-parse", "refs/manifold/epoch/current"]);
+
+    let out = maw_raw(
+        root,
+        &[
+            "ws",
+            "merge",
+            "b",
+            "--into",
+            "default",
+            "--message",
+            "merge b",
+        ],
+        Some("FP_COMMIT_BEFORE_BRANCH_CAS=abort"),
+    );
+    assert!(
+        !out.status.success(),
+        "the injected abort must kill the merge"
+    );
+
+    let out = maw_raw(root, &["undo"], None);
+    let text = combined(&out);
+    assert!(
+        !out.status.success(),
+        "undo must refuse under the journal:\n{text}"
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "refs/manifold/epoch/current"]),
+        epoch1,
+        "the epoch must not move away from the crashed merge's epoch_before"
+    );
+    maw(root, &["ws", "merge", "--abort"]);
+}

@@ -134,6 +134,18 @@ pub fn run(
     // the whole read-modify-write, exactly like `ws merge` / `ws advance`.
     let _lock = EpochLock::acquire(&root, "undo")?;
 
+    // bn-3rhz: an unfinished `ws merge` journal under the epoch lock is a
+    // crashed merge; its recovery (`maw ws merge --abort`) refuses once the
+    // epoch moved away from its `epoch_before`, so undo must not move it.
+    if let Some(phase) = crate::workspace::epoch_drift::unfinished_merge_phase(&root)? {
+        bail!(
+            "A previous `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
+             Undoing now would move the epoch and strand its recovery; nothing was changed.\n  \
+             To fix: {}, then re-run `maw undo`.",
+            maw::merge::prepare::MERGE_ABORT_RECOVERY_CMD
+        );
+    }
+
     let ops = collect_repo_ops(&root)?;
     let plan = build_plan(&root, &ops, op_id)?;
     let refusals = gather_refusals(&root, &plan)?;

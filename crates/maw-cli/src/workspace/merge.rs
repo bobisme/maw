@@ -3673,11 +3673,34 @@ fn reconcile_epoch_with_branch(
     // `mutation_pre_bn_302v_ff_absorb_ignores_merge_journal_strands_recovery`).
     // An unreadable journal cannot drive a recovery either, so it does not
     // block (PREPARE overwrites it the same way).
-    let unfinished = super::epoch_drift::unfinished_merge_phase(root).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "FF absorb: unreadable merge journal ignored");
-        None
-    });
-    if let Some(phase @ (MergePhase::Commit | MergePhase::Cleanup)) = unfinished {
+    //
+    // bn-3rhz: the same `--abort` epoch-drift gate also refuses to clear a
+    // PRE-COMMIT journal once the epoch moved, and PREPARE only takes such a
+    // journal over when its owner is provably dead. So a pre-COMMIT journal
+    // blocks too unless PREPARE will take it over (Orphaned); otherwise
+    // (pid reused -> Live, no /proc -> Indeterminate) absorbing would leave
+    // PREPARE refusing and `--abort` refusing forever.
+    let journal_path = MergeStateFile::default_path(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+    );
+    let unfinished = match MergeStateFile::read(&journal_path) {
+        Ok(state) if !state.phase.is_terminal() => {
+            let pre_commit = matches!(
+                state.phase,
+                MergePhase::Prepare | MergePhase::Build | MergePhase::Validate
+            );
+            let taken_over = pre_commit
+                && state.staleness(now_secs(), maw_core::merge_state::DEFAULT_STALE_AFTER_SECS)
+                    == maw_core::merge_state::Staleness::Orphaned;
+            (!taken_over).then_some(state.phase)
+        }
+        Ok(_) | Err(maw_core::merge_state::MergeStateError::NotFound(_)) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "FF absorb: unreadable merge journal ignored");
+            None
+        }
+    };
+    if let Some(phase) = unfinished {
         bail!(
             "Target branch '{branch}' is ahead of the current epoch, but a previous \
              `maw ws merge` did not finish (merge-state phase: {phase}).\n  \
