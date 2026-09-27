@@ -1736,4 +1736,88 @@ mod tests {
             excluded.paths
         );
     }
+    // -----------------------------------------------------------------------
+    // bn-3bjx: gaps found by cargo-mutants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn materialize_recovery_ref_format() {
+        let r = materialize_recovery_ref("alice", "2025-01-15T10:30:00Z");
+        assert_eq!(
+            r,
+            "refs/manifold/recovery/alice/materialize-2025-01-15T10-30-00Z"
+        );
+    }
+
+    fn git_ok(root: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The pre-repair snapshot pins into the `materialize-` namespace, holds
+    /// the divergent bytes, AND keeps every other tracked file at its HEAD
+    /// content: the temporary index must be seeded from HEAD, or the snapshot
+    /// tree would record every untouched file as deleted.
+    #[test]
+    fn capture_before_materialize_repair_pins_full_tree_snapshot() {
+        let (_dir, root, _oid) = setup_repo();
+        fs::write(root.join("keep.txt"), "keep\n").expect("write keep");
+        git_ok(&root, &["add", "keep.txt"]);
+        git_ok(&root, &["commit", "-q", "-m", "keep"]);
+        fs::write(root.join("README.md"), "divergent bytes\n").expect("write");
+
+        let capture = capture_before_materialize_repair(&root, "feat", &["README.md".to_string()])
+            .expect("ok")
+            .expect("some capture");
+        assert!(
+            capture
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/feat/materialize-"),
+            "{}",
+            capture.pinned_ref
+        );
+        let ref_oid = refs::read_ref(&root, &capture.pinned_ref).expect("read ref");
+        assert_eq!(ref_oid, Some(capture.commit_oid.clone()));
+        let oid = capture.commit_oid.as_str();
+        assert_eq!(snapshot_blob(&root, oid, "README.md"), "divergent bytes\n");
+        assert_eq!(snapshot_blob(&root, oid, "keep.txt"), "keep\n");
+    }
+
+    /// Fail-closed widening (bn-2k9e): when the hash detector cannot run, the
+    /// rehash set is every tracked file on disk EXCEPT the ones the caller
+    /// already captures, and the result is flagged unverified.
+    #[test]
+    fn hidden_divergent_paths_fail_closed_widens_rehash_to_other_tracked_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, root, _oid) = setup_repo();
+        fs::write(root.join("keep.txt"), "keep\n").expect("write keep");
+        git_ok(&root, &["add", "keep.txt"]);
+        git_ok(&root, &["commit", "-q", "-m", "keep"]);
+
+        // An unreadable untracked file makes the detector's `git add -A` fail.
+        let locked = root.join("locked.bin");
+        fs::write(&locked, "secret\n").expect("write locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+        if fs::read(&locked).is_ok() {
+            // Running with CAP_DAC_OVERRIDE (root): cannot provoke the failure.
+            return;
+        }
+
+        let hidden = hidden_divergent_paths(&root, &["README.md".to_string()]).expect("widened");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("chmod back");
+        assert!(
+            hidden.unverified.is_some(),
+            "detector failure must be flagged"
+        );
+        assert!(hidden.paths.is_empty(), "{:?}", hidden.paths);
+        assert_eq!(hidden.rehash, vec!["keep.txt".to_string()]);
+    }
 }

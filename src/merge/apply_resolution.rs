@@ -546,3 +546,251 @@ fn splice_region_atoms(
     out.extend_from_slice(&base[pos..]);
     Ok(out)
 }
+
+#[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
+mod tests {
+    //! bn-3bjx: targeted tests for branches the `resolution_choice_tests`
+    //! proptests never reach (deleted sides, bystander bookkeeping, the
+    //! whole-file shortcut, byte-range splicing). Each was found by a
+    //! surviving cargo-mutants mutant.
+
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::merge::resolve::{ConflictReason, ConflictSide};
+    use crate::merge::types::ChangeKind;
+    use crate::model::conflict::{AtomEdit, ConflictAtom, ConflictReason as AtomReason};
+    use crate::model::types::WorkspaceId;
+
+    fn side(ws: &str, content: Option<&[u8]>) -> ConflictSide {
+        ConflictSide {
+            workspace_id: WorkspaceId::new(ws).unwrap(),
+            kind: if content.is_some() {
+                ChangeKind::Modified
+            } else {
+                ChangeKind::Deleted
+            },
+            content: content.map(<[u8]>::to_vec),
+        }
+    }
+
+    fn atom(region: Region, edits: &[(&str, &str)]) -> ConflictAtom {
+        ConflictAtom::new(
+            region,
+            edits
+                .iter()
+                .map(|(w, c)| AtomEdit::new(*w, Region::whole_file(), *c))
+                .collect(),
+            AtomReason::OverlappingLineEdits {
+                description: "test".to_owned(),
+            },
+        )
+    }
+
+    fn record(
+        base: Option<&[u8]>,
+        sides: Vec<ConflictSide>,
+        atoms: Vec<ConflictAtom>,
+        bystanders: Vec<ConflictSide>,
+    ) -> ConflictRecord {
+        ConflictRecord {
+            path: PathBuf::from("f.txt"),
+            base: base.map(<[u8]>::to_vec),
+            sides,
+            reason: ConflictReason::Diff3Conflict,
+            atoms,
+            bystanders,
+        }
+    }
+
+    const BASE: &[u8] = b"l1\nl2\nl3\nl4\nl5\nl6\nl7\n";
+    const WA: &[u8] = b"A1\nl2\nl3\nl4\nl5\nl6\nl7\n";
+    const WB: &[u8] = b"B1\nl2\nl3\nl4\nl5\nl6\nl7\n";
+    const WC: &[u8] = b"l1\nl2\nl3\nl4\nl5\nl6\nC7\n";
+
+    #[test]
+    fn display_messages() {
+        assert_eq!(
+            ResolutionChoiceError::MissingBase.to_string(),
+            "atom-level resolution requires base content"
+        );
+        assert_eq!(
+            ResolutionChoiceError::UnknownSide {
+                workspace: "x".to_owned(),
+                available: vec!["a".to_owned(), "b".to_owned()],
+            }
+            .to_string(),
+            "workspace 'x' is not a side in this conflict (available: a, b)"
+        );
+        assert_eq!(
+            ResolutionChoiceError::Layout("d".to_owned()).to_string(),
+            "conflict layout changed: d"
+        );
+    }
+
+    /// A deleting side resolves to "delete" only when no bystander edited the
+    /// file; otherwise the bystander's edit would be dropped, so it refuses
+    /// and names the bystander.
+    #[test]
+    fn resolve_to_deleting_side_respects_bystanders() {
+        let no_bystanders = record(
+            Some(BASE),
+            vec![side("wa", None), side("wb", Some(WB))],
+            vec![],
+            vec![],
+        );
+        assert_eq!(resolve_record_to_side(&no_bystanders, "wa").unwrap(), None);
+
+        let with_bystander = record(
+            Some(BASE),
+            vec![side("wa", None), side("wb", Some(WB))],
+            vec![],
+            vec![side("wc", Some(WC))],
+        );
+        match resolve_record_to_side(&with_bystander, "wa") {
+            Err(ResolutionChoiceError::FoldConflict(msg)) => {
+                assert_eq!(msg, "wa deleted the file but wc also edited it")
+            }
+            other => panic!("expected FoldConflict, got {other:?}"),
+        }
+        // The content side still folds the bystander in.
+        assert_eq!(
+            resolve_record_to_side(&with_bystander, "wb")
+                .unwrap()
+                .unwrap(),
+            b"B1\nl2\nl3\nl4\nl5\nl6\nC7\n"
+        );
+    }
+
+    #[test]
+    fn bystanders_missing_from_reports_exactly_the_missing_ones() {
+        let rec = record(
+            Some(BASE),
+            vec![side("wa", Some(WA)), side("wb", Some(WB))],
+            vec![],
+            vec![side("wc", Some(WC)), side("wd", None)],
+        );
+        // wc's edit present; wd deleted the file, so it always counts as missing.
+        assert_eq!(
+            bystanders_missing_from(&rec, b"A1\nl2\nl3\nl4\nl5\nl6\nC7\n"),
+            vec!["wd".to_owned()]
+        );
+        // wc's edit absent.
+        assert_eq!(
+            bystanders_missing_from(&rec, WA),
+            vec!["wc".to_owned(), "wd".to_owned()]
+        );
+        // No base: nothing can be judged.
+        let no_base = record(None, rec.sides.clone(), vec![], rec.bystanders.clone());
+        assert!(bystanders_missing_from(&no_base, WA).is_empty());
+    }
+
+    /// A single whole-file atom resolves to the chosen side's full bytes, not
+    /// to the atom edit's (lossy, possibly summarised) text.
+    #[test]
+    fn single_whole_file_atom_takes_the_sides_bytes() {
+        let rec = record(
+            Some(BASE),
+            vec![side("wa", Some(b"A\xff\n")), side("wb", Some(b"B\n"))],
+            vec![atom(
+                Region::whole_file(),
+                &[("wa", "edit-a"), ("wb", "edit-b")],
+            )],
+            vec![],
+        );
+        assert_eq!(resolve_record_atoms(&rec, &["wa"]).unwrap(), b"A\xff\n");
+        assert_eq!(resolve_record_atoms(&rec, &["wb"]).unwrap(), b"B\n");
+    }
+
+    /// Line atoms need every side's content: a deleting third side must not
+    /// be silently ignored.
+    #[test]
+    fn line_atoms_refuse_when_a_side_deleted_the_file() {
+        let rec = record(
+            Some(BASE),
+            vec![side("wa", Some(WA)), side("wb", Some(WB)), side("wc", None)],
+            vec![atom(Region::lines(1, 2), &[("wa", "A1\n"), ("wb", "B1\n")])],
+            vec![],
+        );
+        assert!(
+            matches!(
+                resolve_record_atoms(&rec, &["wa"]),
+                Err(ResolutionChoiceError::Layout(_))
+            ),
+            "{:?}",
+            resolve_record_atoms(&rec, &["wa"])
+        );
+    }
+
+    fn ast(start: u32, end: u32) -> Region {
+        Region::ast_node("function_item", None, start, end)
+    }
+
+    fn two_sides() -> Vec<ConflictSide> {
+        vec![side("wa", Some(b"a")), side("wb", Some(b"b"))]
+    }
+
+    /// Byte-range atoms: each chosen edit replaces its base range, atoms are
+    /// applied in base order whatever their record order, and text between
+    /// atoms is kept.
+    #[test]
+    fn splice_region_atoms_places_each_choice() {
+        // [0,10) "fn a() {}\n", gap "\n", [11,21) "fn b() {}\n".
+        let base: &[u8] = b"fn a() {}\n\nfn b() {}\n";
+        let rec = record(
+            Some(base),
+            two_sides(),
+            vec![
+                atom(
+                    ast(11, 21),
+                    &[("wa", "fn b() {A}\n"), ("wb", "fn b() {B}\n")],
+                ),
+                atom(
+                    ast(0, 10),
+                    &[("wa", "fn a() {A}\n"), ("wb", "fn a() {B}\n")],
+                ),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            resolve_record_atoms(&rec, &["wb", "wa"]).unwrap(),
+            b"fn a() {A}\n\nfn b() {B}\n"
+        );
+        assert_eq!(
+            resolve_record_atoms(&rec, &["wa", "wb"]).unwrap(),
+            b"fn a() {B}\n\nfn b() {A}\n"
+        );
+
+        // Adjacent ranges ([0,10), [10,20)) are not overlapping.
+        let base: &[u8] = b"fn a() {}\nfn b() {}\n";
+        let rec = record(
+            Some(base),
+            two_sides(),
+            vec![
+                atom(ast(0, 10), &[("wa", "A\n"), ("wb", "a\n")]),
+                atom(ast(10, 20), &[("wa", "B\n"), ("wb", "b\n")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            resolve_record_atoms(&rec, &["wa", "wb"]).unwrap(),
+            b"A\nb\n"
+        );
+
+        // Overlapping ranges are refused.
+        let rec = record(
+            Some(base),
+            two_sides(),
+            vec![
+                atom(ast(0, 12), &[("wa", "A\n"), ("wb", "a\n")]),
+                atom(ast(10, 20), &[("wa", "B\n"), ("wb", "b\n")]),
+            ],
+            vec![],
+        );
+        assert!(matches!(
+            resolve_record_atoms(&rec, &["wa", "wb"]),
+            Err(ResolutionChoiceError::Layout(_))
+        ));
+    }
+}

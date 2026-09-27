@@ -204,8 +204,12 @@ mod tests {
 
     /// Segments allowed in the enumerated domain. Together with an optional
     /// leading `/` this covers absolute, empty, `.`, `..`, the `a`/`ab`
-    /// prefix pair and multi-component (`a/b`) paths.
-    const SEGS: [&str; 5] = ["a", "ab", ".", "..", ""];
+    /// prefix pair, the equal-length distinct pair `a`/`b` (bn-3bjx: without
+    /// it a mutant that skipped the byte comparison in `path_bytes_under`
+    /// survived), the dot-led non-traversal `.a` (bn-3bjx: without it a
+    /// mutant that only checked the first byte of a 2-byte segment for `..`
+    /// survived) and multi-component (`a/b`) paths.
+    const SEGS: [&str; 7] = ["a", "ab", "b", ".a", ".", "..", ""];
 
     /// Every `/`-joined string of 1..=`max` segments from [`SEGS`], with and
     /// without a leading `/`.
@@ -337,6 +341,24 @@ mod tests {
         assert!(!path_is_under("ab", "a"));
         assert!(!path_is_under("ab/x", "a"));
         assert!(!path_is_under("a", ""));
+    }
+
+    /// bn-3bjx: each `ShowPathError` renders the message the CLI prints.
+    #[test]
+    fn show_path_error_display_messages() {
+        assert_eq!(ShowPathError::Empty.to_string(), "Path cannot be empty");
+        assert_eq!(
+            ShowPathError::Absolute.to_string(),
+            "Path must be relative (no leading '/')"
+        );
+        assert_eq!(
+            ShowPathError::NulByte.to_string(),
+            "Path cannot contain null bytes"
+        );
+        assert_eq!(
+            ShowPathError::Traversal.to_string(),
+            "Path cannot contain '..' components (directory traversal)"
+        );
     }
 }
 

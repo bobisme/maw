@@ -1120,6 +1120,45 @@ mod tests {
         assert!(!result.is_conflict_free());
     }
 
+    /// bn-3bjx (mutation gap): the reported `(file_ws, dir_ws)` is the FIRST
+    /// pair in workspace-id order whose workspaces differ — a later
+    /// differing pair must not overwrite it, and a same-workspace pair must be
+    /// upgraded to a differing one when one exists.
+    #[test]
+    fn partition_df_clash_reports_first_differing_workspace_pair() {
+        let ps = |ws: &str, path: &str| {
+            PatchSet::new(
+                make_ws(ws),
+                make_epoch(),
+                vec![make_change(path, ChangeKind::Added, Some(b"x"))],
+            )
+        };
+
+        // File `a` shared by ws-1 + ws-2, child `a/b` only in ws-3: both
+        // (ws-1, ws-3) and (ws-2, ws-3) differ; the first must be kept.
+        let result = partition_by_path(&[ps("ws-1", "a"), ps("ws-2", "a"), ps("ws-3", "a/b")]);
+        assert_eq!(result.df_clashes.len(), 1);
+        let c = &result.df_clashes[0];
+        assert_eq!(c.file_ws.as_str(), "ws-1");
+        assert_eq!(c.dir_ws.as_str(), "ws-3");
+
+        // File `a` shared by ws-1 + ws-2, child `a/b` only in ws-1: the first
+        // pair (ws-1, ws-1) is same-workspace and must be replaced by (ws-2, ws-1).
+        let ws1 = PatchSet::new(
+            make_ws("ws-1"),
+            make_epoch(),
+            vec![
+                make_change("a", ChangeKind::Added, Some(b"x")),
+                make_change("a/b", ChangeKind::Added, Some(b"x")),
+            ],
+        );
+        let result = partition_by_path(&[ws1, ps("ws-2", "a")]);
+        assert_eq!(result.df_clashes.len(), 1);
+        let c = &result.df_clashes[0];
+        assert_eq!(c.file_ws.as_str(), "ws-2");
+        assert_eq!(c.dir_ws.as_str(), "ws-1");
+    }
+
     /// bn-2jml: every directory-side child of a clashing FILE must land in
     /// `df_clash_paths()`, including shared children, so the resolve step
     /// never applies any of them next to the file.

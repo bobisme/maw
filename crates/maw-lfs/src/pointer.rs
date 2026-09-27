@@ -719,6 +719,104 @@ mod tests {
         assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadSize));
     }
 
+    /// A pointer with one extension whose name has `name_len` bytes.
+    fn pointer_with_ext_name(name_len: usize, size: u64) -> Pointer {
+        Pointer {
+            oid: sample_oid(),
+            size,
+            extensions: vec![(
+                format!("ext-0-{}", "n".repeat(name_len)),
+                format!("sha256:{SAMPLE_OID_HEX}"),
+            )],
+        }
+    }
+
+    /// bn-3bjx (mutation gap): the `TooLarge` guard in `validate` relies on
+    /// `encoded_len` being exact; pin it to the real `write` output across
+    /// extension counts and every decimal-width boundary of `size`.
+    #[test]
+    fn encoded_len_matches_written_length() {
+        let ext = |k: &str| (k.to_owned(), format!("sha256:{SAMPLE_OID_HEX}"));
+        let ext_sets = [
+            vec![],
+            vec![ext("ext-0-a")],
+            vec![ext("ext-0-a"), ext("ext-1-bb")],
+        ];
+        let sizes = [0, 9, 10, 99, 100, 12_345, 1_000_000_000, MAX_SIZE];
+        for extensions in &ext_sets {
+            for &size in &sizes {
+                let p = Pointer {
+                    oid: sample_oid(),
+                    size,
+                    extensions: extensions.clone(),
+                };
+                let out = p.write().expect("valid pointer");
+                assert_eq!(p.encoded_len(), out.len(), "size={size} ext={extensions:?}");
+            }
+        }
+    }
+
+    /// bn-3bjx (mutation gap): a pointer of exactly `MAX_POINTER_BYTES` is
+    /// writable and parseable; one byte more is refused on both paths.
+    #[test]
+    fn max_pointer_bytes_boundary_is_inclusive() {
+        // version(43) + ext line(6 + n + 1 + 71 + 1) + oid(76) + "size 0\n"(7)
+        let n = MAX_POINTER_BYTES - (43 + 79 + 76 + 7);
+        let at_max = pointer_with_ext_name(n, 0);
+        let bytes = at_max
+            .write()
+            .expect("exactly MAX_POINTER_BYTES must encode");
+        assert_eq!(bytes.len(), MAX_POINTER_BYTES);
+        assert_eq!(Pointer::parse(&bytes), Ok(at_max));
+
+        let over = pointer_with_ext_name(n + 1, 0);
+        assert_eq!(
+            over.validate(),
+            Err(ParseError::TooLarge(MAX_POINTER_BYTES + 1))
+        );
+        let over_bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\next-0-{} sha256:{SAMPLE_OID_HEX}\noid sha256:{SAMPLE_OID_HEX}\nsize 0\n",
+            "n".repeat(n + 1)
+        );
+        assert_eq!(over_bytes.len(), MAX_POINTER_BYTES + 1);
+        assert_eq!(
+            Pointer::parse(over_bytes.as_bytes()),
+            Err(ParseError::TooLarge(MAX_POINTER_BYTES + 1))
+        );
+    }
+
+    /// bn-3bjx (mutation gap): `size == i64::MAX` is the largest writable
+    /// size; one more is refused.
+    #[test]
+    fn write_accepts_max_size_rejects_above() {
+        let p = Pointer {
+            oid: sample_oid(),
+            size: MAX_SIZE,
+            extensions: vec![],
+        };
+        let bytes = p.write().expect("i64::MAX must encode");
+        assert_eq!(Pointer::parse(&bytes), Ok(p));
+        let over = Pointer {
+            oid: sample_oid(),
+            size: MAX_SIZE + 1,
+            extensions: vec![],
+        };
+        assert_eq!(over.write(), Err(ParseError::BadSize));
+    }
+
+    /// bn-3bjx (mutation gap): a repeated `version` line is reported as a
+    /// duplicate key, not as an unknown key.
+    #[test]
+    fn repeated_version_line_is_duplicate_key() {
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\nversion https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize 1\n"
+        );
+        assert_eq!(
+            Pointer::parse(bytes.as_bytes()),
+            Err(ParseError::DuplicateKey("version".to_owned()))
+        );
+    }
+
     #[test]
     fn large_size_accepted() {
         let big = MAX_SIZE;

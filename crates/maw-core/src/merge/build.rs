@@ -1446,6 +1446,94 @@ mod tests {
         );
     }
 
+    /// bn-3bjx (mutation gap): untouched NESTED epoch files and gitlinks must
+    /// survive a merge build verbatim — path prefix, mode `160000` and oid.
+    /// Previously every build test used a flat epoch, so dropping the prefix
+    /// in `walk_tree_recursive` or the `"160000"` mode arm in `build_tree`
+    /// (turning a submodule into a blob entry) went unnoticed.
+    #[test]
+    fn build_preserves_nested_epoch_files_and_gitlinks() {
+        let (dir, seed, _) = setup_git_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/deep")).expect("mkdir");
+        fs::write(root.join("src/deep/lib.rs"), "pub fn lib() {}\n").expect("write");
+        run_git(root, &["add", "src/deep/lib.rs"]);
+        let gitlink_spec = format!("160000,{},vendor/sub", seed.as_str());
+        run_git(
+            root,
+            &["update-index", "--add", "--cacheinfo", &gitlink_spec],
+        );
+        run_git(root, &["commit", "-q", "-m", "nested + gitlink"]);
+        let epoch = EpochId::new(git_oid(root, "HEAD").as_str()).expect("epoch");
+        let repo = open_test_repo(root);
+
+        let commit = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws"]),
+            &[ResolvedChange::Upsert {
+                path: PathBuf::from("new.txt"),
+                content: b"new\n".to_vec(),
+            }],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("build should succeed");
+
+        assert_eq!(
+            git_file_content(root, commit.as_str(), "src/deep/lib.rs"),
+            "pub fn lib() {}\n"
+        );
+        assert_eq!(
+            git_ls_tree_mode(root, commit.as_str(), "vendor/sub"),
+            "160000"
+        );
+        let epoch_sub = git_oid(root, &format!("{}:vendor/sub", epoch.as_str()));
+        let merged_sub = git_oid(root, &format!("{}:vendor/sub", commit.as_str()));
+        assert_eq!(epoch_sub, merged_sub, "gitlink oid must be preserved");
+        assert_eq!(epoch_sub.as_str(), seed.as_str());
+    }
+
+    /// bn-3bjx: `git_tree_entry_cmp` implements git's canonical order where a
+    /// directory sorts as if its name had a trailing `/`.
+    #[test]
+    fn git_tree_entry_cmp_matches_git_canonical_order() {
+        use maw_git::EntryMode::{Blob, Tree};
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        // Differing byte decides.
+        assert_eq!(git_tree_entry_cmp("a", Blob, "b", Blob), Less);
+        assert_eq!(git_tree_entry_cmp("b", Blob, "a", Blob), Greater);
+        // Blob prefix sorts before its extension.
+        assert_eq!(git_tree_entry_cmp("a", Blob, "a.x", Blob), Less);
+        assert_eq!(git_tree_entry_cmp("a.x", Blob, "a", Blob), Greater);
+        // Directory `a` sorts as `a/` (0x2f): after `a-x` (0x2d), before `a0` (0x30).
+        assert_eq!(git_tree_entry_cmp("a", Tree, "a-x", Blob), Greater);
+        assert_eq!(git_tree_entry_cmp("a-x", Blob, "a", Tree), Less);
+        assert_eq!(git_tree_entry_cmp("a", Tree, "a0", Blob), Less);
+        assert_eq!(git_tree_entry_cmp("a0", Blob, "a", Tree), Greater);
+        // Blob `a` vs directory `a`: `a` < `a/`.
+        assert_eq!(git_tree_entry_cmp("a", Blob, "a", Tree), Less);
+        assert_eq!(git_tree_entry_cmp("a", Tree, "a", Blob), Greater);
+        assert_eq!(git_tree_entry_cmp("a", Blob, "a", Blob), Equal);
+        assert_eq!(git_tree_entry_cmp("a", Tree, "a", Tree), Equal);
+    }
+
+    /// bn-3bjx: `BuildError::Io` exposes its cause through `source()`.
+    #[test]
+    fn build_error_io_exposes_source() {
+        use std::error::Error as _;
+        let err = BuildError::Io(std::io::Error::other("boom"));
+        assert_eq!(
+            err.source().map(ToString::to_string).as_deref(),
+            Some("boom")
+        );
+        let other = BuildError::DuplicateTreeEntry {
+            dir: PathBuf::new(),
+            name: "x".to_owned(),
+        };
+        assert!(other.source().is_none());
+    }
+
     /// A legitimate FILE->DIR restructure (delete `a`, add `a/b`) still builds.
     #[test]
     fn build_allows_file_to_directory_restructure() {
