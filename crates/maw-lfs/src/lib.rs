@@ -31,5 +31,7 @@ pub use attrs::AttrsMatcher;
 pub use batch::BatchClient;
 pub use creds::CredentialProvider;
 pub use error::LfsError;
-pub use pointer::{Pointer, git_lfs_clean_passes_through, looks_like_pointer};
-pub use store::Store;
+pub use pointer::{
+    DecodedPointer, Pointer, git_lfs_clean_passes_through, git_lfs_decode, looks_like_pointer,
+};
+pub use store::{SmudgeSource, Store};

@@ -629,11 +629,9 @@ pub(super) fn rebase_workspace_run(
     let epoch_delta = build_epoch_delta_map(repo_dyn, old_git, new_git)?;
 
     // bn-2upt — load merge sanity config once and thread through the
-    // overlap path. If the config file fails to load (or just isn't
-    // there) we use defaults — i.e. strict ON, ratio 1.5x. Failing
-    // closed: a config we can't parse is not a license to skip the
-    // check.
-    let manifold_config = crate::workspace::load_manifold_config(root).unwrap_or_default();
+    // overlap path. A missing config means defaults (strict ON, ratio
+    // 1.5x); an unparseable one refuses rather than guessing (bn-hcbc8).
+    let manifold_config = crate::workspace::require_manifold_config(root, "maw ws sync")?;
     let sanity_cfg = PostRebaseSanityConfig::from_merge(&manifold_config.merge);
     let mut sanity_flagged_steps = 0usize;
     let mut sanity_flagged_paths_total: Vec<PathBuf> = Vec::new();

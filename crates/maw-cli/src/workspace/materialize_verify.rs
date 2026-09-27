@@ -313,13 +313,22 @@ fn native_lfs_content_matches_head(
     let Ok(bytes) = std::fs::read(ws_path.join(path)) else {
         return false;
     };
-    matches!(
-        (
-            repo.write_blob_with_path(&bytes, path),
-            repo.blob_oid_at_commit(head, Path::new(path)),
-        ),
-        (Ok(actual), Ok(Some(expected))) if actual == expected
-    )
+    let Ok(Some(expected)) = repo.blob_oid_at_commit(head, Path::new(path)) else {
+        return false;
+    };
+    if repo
+        .write_blob_with_path(&bytes, path)
+        .is_ok_and(|actual| actual == expected)
+    {
+        return true;
+    }
+    // bn-hcbc8: a NON-canonical pointer in HEAD is smudged on checkout (as
+    // git-lfs does), but re-cleaning the real bytes yields the canonical
+    // pointer, a different blob. The worktree still matches HEAD when it
+    // holds exactly the content that pointer names.
+    repo.read_blob(expected).is_ok_and(|blob| {
+        maw_lfs::git_lfs_decode(&blob).is_some_and(|p| p.is_smudged_content(&bytes))
+    })
 }
 
 /// Compute the divergent path set by **comparing trees**, not by asking git
@@ -1595,6 +1604,77 @@ mod tests {
         assert_eq!(std::fs::read(root.join("data.bin")).unwrap(), content);
 
         (dir, root, commit, content)
+    }
+
+    /// Commit `blob` verbatim (no clean filter) as `data.bin` under an LFS
+    /// attribute, with `content` in the shared LFS store, and check it out.
+    fn repo_with_raw_lfs_blob(
+        blob: &[u8],
+        content: &[u8],
+    ) -> (tempfile::TempDir, std::path::PathBuf, maw_git::GitOid) {
+        use maw_git::GitRepo as _;
+
+        let (dir, root) = maw_git::test_support::init_test_repo();
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs -text\n").unwrap();
+        let base = maw_git::test_support::commit_all(&root, "attrs");
+        let base_oid: maw_git::GitOid = base.parse().unwrap();
+        let repo = maw_git::GixRepo::open(&root).unwrap();
+        maw_lfs::Store::open(repo.common_dir())
+            .unwrap()
+            .insert_from_reader(content)
+            .unwrap();
+        let blob_oid = repo.write_blob(blob).unwrap();
+        let base_tree = repo.read_commit(base_oid).unwrap().tree_oid;
+        let tree = repo
+            .edit_tree(
+                base_tree,
+                &[maw_git::TreeEdit::Upsert {
+                    path: "data.bin".to_owned(),
+                    mode: maw_git::EntryMode::Blob,
+                    oid: blob_oid,
+                }],
+            )
+            .unwrap();
+        let commit = repo
+            .create_commit(tree, &[base_oid], "lfs data", None)
+            .unwrap();
+        repo.checkout_tree(commit, &root).unwrap();
+        repo.set_head_detached(commit).unwrap();
+        (dir, root, commit)
+    }
+
+    /// bn-hcbc8: a NON-canonical pointer in HEAD (here CRLF line endings, which
+    /// git-lfs smudges) is materialized as real content. Re-cleaning that
+    /// content yields the canonical pointer — a different blob — but the
+    /// worktree is still exactly what HEAD describes, so it must verify clean
+    /// (otherwise every materialization "repairs" it and pins a recovery ref).
+    #[test]
+    fn non_canonical_lfs_pointer_verifies_clean_after_smudge() {
+        use sha2::{Digest, Sha256};
+
+        let content = b"real bytes behind a CRLF pointer\n".to_vec();
+        let pointer = format!(
+            "version https://git-lfs.github.com/spec/v1\r\noid sha256:{:x}\r\nsize {}\r\n",
+            Sha256::digest(&content),
+            content.len()
+        );
+        let (_dir, root, _commit) = repo_with_raw_lfs_blob(pointer.as_bytes(), &content);
+        assert_eq!(
+            std::fs::read(root.join("data.bin")).unwrap(),
+            content,
+            "checkout must smudge a pointer git-lfs smudges"
+        );
+        let clean = divergent_paths_by_tree(&root).unwrap();
+        assert!(clean.is_empty(), "smudged content matches HEAD: {clean:?}");
+
+        let mut edited = content;
+        edited[0] = b'X';
+        std::fs::write(root.join("data.bin"), edited).unwrap();
+        assert_eq!(
+            divergent_paths_by_tree(&root).unwrap(),
+            vec![("data.bin".to_owned(), "M")],
+            "a genuine edit must remain divergent"
+        );
     }
 
     /// The authoritative detector must use maw's native LFS clean semantics.

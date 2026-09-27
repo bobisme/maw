@@ -2298,6 +2298,53 @@ pub fn load_manifold_config(root: &Path) -> Result<ManifoldConfig, maw_core::con
     Ok(resolved.config)
 }
 
+/// Load the manifold config for a state-mutating command (bn-hcbc8).
+///
+/// An unparseable config is an error, never a silent fallback to defaults: a
+/// typo could otherwise flip safety settings (`merge.auto_absorb_ff`,
+/// `merge.auto_rebase_siblings`, `append_only`, the post-rebase sanity
+/// check, …). Call this before taking any lock or mutating any state.
+///
+/// # Errors
+///
+/// Returns an actionable error naming the file and the parse error.
+pub fn require_manifold_config(root: &Path, command: &str) -> Result<ManifoldConfig> {
+    load_manifold_config(root).map_err(|e| invalid_manifold_config_error(&e, command))
+}
+
+/// The refusal for an unparseable manifold config (bn-hcbc8).
+fn invalid_manifold_config_error(
+    e: &maw_core::config::ConfigError,
+    command: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid maw config: {e}\n  \
+         `{command}` refuses to run with default settings instead: a typo there \
+         could silently change safety settings (merge.auto_absorb_ff, \
+         merge.append_only, merge.auto_rebase_siblings, validation, ...).\n  \
+         To fix: correct the file (the line above names the problem), then retry."
+    )
+}
+
+/// Load the manifold config for a read-only command (bn-hcbc8).
+///
+/// An unparseable config falls back to defaults so status/list keep working,
+/// but warns loudly (once per process) with the file and the parse error.
+#[must_use]
+pub fn load_manifold_config_or_warn(root: &Path) -> ManifoldConfig {
+    match load_manifold_config(root) {
+        Ok(config) => config,
+        Err(e) => {
+            emit_config_warnings(&[format!(
+                "invalid maw config: {e}\n  Using default settings for this read-only \
+                 command; commands that change state (merge, sync, resolve, ...) will \
+                 refuse until it is fixed.\n  To fix: correct the file."
+            )]);
+            ManifoldConfig::default()
+        }
+    }
+}
+
 /// Print config warnings to stderr, each distinct message at most once per
 /// process (several code paths load the config during one merge).
 fn emit_config_warnings(warnings: &[String]) {
@@ -2326,7 +2373,10 @@ pub fn get_backend() -> Result<AnyBackend> {
 
     // Load the manifold config (missing file → all defaults) from its
     // canonical, layout-aware location (bn-2dyz).
-    let manifold_config = load_manifold_config(&root).unwrap_or_default();
+    // bn-hcbc8: an invalid config warns loudly here (every command resolves
+    // a backend); state-mutating commands refuse separately via
+    // `require_manifold_config` before they touch anything.
+    let manifold_config = load_manifold_config_or_warn(&root);
     let configured_kind = manifold_config.workspace.backend;
 
     // Detect platform capabilities (cached in .manifold/platform-capabilities).

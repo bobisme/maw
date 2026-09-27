@@ -142,6 +142,8 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool, format: OutputFormat
         None
     } else {
         let root = repo_root()?;
+        // bn-hcbc8: refuse an unparseable config before any lock or mutation.
+        super::require_manifold_config(&root, "maw ws sync")?;
         let lock = crate::epoch_lock::EpochLock::acquire(&root, "ws sync")?;
         let pre = super::invariant_audit::capture(&root);
         Some((root, lock, pre))

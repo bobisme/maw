@@ -1351,7 +1351,7 @@ fn maybe_smudge(
     mode: &str,
     content: Vec<u8>,
 ) -> Vec<u8> {
-    if mode == "120000" || !maw_lfs::looks_like_pointer(&content) {
+    if mode == "120000" || maw_lfs::git_lfs_decode(&content).is_none() {
         return content;
     }
 
@@ -1752,18 +1752,13 @@ fn warn_unresolved_lfs_pointers(git_cwd: &Path, ws_path: &Path, oid: &str) {
         let Ok(bytes) = std::fs::read(&full) else {
             continue;
         };
-        if !maw_lfs::looks_like_pointer(&bytes) {
-            continue;
-        }
-        let Ok(pointer) = maw_lfs::Pointer::parse(&bytes) else {
-            continue;
-        };
-        if !store.contains(&pointer.oid) {
+        // bn-hcbc8: same decode and availability rules as `git lfs smudge`.
+        if let Ok(maw_lfs::SmudgeSource::Unavailable { reason, .. }) = store.open_for_smudge(&bytes)
+        {
             eprintln!(
-                "WARNING: '{path}' is LFS-tracked but its object (oid {}) is not in the \
-                 local LFS store — restored as pointer text, not content.\n  \
-                 Fetch the object (e.g. `git lfs pull`) into the store, then re-run recover.",
-                pointer.oid_hex()
+                "WARNING: '{path}' is LFS-tracked but {reason} — restored as pointer \
+                 text, not content.\n  \
+                 Fetch the object (e.g. `git lfs pull`) into the store, then re-run recover."
             );
         }
     }

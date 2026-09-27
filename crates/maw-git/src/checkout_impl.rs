@@ -372,10 +372,6 @@ pub fn smudge_lfs_pointers_public(
 
 /// Returns the repo-relative paths of files that were successfully smudged.
 #[cfg(feature = "lfs")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "smudge pass handles restore, parse, and atomic write cases"
-)]
 fn smudge_lfs_pointers(
     index: &gix::index::File,
     workdir: &Path,
@@ -434,7 +430,7 @@ fn smudge_lfs_pointers(
             let blob_oid = entry.id;
             if let Ok(obj) = repo.repo.find_object(blob_oid) {
                 let data = obj.data.clone();
-                if maw_lfs::looks_like_pointer(&data) {
+                if maw_lfs::git_lfs_decode(&data).is_some() {
                     // Ensure parent directory exists.
                     if let Some(parent) = full_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
@@ -451,32 +447,26 @@ fn smudge_lfs_pointers(
             continue;
         }
 
-        // Pointer cap is 1024 bytes per spec; anything larger is real content.
+        // git-lfs decodes only blobs under 1024 bytes as pointers (bn-hcbc8:
+        // maw never smudges a longer blob, see `maw_lfs::git_lfs_decode`).
         let Ok(meta) = meta else {
             continue;
         };
-        if meta.len() > 1024 {
+        if meta.len() >= maw_lfs::pointer::MAX_POINTER_BYTES as u64 {
             continue;
         }
 
         let Ok(bytes) = std::fs::read(&full_path) else {
             continue;
         };
-        if !maw_lfs::looks_like_pointer(&bytes) {
-            continue;
-        }
-        let Ok(pointer) = maw_lfs::Pointer::parse(&bytes) else {
-            continue;
-        };
-
-        let mut reader = match store.open_object(&pointer.oid) {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                tracing::warn!(
-                    path = path_str,
-                    oid = %pointer.oid_hex(),
-                    "lfs object missing from local store — pointer left on disk"
-                );
+        // bn-hcbc8: decode exactly what `git lfs smudge` decodes (lenient
+        // for non-canonical pointers; size 0 → empty; extensions and size
+        // mismatches leave the pointer, as git-lfs does).
+        let mut reader = match store.open_for_smudge(&bytes) {
+            Ok(maw_lfs::SmudgeSource::Content { reader, .. }) => reader,
+            Ok(maw_lfs::SmudgeSource::NotAPointer) => continue,
+            Ok(maw_lfs::SmudgeSource::Unavailable { reason, .. }) => {
+                tracing::warn!(path = path_str, "{reason} — pointer left on disk");
                 continue;
             }
             Err(e) => {

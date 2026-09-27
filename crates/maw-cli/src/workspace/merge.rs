@@ -5353,6 +5353,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
 
     let root = repo_root()?;
+    // bn-hcbc8: an unparseable config refuses the merge BEFORE the lock, the
+    // FF-absorb reconcile, or PREPARE — never silently run on defaults.
+    let manifold_config_preflight = super::require_manifold_config(&root, "maw ws merge")?;
     // bn-13rc: hold the repo-level epoch lock for the WHOLE merge — the
     // FF-absorb reconcile below, PREPARE→BUILD→COMMIT, sibling auto-rebase, and
     // cleanup all read-modify-write shared epoch state. Acquired here (before
@@ -5384,14 +5387,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // "diverged" error, augmented with the affected workspace list when the
     // FF was a candidate but blocked.
     if target_updates_epoch && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
-        let manifold_config = super::load_manifold_config(&root).unwrap_or_default();
         let reconcile = reconcile_epoch_with_branch(
             &root,
             branch,
             default_ws,
             &epoch_oid,
             &branch_before_oid,
-            manifold_config.merge.auto_absorb_ff,
+            manifold_config_preflight.merge.auto_absorb_ff,
         )?;
 
         // FF-absorb is a distinct epoch mutation that happens before the merge
@@ -6296,9 +6298,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // bn-20fp: rich per-sibling rows for the merge JSON's `siblings[]`.
     let mut sibling_json: Vec<SiblingMergeJson> = Vec::new();
     if target_updates_epoch {
-        let manifold_cfg = super::load_manifold_config(&root).unwrap_or_default();
         let auto_rebase_enabled =
-            auto_rebase_override.unwrap_or(manifold_cfg.merge.auto_rebase_siblings);
+            auto_rebase_override.unwrap_or(manifold_config_preflight.merge.auto_rebase_siblings);
         if auto_rebase_enabled {
             let reports = super::sync::auto_rebase::auto_rebase_siblings(
                 &root,

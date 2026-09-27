@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::pointer::Pointer;
+use crate::hex::encode_oid;
+use crate::pointer::{Pointer, git_lfs_decode};
 
 const BUF_SIZE: usize = 64 * 1024;
 
@@ -40,6 +41,38 @@ pub enum StoreError {
         got: String,
         got_size: u64,
     },
+}
+
+/// What [`Store::open_for_smudge`] resolved a blob to.
+pub enum SmudgeSource {
+    /// git-lfs does not decode the blob as a pointer: it is the content.
+    NotAPointer,
+    /// The real content to write in place of the pointer.
+    Content {
+        oid_hex: String,
+        size: u64,
+        reader: Box<dyn Read + Send>,
+    },
+    /// A pointer git-lfs smudge would fail on; the pointer text stays.
+    Unavailable { oid_hex: String, reason: String },
+}
+
+impl std::fmt::Debug for SmudgeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAPointer => f.write_str("NotAPointer"),
+            Self::Content { oid_hex, size, .. } => f
+                .debug_struct("Content")
+                .field("oid_hex", oid_hex)
+                .field("size", size)
+                .finish_non_exhaustive(),
+            Self::Unavailable { oid_hex, reason } => f
+                .debug_struct("Unavailable")
+                .field("oid_hex", oid_hex)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
 }
 
 fn io_err(path: impl Into<PathBuf>, source: io::Error) -> StoreError {
@@ -93,6 +126,71 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(io_err(&path, e)),
         }
+    }
+
+    /// Resolve a committed blob the way `git lfs smudge` does (bn-hcbc8).
+    ///
+    /// - Not a pointer to git-lfs ([`git_lfs_decode`] fails, including every
+    ///   blob of 1024 bytes or more) → [`SmudgeSource::NotAPointer`]: the blob
+    ///   is the file content.
+    /// - `size 0` → an empty reader, whether or not the object exists (git-lfs
+    ///   writes nothing for a zero-size pointer).
+    /// - Extension lines → [`SmudgeSource::Unavailable`]: git-lfs smudges
+    ///   those only by running the configured extension programs, which maw
+    ///   does not; the stored object is the *extension-cleaned* content, so
+    ///   writing it raw would be wrong.
+    /// - Object missing, or its size differs from the pointer's →
+    ///   [`SmudgeSource::Unavailable`] (git-lfs fails and leaves the pointer).
+    ///
+    /// # Errors
+    /// Returns an error if the object exists but cannot be inspected or opened.
+    pub fn open_for_smudge(&self, blob: &[u8]) -> Result<SmudgeSource, StoreError> {
+        let Some(pointer) = git_lfs_decode(blob) else {
+            return Ok(SmudgeSource::NotAPointer);
+        };
+        let oid_hex = encode_oid(&pointer.oid);
+        if pointer.size == 0 {
+            return Ok(SmudgeSource::Content {
+                oid_hex,
+                size: 0,
+                reader: Box::new(io::empty()),
+            });
+        }
+        if pointer.has_extensions {
+            return Ok(SmudgeSource::Unavailable {
+                reason: format!(
+                    "LFS pointer {oid_hex} uses pointer extensions, which maw cannot run"
+                ),
+                oid_hex,
+            });
+        }
+        let path = self.object_path(&pointer.oid);
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(SmudgeSource::Unavailable {
+                    reason: format!("LFS object {oid_hex} is not present in the local store"),
+                    oid_hex,
+                });
+            }
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let actual = file.metadata().map_err(|e| io_err(&path, e))?.len();
+        if actual != pointer.size {
+            return Ok(SmudgeSource::Unavailable {
+                reason: format!(
+                    "LFS object {oid_hex} in the local store is {actual} bytes, \
+                     but the pointer says {}",
+                    pointer.size
+                ),
+                oid_hex,
+            });
+        }
+        Ok(SmudgeSource::Content {
+            oid_hex,
+            size: pointer.size,
+            reader: Box::new(file),
+        })
     }
 
     /// Stream bytes in from a reader, hashing as we go, then atomically

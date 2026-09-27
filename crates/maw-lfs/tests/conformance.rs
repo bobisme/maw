@@ -619,3 +619,294 @@ fn store_interop_lfs_to_maw() {
     assert!(expected_path.is_file(), "expected {expected_path:?}");
     let _ = oid_from_hex; // silence unused in case of refactor
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 5 (bn-hcbc8): smudge decodes exactly what git-lfs smudge decodes
+// ---------------------------------------------------------------------------
+
+/// `git-lfs smudge` with `data` on stdin: `(stdout, success)`.
+fn git_lfs_smudge_stdin(dir: &Path, name: &str, data: &[u8]) -> (Vec<u8>, bool) {
+    use std::io::Write as _;
+    let mut child = Command::new("git-lfs")
+        .args(["smudge", name])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn git-lfs smudge");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(data)
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("git-lfs smudge");
+    (out.stdout, out.status.success())
+}
+
+/// Pointer-shaped blobs for [`smudge_decodes_what_git_lfs_smudge_decodes`],
+/// pointing at `oid` (a `size`-byte object present in the local store).
+fn smudge_cases(oid: &str, size: usize) -> Vec<(&'static str, String)> {
+    let v = "version https://git-lfs.github.com/spec/v1";
+    let upper = oid.to_uppercase();
+    let big = size + 7;
+    vec![
+        ("canonical", format!("{v}\noid sha256:{oid}\nsize {size}\n")),
+        (
+            "no_final_newline",
+            format!("{v}\noid sha256:{oid}\nsize {size}"),
+        ),
+        (
+            "extra_blank_line",
+            format!("{v}\noid sha256:{oid}\nsize {size}\n\n"),
+        ),
+        (
+            "leading_blank_line",
+            format!("\n{v}\noid sha256:{oid}\nsize {size}\n"),
+        ),
+        (
+            "interior_blank_line",
+            format!("{v}\n\noid sha256:{oid}\n\nsize {size}\n"),
+        ),
+        (
+            "crlf",
+            format!("{v}\r\noid sha256:{oid}\r\nsize {size}\r\n"),
+        ),
+        (
+            "leading_tab",
+            format!("\t{v}\noid sha256:{oid}\nsize {size}\n"),
+        ),
+        (
+            "trailing_spaces",
+            format!("{v}\noid sha256:{oid}\nsize {size}\n  "),
+        ),
+        (
+            "hawser",
+            format!("version https://hawser.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n"),
+        ),
+        (
+            "git_media",
+            format!("version http://git-media.io/v/2\noid sha256:{oid}\nsize {size}\n"),
+        ),
+        (
+            "size_leading_zero",
+            format!("{v}\noid sha256:{oid}\nsize 0{size}\n"),
+        ),
+        (
+            "size_plus",
+            format!("{v}\noid sha256:{oid}\nsize +{size}\n"),
+        ),
+        (
+            "size_trailing_space",
+            format!("{v}\noid sha256:{oid}\nsize {size} \n"),
+        ),
+        // git-lfs writes nothing for a size-0 pointer, object or not.
+        ("size_zero", format!("{v}\noid sha256:{oid}\nsize 0\n")),
+        (
+            "size_zero_missing",
+            format!("{v}\noid sha256:{PTR_OID2}\nsize 0\n"),
+        ),
+        // git-lfs refuses (pointer stays): size mismatch, missing object,
+        // unconfigured extension.
+        (
+            "size_mismatch",
+            format!("{v}\noid sha256:{oid}\nsize {big}\n"),
+        ),
+        (
+            "missing_object",
+            format!("{v}\noid sha256:{PTR_OID2}\nsize 12\n"),
+        ),
+        (
+            "extension",
+            format!("{v}\next-0-foo sha256:{PTR_OID2}\noid sha256:{oid}\nsize {size}\n"),
+        ),
+        // Not pointers to git-lfs smudge (content passes through):
+        (
+            "upper_hex",
+            format!("{v}\noid sha256:{upper}\nsize {size}\n"),
+        ),
+        (
+            "size_first",
+            format!("{v}\nsize {size}\noid sha256:{oid}\n"),
+        ),
+        (
+            "trailing_unknown_key",
+            format!("{v}\noid sha256:{oid}\nsize {size}\nfoo bar\n"),
+        ),
+        ("negative_size", format!("{v}\noid sha256:{oid}\nsize -1\n")),
+        (
+            "space_only_line",
+            format!("{v}\n \noid sha256:{oid}\nsize {size}\n"),
+        ),
+        (
+            "dup_ext_priority",
+            format!(
+                "{v}\next-0-a sha256:{PTR_OID2}\next-0-b sha256:{PTR_OID2}\noid sha256:{oid}\nsize {size}\n"
+            ),
+        ),
+        ("doc_about_lfs", format!("{v}\nThis file documents LFS.\n")),
+        (
+            "bad_version",
+            format!("version https://example.com/v9\noid sha256:{oid}\nsize {size}\n"),
+        ),
+    ]
+}
+
+/// Commit `blob` verbatim (no filters) as `x.bin` under an LFS
+/// `.gitattributes`, and return the tree oid.
+fn raw_lfs_tree(dir: &Path, blob: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--no-filters", "--stdin"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn git hash-object");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(blob)
+        .expect("write");
+    let out = child.wait_with_output().expect("hash-object");
+    assert!(out.status.success());
+    let blob_oid = String::from_utf8(out.stdout)
+        .expect("utf8")
+        .trim()
+        .to_owned();
+    let attrs_oid = git(&["hash-object", "-w", ".gitattributes"], dir)
+        .trim()
+        .to_owned();
+    let index = dir.join(".git").join("maw-conformance-index");
+    let _ = fs::remove_file(&index);
+    let with_index = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("utf8")
+    };
+    with_index(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{attrs_oid},.gitattributes"),
+    ]);
+    with_index(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{blob_oid},x.bin"),
+    ]);
+    with_index(&["write-tree"]).trim().to_owned()
+}
+
+/// bn-hcbc8: a blob git-lfs smudge decodes must be smudged by maw's checkout
+/// too, and a blob git-lfs leaves alone must stay byte-for-byte as committed.
+///
+/// maw used the STRICT canonical parser on the smudge side, so a
+/// non-canonical pointer (blank lines, CRLF, legacy version URL, `size 012`,
+/// …) that git-lfs smudges stayed as pointer text in maw-materialized
+/// worktrees. Conversely maw smudged extension pointers (git-lfs refuses them
+/// without the extension program) and ignored size mismatches.
+#[test]
+fn smudge_decodes_what_git_lfs_smudge_decodes() {
+    skip_if_no_lfs!();
+    let content = b"hello world, smudge me!".to_vec();
+    let oid_hex = format!("{:x}", Sha256::digest(&content));
+
+    let tmp_a = tempfile::tempdir().expect("tempdir");
+    init_test_repo(tmp_a.path());
+    write_gitattributes(tmp_a.path(), "*.bin");
+    let tmp_b = tempfile::tempdir().expect("tempdir");
+    init_test_repo(tmp_b.path());
+    write_gitattributes(tmp_b.path(), "*.bin");
+    let store_b = Store::open(&tmp_b.path().join(".git")).expect("store");
+    store_b
+        .insert_from_reader(content.as_slice())
+        .expect("store object");
+    let repo_b = maw_git::GixRepo::open(tmp_b.path()).expect("open");
+
+    let mut mismatches = Vec::new();
+    for (name, blob) in smudge_cases(&oid_hex, content.len()) {
+        // git-lfs may delete a local object whose size disagrees with the
+        // pointer; re-store it before every case.
+        let _ = git_lfs_clean_stdin(tmp_a.path(), "x.bin", &content);
+        let (lfs_out, lfs_ok) = git_lfs_smudge_stdin(tmp_a.path(), "x.bin", blob.as_bytes());
+        // On failure git-lfs leaves the pointer: the committed blob stays.
+        let expected = if lfs_ok {
+            lfs_out
+        } else {
+            blob.as_bytes().to_vec()
+        };
+
+        let tree = raw_lfs_tree(tmp_b.path(), blob.as_bytes());
+        let workdir = tempfile::tempdir().expect("tempdir");
+        repo_b
+            .checkout_tree(tree.parse().expect("oid"), workdir.path())
+            .expect("maw checkout_tree");
+        let maw_out = fs::read(workdir.path().join("x.bin")).expect("read x.bin");
+        if maw_out != expected {
+            let describe = |b: &[u8]| {
+                if b == content.as_slice() {
+                    "smudges".to_owned()
+                } else if b == blob.as_bytes() {
+                    "leaves the pointer".to_owned()
+                } else if b.is_empty() {
+                    "writes an empty file".to_owned()
+                } else {
+                    format!("writes {:?}", String::from_utf8_lossy(b))
+                }
+            };
+            mismatches.push(format!(
+                "[{name}] git-lfs {} but maw {}",
+                describe(&expected),
+                describe(&maw_out)
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// bn-hcbc8, deliberate divergence: git-lfs smudge decodes only the first
+/// 1024 bytes of a blob, so a pointer followed by >1024 bytes of whitespace
+/// AND further content is smudged, discarding the tail. git-lfs's own clean
+/// treats that blob as content, not a pointer; maw keeps it verbatim rather
+/// than drop bytes (bn-1b3n: never smudge a non-pointer file).
+#[test]
+fn smudge_never_discards_content_past_the_pointer_cutoff() {
+    skip_if_no_lfs!();
+    let content = b"hello world, smudge me!".to_vec();
+    let oid_hex = format!("{:x}", Sha256::digest(&content));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_test_repo(tmp.path());
+    write_gitattributes(tmp.path(), "*.bin");
+    Store::open(&tmp.path().join(".git"))
+        .expect("store")
+        .insert_from_reader(content.as_slice())
+        .expect("store object");
+    let blob = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid_hex}\nsize {}\n{}TAIL\n",
+        content.len(),
+        "\n".repeat(1100)
+    );
+    let tree = raw_lfs_tree(tmp.path(), blob.as_bytes());
+    let workdir = tempfile::tempdir().expect("tempdir");
+    maw_git::GixRepo::open(tmp.path())
+        .expect("open")
+        .checkout_tree(tree.parse().expect("oid"), workdir.path())
+        .expect("checkout");
+    assert_eq!(
+        fs::read(workdir.path().join("x.bin")).expect("read"),
+        blob.as_bytes()
+    );
+}

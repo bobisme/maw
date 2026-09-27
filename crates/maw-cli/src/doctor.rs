@@ -1021,7 +1021,8 @@ fn scan_for_stubs(
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        if maw_lfs::looks_like_pointer(&bytes) {
+        // bn-hcbc8: a stub is anything git-lfs smudge would have replaced.
+        if maw_lfs::git_lfs_decode(&bytes).is_some_and(|p| p.size > 0) {
             stubs.push(format!("{ws_name}/{rel_str}"));
         }
     }

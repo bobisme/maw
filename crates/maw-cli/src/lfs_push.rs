@@ -220,12 +220,10 @@ fn collect_from_tree(
         let bytes = repo
             .read_blob(blob_oid)
             .map_err(|e| anyhow::anyhow!("failed to read blob {blob_oid}: {e}"))?;
-        if !maw_lfs::looks_like_pointer(&bytes) {
-            // Not a pointer — maw may have committed real bytes, or this file
-            // predates LFS tracking. Skip; nothing to upload.
-            continue;
-        }
-        let Ok(pointer) = maw_lfs::Pointer::parse(&bytes) else {
+        // bn-hcbc8: a pointer is whatever git-lfs decodes as one (including
+        // non-canonical pointers it smudges); anything else is real bytes
+        // committed outside LFS — nothing to upload.
+        let Some(pointer) = maw_lfs::git_lfs_decode(&bytes) else {
             continue;
         };
         out.entry(pointer.oid).or_insert(pointer.size);

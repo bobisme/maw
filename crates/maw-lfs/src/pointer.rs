@@ -385,34 +385,62 @@ fn check_extension(prev: Option<&str>, key: &str, value: &str) -> Result<(), Par
     Ok(())
 }
 
-/// Would git-lfs's clean filter hand `bytes` to git unchanged (because it
-/// already decodes as a pointer) instead of storing it as a new object?
-///
-/// Mirrors git-lfs 3.x `copyToTemp` + `DecodeFrom` + `decodeKV`
-/// (`lfs/gitfilter_clean.go`, `lfs/pointer.go`), which is deliberately more
-/// lenient than [`Pointer::parse`]: surrounding whitespace, blank lines and a
-/// trailing `\r` per line are ignored; the legacy `hawser` / `git-media`
-/// version URLs are accepted; `size` is any non-negative `i64` Go's
-/// `ParseInt` accepts (`012`, `+12`); `ext-<d>-<name>` lines may appear
-/// anywhere before `size`. Content must be shorter than
-/// [`MAX_POINTER_BYTES`]. Empty content is git-lfs's empty pointer.
-///
-/// Callers that decide "already a pointer, write as-is" must use this, not
-/// the canonical parser: wrapping a pointer git-lfs keeps would commit a
-/// pointer to a pointer (bn-ggo5).
-#[must_use]
-pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
-    const KEYS: [&[u8]; 3] = [b"version", b"oid", b"size"];
-    if bytes.is_empty() {
-        return true;
+/// A pointer as git-lfs's lenient decoder reads it (see [`git_lfs_decode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedPointer {
+    /// sha256 of the real file content.
+    pub oid: [u8; 32],
+    /// Size of the real file, in bytes (at most `i64::MAX`).
+    pub size: u64,
+    /// Whether the pointer carries `ext-<d>-<name>` extension lines. git-lfs
+    /// smudges those only by running the configured extension programs.
+    pub has_extensions: bool,
+}
+
+impl DecodedPointer {
+    /// Is `content` what `git lfs smudge` writes for this pointer? Empty for
+    /// `size 0`; otherwise exactly `size` bytes hashing to `oid`. Always
+    /// false for a pointer with extensions (maw never smudges those).
+    #[must_use]
+    pub fn is_smudged_content(&self, content: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        if self.size == 0 {
+            return content.is_empty();
+        }
+        !self.has_extensions
+            && u64::try_from(content.len()).is_ok_and(|len| len == self.size)
+            && Sha256::digest(content).as_slice() == self.oid.as_slice()
     }
-    if bytes.len() >= MAX_POINTER_BYTES {
-        return false;
+}
+
+/// Decode `bytes` exactly as git-lfs 3.x `DecodeFrom` + `decodeKV`
+/// (`lfs/pointer.go`) does, for a blob shorter than [`MAX_POINTER_BYTES`].
+///
+/// This is deliberately more lenient than [`Pointer::parse`]: surrounding
+/// whitespace, blank lines and a trailing `\r` per line are ignored; the
+/// legacy `hawser` / `git-media` version URLs are accepted; `size` is any
+/// non-negative `i64` Go's `ParseInt` accepts (`012`, `+12`); `ext-<d>-<name>`
+/// lines may appear anywhere before `size`.
+///
+/// Returns `None` for empty content and for content of [`MAX_POINTER_BYTES`]
+/// or more. (git-lfs smudge decodes only the first 1024 bytes of a longer
+/// blob and discards the rest; maw treats such a blob as content, the way
+/// git-lfs clean does, rather than drop bytes — bn-hcbc8.)
+///
+/// Both the clean side ([`git_lfs_clean_passes_through`], bn-ggo5) and the
+/// smudge side (`Store::open_for_smudge`, bn-hcbc8) use this, so maw
+/// recognises a pointer exactly when git-lfs does, in both directions.
+/// Verified against the real `git-lfs` binary in `tests/conformance.rs`.
+#[must_use]
+pub fn git_lfs_decode(bytes: &[u8]) -> Option<DecodedPointer> {
+    const KEYS: [&[u8]; 3] = [b"version", b"oid", b"size"];
+    if bytes.is_empty() || bytes.len() >= MAX_POINTER_BYTES {
+        return None;
     }
     let data = go_trim_ascii_space(bytes);
     let contains = |needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
     if !(contains(b"git-media") || contains(b"hawser") || contains(b"git-lfs")) {
-        return false;
+        return None;
     }
     let mut values: [Option<&[u8]>; 3] = [None; 3];
     let mut exts: Vec<(&[u8], &[u8])> = Vec::new();
@@ -422,12 +450,10 @@ pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
         if text.is_empty() {
             continue;
         }
-        let Some(sp) = text.iter().position(|&b| b == b' ') else {
-            return false;
-        };
+        let sp = text.iter().position(|&b| b == b' ')?;
         let (key, value) = (&text[..sp], &text[sp + 1..]);
         if line >= KEYS.len() {
-            return false;
+            return None;
         }
         if key == KEYS[line] {
             values[line] = Some(value);
@@ -442,7 +468,7 @@ pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
                 if d.is_ascii_digit() && (w.is_ascii_alphanumeric() || *w == b'_')
         );
         if !ext_key {
-            return false;
+            return None;
         }
         match exts.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = value,
@@ -454,7 +480,7 @@ pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
     for (key, value) in &exts {
         let p = usize::from(key[4] - b'0');
         if git_lfs_oid(value).is_none() || priorities[p] {
-            return false;
+            return None;
         }
         priorities[p] = true;
     }
@@ -466,9 +492,28 @@ pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
         ]
         .contains(&v)
     });
-    version_ok
-        && values[1].and_then(git_lfs_oid).is_some()
-        && values[2].is_some_and(go_parse_nonneg_i64)
+    if !version_ok {
+        return None;
+    }
+    Some(DecodedPointer {
+        oid: values[1].and_then(git_lfs_oid)?,
+        size: values[2].and_then(go_parse_nonneg_i64)?,
+        has_extensions: !exts.is_empty(),
+    })
+}
+
+/// Would git-lfs's clean filter hand `bytes` to git unchanged (because it
+/// already decodes as a pointer) instead of storing it as a new object?
+///
+/// True for empty content (git-lfs's empty pointer) and whenever
+/// [`git_lfs_decode`] succeeds.
+///
+/// Callers that decide "already a pointer, write as-is" must use this, not
+/// the canonical parser: wrapping a pointer git-lfs keeps would commit a
+/// pointer to a pointer (bn-ggo5).
+#[must_use]
+pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
+    bytes.is_empty() || git_lfs_decode(bytes).is_some()
 }
 
 /// Go `bytes.TrimSpace` restricted to ASCII (adds `\v`, which Rust's
@@ -498,26 +543,21 @@ fn git_lfs_oid(value: &[u8]) -> Option<[u8; 32]> {
 }
 
 /// Go `strconv.ParseInt(s, 10, 64)` succeeding with a non-negative result.
-fn go_parse_nonneg_i64(value: &[u8]) -> bool {
+fn go_parse_nonneg_i64(value: &[u8]) -> Option<u64> {
     let (negative, digits) = match value.split_first() {
         Some((b'+', rest)) => (false, rest),
         Some((b'-', rest)) => (true, rest),
         _ => (false, value),
     };
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-        return false;
+        return None;
     }
     let mut n: u64 = 0;
     for &d in digits {
-        match n
-            .checked_mul(10)
-            .and_then(|n| n.checked_add(u64::from(d - b'0')))
-        {
-            Some(v) => n = v,
-            None => return false,
-        }
+        n = n.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
     }
-    if negative { n == 0 } else { n <= MAX_SIZE }
+    let ok = if negative { n == 0 } else { n <= MAX_SIZE };
+    ok.then_some(n)
 }
 
 /// Fast check: does this byte slice look like an LFS pointer?
@@ -571,6 +611,65 @@ mod tests {
     /// bn-ggo5: pass-through decision table, observed against real
     /// git-lfs 3.8 `git lfs clean` (the conformance test re-checks it live
     /// when git-lfs is installed).
+    /// bn-hcbc8: the smudge-side decode yields the pointer git-lfs reads,
+    /// including Go `ParseInt` sizes, and flags extensions.
+    #[test]
+    fn git_lfs_decode_extracts_oid_size_and_extensions() {
+        let v = "version https://git-lfs.github.com/spec/v1";
+        let d = |s: String| git_lfs_decode(s.as_bytes());
+        let p = d(format!(
+            "\n{v}\r\noid sha256:{SAMPLE_OID_HEX}\r\n\nsize 012\r\n"
+        ))
+        .expect("decodes");
+        assert_eq!((p.oid, p.size, p.has_extensions), (sample_oid(), 12, false));
+        assert_eq!(
+            d(format!("{v}\noid sha256:{SAMPLE_OID_HEX}\nsize +7")).map(|p| p.size),
+            Some(7)
+        );
+        assert_eq!(
+            d(format!("{v}\noid sha256:{SAMPLE_OID_HEX}\nsize -0\n")).map(|p| p.size),
+            Some(0)
+        );
+        assert!(
+            d(format!(
+                "{v}\noid sha256:{SAMPLE_OID_HEX}\next-0-x sha256:{SAMPLE_OID_HEX}\nsize 1\n"
+            ))
+            .expect("decodes")
+            .has_extensions
+        );
+        assert_eq!(git_lfs_decode(b""), None);
+        let long = format!(
+            "{v}\noid sha256:{SAMPLE_OID_HEX}\nsize 1\n{}",
+            " ".repeat(1000)
+        );
+        assert_eq!(d(long), None, ">= 1024 bytes is never a pointer");
+    }
+
+    #[test]
+    fn is_smudged_content_checks_size_hash_and_extensions() {
+        use sha2::{Digest, Sha256};
+        let content = b"abc";
+        let oid: [u8; 32] = Sha256::digest(content).into();
+        let p = DecodedPointer {
+            oid,
+            size: 3,
+            has_extensions: false,
+        };
+        assert!(p.is_smudged_content(content));
+        assert!(!p.is_smudged_content(b"abd"));
+        assert!(!p.is_smudged_content(b"abcd"));
+        assert!(
+            !DecodedPointer {
+                has_extensions: true,
+                ..p
+            }
+            .is_smudged_content(content)
+        );
+        let empty = DecodedPointer { size: 0, ..p };
+        assert!(empty.is_smudged_content(b""));
+        assert!(!empty.is_smudged_content(content));
+    }
+
     #[test]
     fn git_lfs_clean_passes_through_matches_observed_git_lfs() {
         let o = SAMPLE_OID_HEX;

@@ -807,10 +807,13 @@ pub fn replay_snapshot_with_merge_protection(
         {
             let manifold = maw_core::model::layout::LayoutFlavor::detect_with_env(&candidate_root)
                 .manifold_dir(&candidate_root);
-            if manifold.is_dir()
-                && let Ok(loaded) = super::load_manifold_config(&candidate_root)
-            {
-                cfg = loaded;
+            if manifold.is_dir() {
+                // bn-hcbc8: this runs after the merge COMMIT, so refusing here
+                // would strand the dirty-trunk snapshot. The merge already
+                // refused an unparseable config up front; if it became
+                // invalid since, warn and keep the fail-closed defaults
+                // (strict sanity check ON).
+                cfg = super::load_manifold_config_or_warn(&candidate_root);
                 break;
             }
         }

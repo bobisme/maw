@@ -2375,10 +2375,11 @@ fn run_structured_impl(
         );
     }
 
-    // bn-c5ui: load the sanity config the same way rebase does — fail closed
-    // (defaults = strict ON, ratio 1.5x) when the config file is absent or
-    // unparseable. A missing config is not a licence to skip the check.
-    let manifold_config = super::load_manifold_config(root).unwrap_or_default();
+    // bn-c5ui: load the sanity config the same way rebase does — defaults
+    // (strict ON, ratio 1.5x) when the config file is absent; refuse when it
+    // is unparseable (bn-hcbc8).
+    // bn-hcbc8: an unparseable config refuses (never silent defaults).
+    let manifold_config = super::require_manifold_config(root, "maw ws resolve")?;
     let sanity_cfg = PostMergeSanityConfig::from_merge(&manifold_config.merge);
 
     // Determine the set of paths to process.
