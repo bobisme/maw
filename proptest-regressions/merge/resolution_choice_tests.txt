@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 778a52a510736e625edead0b3e7d52c4f47f9d56901648f0becd57b1882d0175 # shrinks to sc = Scenario { base_lines: 3, crlf: false, workspaces: [([Keep, Keep, Keep], false), ([Keep, Keep, Keep], false), ([Keep, Keep, Replace], false)], clash_line: 0, base_no_final_eol: false }
+cc 8d09b5060799a2da69c9b3f3d39e7272c1f3da653aa833165e858829d28c12a9 # shrinks to sc = Scenario { base_lines: 3, crlf: false, workspaces: [([Keep, Replace, Replace], false), ([Keep, Keep, Keep], false), ([Keep, Keep, Replace], false)], clash_line: 0, base_no_final_eol: false }
+cc 7f1d4b6fcc31a6e07e184a2924b741f591a96b6397e74246fdf50aa3e59082f0 # shrinks to sc = Scenario { base_lines: 3, crlf: false, workspaces: [([Keep, Keep, Keep], false), ([Keep, Keep, Keep], true)], clash_line: 1, base_no_final_eol: false }
+cc 828860d09304b3d0644be593d0e6bad7c9fea338552d88b3e9779b14eb01e51a # shrinks to sc = Scenario { base_lines: 3, crlf: false, workspaces: [([Keep, Keep, Keep], false), ([Keep, Keep, Keep], false), ([Replace, Keep, Keep], false)], clash_line: 2, base_no_final_eol: false }

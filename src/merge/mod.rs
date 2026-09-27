@@ -28,6 +28,7 @@ pub use maw_core::merge::rename;
 pub use maw_core::merge::types;
 
 // --- Modules that remain here (have cross-deps on backend/config/refs/merge_state/ast-merge) ---
+pub mod apply_resolution;
 #[cfg(feature = "ast-merge")]
 pub mod ast_merge;
 pub mod build_phase;
@@ -48,6 +49,9 @@ mod determinism_tests;
 
 #[cfg(all(test, feature = "proptests"))]
 mod pushout_tests;
+
+#[cfg(all(test, feature = "proptests"))]
+mod resolution_choice_tests;
 
 #[cfg(kani)]
 mod kani_proofs;

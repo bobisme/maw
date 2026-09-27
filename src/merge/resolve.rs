@@ -128,6 +128,12 @@ pub struct ConflictRecord {
     /// was successfully extracted. Empty for other conflict reasons (add/add,
     /// modify/delete) or when the diff3 output could not be parsed.
     pub atoms: Vec<ConflictAtom>,
+    /// bn-28os: workspaces that also changed this path but whose edits do
+    /// not overlap any conflicted region ("bystanders"). They are not
+    /// choosable sides, but every resolution must keep their edits — a
+    /// whole-file choice is folded (diff3) with each bystander's content.
+    /// Empty for non-diff3 conflicts.
+    pub bystanders: Vec<ConflictSide>,
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +510,7 @@ fn emit_df_clash_conflicts(partition: &PartitionResult, conflicts: &mut Vec<Conf
                 dir_child_example: witness.dir_child_example.clone(),
             },
             atoms: vec![],
+            bystanders: vec![],
         });
     }
 }
@@ -570,6 +577,7 @@ pub fn resolve_partition_with_attrs(
                 }],
                 reason: ConflictReason::MissingContent,
                 atoms: vec![],
+                bystanders: vec![],
             }),
         }
     }
@@ -660,6 +668,7 @@ pub fn resolve_partition_with_ast_and_attrs(
                 }],
                 reason: ConflictReason::MissingContent,
                 atoms: vec![],
+                bystanders: vec![],
             }),
         }
     }
@@ -919,15 +928,13 @@ fn resolve_shared_path(
             // appear in the conflict record's `sides` list.
             if matches!(reason, ConflictReason::Diff3Conflict) {
                 let (atoms, participant_ids) = recover_diff3_atoms_with_participants(entries, base);
-                // Filter entries to the participants identified by the fold.
-                let participant_entries: Vec<_> = entries
-                    .iter()
-                    .filter(|e| participant_ids.contains(&e.workspace_id))
-                    .cloned()
-                    .collect();
-                Ok(SharedOutcome::Conflict(conflict_record(
+                // Sides = the participants identified above; every other
+                // entry is recorded as a bystander (bn-28os) so resolutions
+                // keep its edits.
+                Ok(SharedOutcome::Conflict(conflict_record_with_bystanders(
                     path,
-                    &participant_entries,
+                    entries,
+                    &participant_ids,
                     base_for_record,
                     reason,
                     atoms,
@@ -1080,7 +1087,7 @@ fn resolve_shared_path_with_ast(
         .map(|(e, v)| (e.workspace_id.clone(), v.as_slice()))
         .collect();
     // Computed lazily: the AST merge below may resolve cleanly.
-    let probe_participants = || kway_conflict_participants(base_bytes, &members);
+    let probe_participants = || resolvable_participants(base_bytes, &members);
 
     // diff3 failed. Try AST merge if enabled for this language.
     if let Some(lang) = ast_config.is_enabled_for(path) {
@@ -1119,14 +1126,10 @@ fn resolve_shared_path_with_ast(
                 } else {
                     probe_participants()
                 };
-                let participant_entries: Vec<PathEntry> = entries
-                    .iter()
-                    .filter(|e| chosen.contains(&e.workspace_id))
-                    .cloned()
-                    .collect();
-                return Ok(SharedOutcome::Conflict(conflict_record(
+                return Ok(SharedOutcome::Conflict(conflict_record_with_bystanders(
                     path,
-                    &participant_entries,
+                    entries,
+                    &chosen,
                     Some(base_bytes),
                     ConflictReason::Diff3Conflict,
                     atoms,
@@ -1147,14 +1150,10 @@ fn resolve_shared_path_with_ast(
         .cloned()
         .collect();
     let atoms = kway_conflict_atoms(base_bytes, &participant_members);
-    let participant_entries: Vec<PathEntry> = entries
-        .iter()
-        .filter(|e| participants.contains(&e.workspace_id))
-        .cloned()
-        .collect();
-    Ok(SharedOutcome::Conflict(conflict_record(
+    Ok(SharedOutcome::Conflict(conflict_record_with_bystanders(
         path,
-        &participant_entries,
+        entries,
+        &participants,
         Some(base_bytes),
         ConflictReason::Diff3Conflict,
         atoms,
@@ -1230,6 +1229,54 @@ fn kway_conflict_participants(
         .zip(chosen)
         .filter(|(_, c)| *c)
         .map(|((w, _), _)| w.clone())
+        .collect()
+}
+
+/// bn-28os: participants whose resolution can always keep every bystander.
+///
+/// A bystander (a member that is not a participant) edited the path
+/// disjointly from every other member, so choosing any participant `S`
+/// must yield `S` folded (diff3) with each bystander. Pairwise-clean edits
+/// can still conflict in a fold (e.g. adjacent hunks meeting only after
+/// another bystander's lines are in), and a bystander that cannot be folded
+/// would have to be dropped. Such a bystander is promoted to a participant
+/// instead — never dropped — and the check repeats until every
+/// participant's fold with the remaining bystanders is clean.
+fn resolvable_participants(
+    base_bytes: &[u8],
+    members: &[(WorkspaceId, &[u8])],
+) -> Vec<WorkspaceId> {
+    let mut participants = kway_conflict_participants(base_bytes, members);
+    loop {
+        let mut promoted = None;
+        'outer: for (s_id, s_content) in members {
+            if !participants.contains(s_id) {
+                continue;
+            }
+            let mut acc = s_content.to_vec();
+            for (n_id, n_content) in members {
+                if participants.contains(n_id) {
+                    continue;
+                }
+                match diff3_merge_bytes(base_bytes, &acc, n_content) {
+                    Ok(Diff3Outcome::Clean(merged)) => acc = merged,
+                    Ok(Diff3Outcome::Conflict { .. }) | Err(_) => {
+                        promoted = Some(n_id.clone());
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        match promoted {
+            Some(id) => participants.push(id),
+            None => break,
+        }
+    }
+    // Keep `members` order.
+    members
+        .iter()
+        .filter(|(w, _)| participants.contains(w))
+        .map(|(w, _)| w.clone())
         .collect()
 }
 
@@ -1339,7 +1386,7 @@ fn recover_diff3_atoms_with_participants(
         return (vec![], all_ids());
     }
 
-    let content_participants = kway_conflict_participants(base_bytes, &members);
+    let content_participants = resolvable_participants(base_bytes, &members);
     let participant_members: Vec<(WorkspaceId, &[u8])> = members
         .iter()
         .filter(|(w, _)| content_participants.contains(w))
@@ -1407,11 +1454,40 @@ fn conflict_record(
             .collect(),
         reason,
         atoms,
+        bystanders: Vec::new(),
     }
 }
 
+/// bn-28os: a diff3 conflict record whose `sides` are exactly the
+/// `participants` and whose `bystanders` are every other content-bearing
+/// entry (workspaces that changed the path without overlapping a conflicted
+/// region). Resolutions fold bystanders back in instead of dropping them.
+fn conflict_record_with_bystanders(
+    path: &Path,
+    entries: &[PathEntry],
+    participants: &[WorkspaceId],
+    base: Option<&[u8]>,
+    reason: ConflictReason,
+    atoms: Vec<ConflictAtom>,
+) -> ConflictRecord {
+    let (sides, others): (Vec<PathEntry>, Vec<PathEntry>) = entries
+        .iter()
+        .cloned()
+        .partition(|e| participants.contains(&e.workspace_id));
+    let mut record = conflict_record(path, &sides, base, reason, atoms);
+    record.bystanders = others
+        .into_iter()
+        .map(|entry| ConflictSide {
+            workspace_id: entry.workspace_id,
+            kind: entry.kind,
+            content: entry.content,
+        })
+        .collect();
+    record
+}
+
 /// Outcome of a single diff3 merge attempt.
-enum Diff3Outcome {
+pub(crate) enum Diff3Outcome {
     /// Clean merge — result bytes.
     Clean(Vec<u8>),
     /// Conflicting merge — the raw diff3 marker output (stdout from git merge-file exit 1).
@@ -1430,7 +1506,7 @@ enum Diff3Outcome {
 /// verifying merge algebra properties (commutativity, idempotence, conflict
 /// monotonicity) without the real diff3 implementation.
 #[cfg(kani)]
-fn diff3_merge_bytes(
+pub(crate) fn diff3_merge_bytes(
     _base: &[u8],
     ours: &[u8],
     theirs: &[u8],
@@ -1451,7 +1527,7 @@ fn diff3_merge_bytes(
 /// - `Ok(Diff3Outcome::Conflict { marker_output })` for conflicts (exit 1)
 /// - `Err` for command/runtime failures
 #[cfg(not(kani))]
-fn diff3_merge_bytes(
+pub(crate) fn diff3_merge_bytes(
     base: &[u8],
     ours: &[u8],
     theirs: &[u8],
@@ -2375,6 +2451,63 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Parser handles a single conflict block with correct workspace labels.
+    /// bn-28os: two bystanders that are pairwise clean with everyone but
+    /// cannot both be folded into participant `ws-s` (found by search over
+    /// repetitive lines, where diff alignment shifts after the first fold).
+    /// Dropping one would lose its edit on `--resolve cf-X=ws-s`, so it must
+    /// be promoted to a participant instead.
+    #[test]
+    fn unfoldable_bystander_is_promoted_to_participant() {
+        let base: &[u8] = b"a\nb\na\nb\na\nc\n";
+        let s: &[u8] = b"b\na\na\nc\n";
+        let t: &[u8] = b"a\na\nb\na\nb\nb\na\nc\n";
+        let n1: &[u8] = b"a\nb\nb\na\nb\na\nc\n";
+        let n2: &[u8] = b"a\nb\na\nb\na\nb\n";
+        let members = vec![
+            (ws("ws-s"), s),
+            (ws("ws-t"), t),
+            (ws("ws-n1"), n1),
+            (ws("ws-n2"), n2),
+        ];
+
+        // Precondition: pairwise, only s/t conflict; the s+n1+n2 fold does not.
+        assert_eq!(
+            kway_conflict_participants(base, &members),
+            vec![ws("ws-s"), ws("ws-t")]
+        );
+        let Diff3Outcome::Clean(acc) = diff3_merge_bytes(base, s, n1).unwrap() else {
+            panic!("s/n1 pairwise clean");
+        };
+        assert!(matches!(
+            diff3_merge_bytes(base, &acc, n2).unwrap(),
+            Diff3Outcome::Conflict { .. }
+        ));
+
+        let participants = resolvable_participants(base, &members);
+        assert!(
+            participants.len() > 2,
+            "a bystander must be promoted: {participants:?}"
+        );
+
+        // End to end: every side can be chosen and keeps every bystander.
+        let entries: Vec<PathEntry> = members
+            .iter()
+            .map(|(w, c)| entry(w.as_str(), ChangeKind::Modified, Some(c)))
+            .collect();
+        let mut base_map = BTreeMap::new();
+        base_map.insert(PathBuf::from("f.txt"), base.to_vec());
+        let result = resolve_partition(&shared_only("f.txt", entries), &base_map).expect("resolve");
+        let record = &result.conflicts[0];
+        assert_eq!(record.sides.len() + record.bystanders.len(), 4);
+        for side in &record.sides {
+            crate::merge::apply_resolution::resolve_record_to_side(
+                record,
+                side.workspace_id.as_str(),
+            )
+            .unwrap_or_else(|e| panic!("resolve to {}: {e}", side.workspace_id));
+        }
+    }
+
     #[test]
     fn parse_diff3_atoms_single_block() {
         // Simulated diff3 output for base="b\n", ours="B1\n", theirs="B2\n"

@@ -672,8 +672,15 @@ fn resolve_file_content(
                         available.join(", ")
                     )
                 })?;
-            side.content
-                .clone()
+            if side.content.is_none() {
+                return Err(no_content_side_error(name, side, record));
+            }
+            // bn-28os: the chosen side's file, folded with every bystander
+            // workspace's non-conflicting edit to the same path.
+            maw::merge::apply_resolution::resolve_record_to_side(record, name)
+                .map_err(|e| {
+                    anyhow::anyhow!("Cannot resolve {} to '{name}': {e}", record.path.display())
+                })?
                 .ok_or_else(|| no_content_side_error(name, side, record))
         }
         Resolution::Content(path) => {
@@ -692,130 +699,63 @@ fn resolve_file_content(
                 }
                 found.unwrap_or_else(|| path.clone())
             };
-            std::fs::read(&abs_path).with_context(|| {
+            let content = std::fs::read(&abs_path).with_context(|| {
                 format!(
                     "Could not read resolution file: {}\n  \
                      For content: strategy, provide an absolute path or a path relative to a workspace.",
                     abs_path.display()
                 )
-            })
+            })?;
+            // bn-28os: user-supplied content is the user's call, but say so
+            // when it drops a bystander workspace's non-conflicting edit.
+            let missing = maw::merge::apply_resolution::bystanders_missing_from(record, &content);
+            if !missing.is_empty() {
+                eprintln!(
+                    "WARNING: content:{} for {} does not include the non-conflicting edit(s) \
+                     of {} to this file; those edits will not be merged.",
+                    path.display(),
+                    record.path.display(),
+                    missing.join(", ")
+                );
+            }
+            Ok(content)
         }
     }
 }
 
 /// Resolve individual atoms within a file, reconstructing the complete content.
-/// Extract byte range from a Region, converting line-based regions to byte offsets.
-fn region_byte_range(region: &Region, content: &[u8]) -> (u32, u32) {
-    let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    match region {
-        Region::AstNode {
-            start_byte,
-            end_byte,
-            ..
-        } => (*start_byte, *end_byte),
-        Region::Lines { start, end } => {
-            // Convert 1-indexed line numbers to byte offsets
-            let text = std::str::from_utf8(content).unwrap_or("");
-            let mut line_starts: Vec<usize> = vec![0];
-            for (i, b) in text.bytes().enumerate() {
-                if b == b'\n' {
-                    line_starts.push(i + 1);
-                }
-            }
-            let s = if *start > 0 {
-                line_starts
-                    .get((*start - 1) as usize)
-                    .copied()
-                    .unwrap_or(content.len())
-            } else {
-                0
-            };
-            let e = line_starts
-                .get((*end - 1) as usize)
-                .copied()
-                .unwrap_or(content.len());
-            (to_u32(s), to_u32(e))
-        }
-        Region::WholeFile => (0, to_u32(content.len())),
-    }
-}
-
-/// For each atom, picks a workspace's content based on the resolution.
-/// Only workspace name strategies are supported at atom level (content: requires whole-file).
+///
+/// Only workspace name strategies are supported at atom level (content:
+/// requires whole-file). bn-34zv: delegates to
+/// [`maw::merge::apply_resolution::resolve_record_atoms`], which resolves
+/// the diff3 conflict blocks byte-exactly and keeps every clean edit outside
+/// the conflicted regions (the old base splice joined lines and reverted
+/// clean edits).
 fn resolve_atoms(
     record: &ConflictRecord,
     atom_resolutions: &[Option<&Resolution>],
 ) -> Result<Vec<u8>> {
-    // For atom-level resolution we reconstruct the file by walking the base
-    // content in bytes, substituting conflict regions with the chosen side's
-    // edit content. Works with both Line and AstNode regions (byte offsets).
-    let base = record.base.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Atom-level resolution requires base content for {}. Use file-level ID instead.",
-            record.path.display()
-        )
-    })?;
-
-    // Validate resolutions and collect sorted atoms
-    let mut atoms_sorted: Vec<(
-        u32,
-        u32,
-        &maw_core::model::conflict::ConflictAtom,
-        &Resolution,
-    )> = Vec::new();
-    for (i, atom) in record.atoms.iter().enumerate() {
-        let res = atom_resolutions[i].ok_or_else(|| {
-            anyhow::anyhow!(
-                "Missing resolution for atom {i} of {}",
-                record.path.display()
-            )
-        })?;
+    let mut choices: Vec<&str> = Vec::with_capacity(record.atoms.len());
+    for (i, res) in atom_resolutions.iter().enumerate() {
         match res {
-            Resolution::Workspace(_) => {}
-            Resolution::Content(_) => bail!(
+            Some(Resolution::Workspace(name)) => choices.push(name.as_str()),
+            Some(Resolution::Content(_)) => bail!(
                 "Atom-level resolution only supports workspace names, not content:PATH.\n  \
                  For content: strategy, use the file-level ID."
             ),
+            None => bail!(
+                "Missing resolution for atom {i} of {}",
+                record.path.display()
+            ),
         }
-        let (start_byte, end_byte) = region_byte_range(&atom.base_region, base);
-        atoms_sorted.push((start_byte, end_byte, atom, res));
     }
-    atoms_sorted.sort_by_key(|(start, _, _, _)| *start);
-
-    // Reconstruct: walk base bytes, substituting conflict regions
-    let mut result: Vec<u8> = Vec::with_capacity(base.len());
-    let mut pos: u32 = 0; // current byte position in base
-
-    for (base_start, base_end, atom, resolution) in &atoms_sorted {
-        // Copy base bytes before this region
-        let s = pos.min(*base_start) as usize;
-        let e = (*base_start as usize).min(base.len());
-        result.extend_from_slice(&base[s..e]);
-
-        // Find the matching edit from the chosen workspace
-        let ws_name = match resolution {
-            Resolution::Workspace(name) => name.as_str(),
-            Resolution::Content(_) => unreachable!(),
-        };
-        let edit = atom.edits.iter().find(|ed| ed.workspace == ws_name);
-        if let Some(edit) = edit {
-            result.extend_from_slice(edit.content.as_bytes());
-        } else {
-            // No matching edit — keep the base region as-is
-            let rs = (*base_start as usize).min(base.len());
-            let re = (*base_end as usize).min(base.len());
-            result.extend_from_slice(&base[rs..re]);
-        }
-
-        pos = *base_end;
-    }
-
-    // Copy remaining base bytes after the last atom
-    if (pos as usize) < base.len() {
-        result.extend_from_slice(&base[pos as usize..]);
-    }
-
-    Ok(result)
+    maw::merge::apply_resolution::resolve_record_atoms(record, &choices).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot apply atom-level resolution for {}: {e}\n  \
+             Use the file-level ID (cf-XXXX=<workspace>) or content:PATH instead.",
+            record.path.display()
+        )
+    })
 }
 
 /// Patch the candidate tree with resolved file contents, producing a new commit OID.
@@ -8167,6 +8107,7 @@ mod tests {
                 ],
                 "lines 10-15 overlap",
             )],
+            bystanders: vec![],
         }
     }
 
@@ -8184,6 +8125,7 @@ mod tests {
             ],
             reason: ConflictReason::AddAddDifferent,
             atoms: vec![],
+            bystanders: vec![],
         }
     }
 
@@ -8201,6 +8143,7 @@ mod tests {
             ],
             reason: ConflictReason::ModifyDelete,
             atoms: vec![],
+            bystanders: vec![],
         }
     }
 
@@ -8218,6 +8161,7 @@ mod tests {
             ],
             reason: ConflictReason::MissingBase,
             atoms: vec![],
+            bystanders: vec![],
         }
     }
 

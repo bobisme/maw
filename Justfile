@@ -148,7 +148,7 @@ nodefault-check:
 # feature so the default `cargo test` stays fast. Part of `just check`
 # (bn-86hd: previously nothing enabled the feature, so they never ran).
 proptests:
-  cargo test --lib --features proptests -- merge::determinism_tests merge::pushout_tests
+  cargo test --lib --features proptests -- merge::determinism_tests merge::pushout_tests merge::resolution_choice_tests
 
 # verify: formal/property gates — proptests + Kani (fast tier) + Stateright.
 # Needs `cargo kani` installed (cargo install --locked kani-verifier &&
