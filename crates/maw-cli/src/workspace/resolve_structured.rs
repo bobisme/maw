@@ -41,7 +41,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use maw_core::config::ManifoldConfig;
 use maw_core::merge::materialize::{FinalEntry, looks_text, materialize};
 use maw_core::merge::types::ConflictTree;
 use maw_core::model::conflict::{Conflict, ConflictSide, ConflictSideMode};
@@ -2379,10 +2378,7 @@ fn run_structured_impl(
     // bn-c5ui: load the sanity config the same way rebase does — fail closed
     // (defaults = strict ON, ratio 1.5x) when the config file is absent or
     // unparseable. A missing config is not a licence to skip the check.
-    let manifold_config = ManifoldConfig::load(
-        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).bootstrap_config_path(root),
-    )
-    .unwrap_or_default();
+    let manifold_config = super::load_manifold_config(root).unwrap_or_default();
     let sanity_cfg = PostMergeSanityConfig::from_merge(&manifold_config.merge);
 
     // Determine the set of paths to process.

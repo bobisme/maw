@@ -1739,6 +1739,9 @@ fn check_merge_result_for_target(
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
     }
+    for ws in workspaces {
+        super::refuse_quarantine_operand(ws, "maw ws merge")?;
+    }
 
     let root = repo_root()?;
     let maw_config = MawConfig::load(&root)?;
@@ -1938,18 +1941,20 @@ fn check_merge_result_for_target(
                     // policy. Before this check, preflight reported ready and
                     // the immediately following real merge refused.
                     if conflicts.is_empty() {
-                        let policy_result = ManifoldConfig::load(&manifold_dir.join("config.toml"))
-                            .map_err(|error| anyhow::anyhow!("{error}"))
-                            .and_then(|config| {
-                                assert_append_only_preserved(
-                                    &root,
-                                    &config.merge.append_only,
-                                    &merge_base_epoch,
-                                    &output,
-                                    force,
-                                )
-                                .map(|_| ())
-                            });
+                        let policy_result =
+                            ManifoldConfig::load_for_manifold_dir(&root, &manifold_dir)
+                                .map(|resolved| resolved.config)
+                                .map_err(|error| anyhow::anyhow!("{error}"))
+                                .and_then(|config| {
+                                    assert_append_only_preserved(
+                                        &root,
+                                        &config.merge.append_only,
+                                        &merge_base_epoch,
+                                        &output,
+                                        force,
+                                    )
+                                    .map(|_| ())
+                                });
                         if let Err(error) = policy_result {
                             conflicts.push(ConflictInfo {
                                 path: String::new(),
@@ -2146,6 +2151,9 @@ pub fn plan_merge(
 ) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --plan");
+    }
+    for ws in workspaces {
+        super::refuse_quarantine_operand(ws, "maw ws merge")?;
     }
 
     let stale_sources = stale_merge_sources(workspaces)?;
@@ -3392,9 +3400,8 @@ fn append_only_refusal_message(root: &Path, violations: &[(PathBuf, &'static str
         .map(|(path, reason)| format!("  - {} ({reason})", path.display()))
         .collect::<Vec<_>>()
         .join("\n");
-    let config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
-        .manifold_dir(root)
-        .join("config.toml");
+    let config_path =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_config_path(root);
     format!(
         "Merge refused: {} append-only path(s) would lose content:\n{file_list}\n  \
          These paths are configured as append-only ([merge] append_only in {}); \
@@ -5317,6 +5324,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!("No workspaces to merge.");
         return Ok(());
     }
+    // bn-2dyz: refuse quarantines before any lock or epoch mutation.
+    for ws in &ws_to_merge {
+        super::refuse_quarantine_operand(ws, "maw ws merge")?;
+    }
 
     let root = repo_root()?;
     // bn-13rc: hold the repo-level epoch lock for the WHOLE merge — the
@@ -5350,11 +5361,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // "diverged" error, augmented with the affected workspace list when the
     // FF was a candidate but blocked.
     if target_updates_epoch && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
-        let manifold_config = ManifoldConfig::load(
-            &maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
-                .bootstrap_config_path(&root),
-        )
-        .unwrap_or_default();
+        let manifold_config = super::load_manifold_config(&root).unwrap_or_default();
         let reconcile = reconcile_epoch_with_branch(
             &root,
             branch,
@@ -6266,10 +6273,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // bn-20fp: rich per-sibling rows for the merge JSON's `siblings[]`.
     let mut sibling_json: Vec<SiblingMergeJson> = Vec::new();
     if target_updates_epoch {
-        let manifold_config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
-            .bootstrap_config_path(&root);
-        let manifold_cfg =
-            maw_core::config::ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
+        let manifold_cfg = super::load_manifold_config(&root).unwrap_or_default();
         let auto_rebase_enabled =
             auto_rebase_override.unwrap_or(manifold_cfg.merge.auto_rebase_siblings);
         if auto_rebase_enabled {

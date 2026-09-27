@@ -216,7 +216,11 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
         let mut checks = HashMap::new();
         for ws in &backend_workspaces {
             let name = ws.id.as_str().to_string();
-            if name == DEFAULT_WORKSPACE || ws.commits_ahead == 0 {
+            // bn-2dyz: quarantines are not merge candidates for `ws merge`.
+            if name == DEFAULT_WORKSPACE
+                || ws.commits_ahead == 0
+                || name.starts_with(QUARANTINE_NAME_PREFIX)
+            {
                 continue;
             }
             // bn-3fhj: skip merge-check for workspaces whose worktree dir is
@@ -306,8 +310,11 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             // stale/integrate-ready vocabulary) and for quarantine
             // workspaces (they have their own special-case wiring
             // and an opaque-lifecycle classifier would be misleading).
-            let (lifecycle_state, fix_command) = if is_default || is_quarantine {
+            let (lifecycle_state, fix_command) = if is_default {
                 (None, None)
+            } else if let Some(id) = name.strip_prefix(QUARANTINE_NAME_PREFIX) {
+                // bn-2dyz: the way out of a quarantine is promote/abandon.
+                (None, Some(format!("maw merge promote {id}")))
             } else {
                 let has_uncommitted = if missing {
                     false
@@ -506,6 +513,31 @@ const fn is_conflicted(ws: &WorkspaceInfo) -> bool {
     ws.rebase_conflicts > 0 && !ws.missing
 }
 
+/// The merge id of a `merge-quarantine-<id>` workspace (bn-2dyz).
+fn quarantine_id(ws: &WorkspaceInfo) -> Option<&str> {
+    ws.name.strip_prefix(QUARANTINE_NAME_PREFIX)
+}
+
+/// Whether `ws list` may advertise `maw ws merge <name> --destroy` for this
+/// workspace. Conflicted workspaces are hard-refused by the merge gate
+/// (bn-2l00); quarantines are finished with `maw merge promote|abandon`,
+/// and `ws merge` refuses them (bn-2dyz).
+fn is_merge_suggestable(ws: &WorkspaceInfo) -> bool {
+    ws.commits_ahead > 0
+        && ws.branch.is_none()
+        && !ws.missing
+        && !is_conflicted(ws)
+        && quarantine_id(ws).is_none()
+}
+
+/// The two ways out of a merge quarantine.
+fn quarantine_fix_lines(id: &str) -> [String; 2] {
+    [
+        format!("fix it in place, then: maw merge promote {id}"),
+        format!("or discard it: maw merge abandon {id}"),
+    ]
+}
+
 /// Decide the trailing `(...)` annotation for a workspace in text output.
 ///
 /// Pulled out of `print_list_text` so the classification is unit-testable and
@@ -525,6 +557,10 @@ fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String
         .unwrap_or_default();
     let base = if ws.missing {
         format!(" (MISSING — fix: maw ws destroy {} --force)", ws.name)
+    } else if let Some(id) = quarantine_id(ws) {
+        // bn-2dyz: a quarantine holds a merge candidate that failed
+        // validation. It is never "ready to merge" (`ws merge` refuses it).
+        format!(" (merge quarantine — maw merge promote {id} | maw merge abandon {id})")
     } else if is_conflicted(ws) {
         // bn-2l00: a workspace whose HEAD still carries unresolved rebase
         // conflict markers is NOT ready to merge — `maw ws merge` hard-gates
@@ -541,8 +577,6 @@ fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String
         format!(" (branch work +{})", ws.commits_ahead)
     } else if ws.commits_ahead > 0 {
         format!(" (ready to merge){}", check_annotation.unwrap_or(""))
-    } else if ws.state == "quarantine" {
-        " (quarantine)".to_string()
     } else {
         String::new()
     };
@@ -607,15 +641,29 @@ fn print_list_text(
     // Instead, point at the resolve command, consistent with the merge gate.
     let mergeable: Vec<&str> = workspaces
         .iter()
-        .filter(|ws| {
-            ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing && !is_conflicted(ws)
-        })
+        .filter(|ws| is_merge_suggestable(ws))
         .map(|ws| ws.name.as_str())
         .collect();
     if !mergeable.is_empty() {
         println!();
         for name in &mergeable {
             println!("Merge ready: maw ws merge {name} --into default --destroy");
+        }
+    }
+
+    // bn-2dyz: point quarantines at promote/abandon instead.
+    let quarantines: Vec<(&str, &str)> = workspaces
+        .iter()
+        .filter(|ws| !ws.missing)
+        .filter_map(|ws| quarantine_id(ws).map(|id| (ws.name.as_str(), id)))
+        .collect();
+    if !quarantines.is_empty() {
+        println!();
+        for (name, id) in &quarantines {
+            println!("Quarantine: {name} holds a merge that failed validation.");
+            for line in quarantine_fix_lines(id) {
+                println!("  {line}");
+            }
         }
     }
 
@@ -686,7 +734,8 @@ fn print_list_pretty(
         let conflicted = is_conflicted(ws);
         // bn-2l00: a conflicted workspace is NOT ready-to-merge. Don't paint it
         // with the cyan ready glyph — the merge gate hard-refuses it.
-        let has_work = ws.commits_ahead > 0 && !ws.missing && !conflicted;
+        let has_work =
+            ws.commits_ahead > 0 && !ws.missing && !conflicted && quarantine_id(ws).is_none();
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m") // Green bold for default
@@ -785,6 +834,14 @@ fn print_list_pretty(
                 println!("    \x1b[31mworktree dir is gone — fix: {fix}\x1b[0m");
             } else {
                 println!("    worktree dir is gone — fix: {fix}");
+            }
+        } else if let Some(id) = quarantine_id(ws) {
+            for line in quarantine_fix_lines(id) {
+                if use_color {
+                    println!("    \x1b[31m{line}\x1b[0m");
+                } else {
+                    println!("    {line}");
+                }
             }
         } else if is_conflicted(ws) {
             // bn-2l00: surface the conflict and the resolve path so this stays
@@ -1198,9 +1255,7 @@ mod tests {
         let conflicted = ws_info("bob", 2, 1);
         let clean = ws_info("alice", 1, 0);
 
-        let is_mergeable = |ws: &WorkspaceInfo| {
-            ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing && !is_conflicted(ws)
-        };
+        let is_mergeable = is_merge_suggestable;
 
         assert!(
             !is_mergeable(&conflicted),
@@ -1210,5 +1265,24 @@ mod tests {
             is_mergeable(&clean),
             "clean workspace with work must still get the 'Merge ready' suggestion"
         );
+    }
+
+    /// bn-2dyz: a merge quarantine is never "ready to merge" and never gets
+    /// a `Merge ready: ... --destroy` suggestion; it points at promote/abandon.
+    #[test]
+    fn quarantine_is_not_advertised_as_mergeable() {
+        let mut q = ws_info("merge-quarantine-abc123def456", 1, 0);
+        q.state = "quarantine".to_string();
+        q.lifecycle_state = None;
+        q.fix_command = None;
+        assert!(!is_merge_suggestable(&q));
+        let annotation = text_annotation(&q, None);
+        assert!(!annotation.contains("ready to merge"), "{annotation}");
+        assert!(
+            annotation.contains("maw merge promote abc123def456")
+                && annotation.contains("maw merge abandon abc123def456"),
+            "{annotation}"
+        );
+        assert!(is_merge_suggestable(&ws_info("alice", 1, 0)));
     }
 }

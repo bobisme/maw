@@ -137,31 +137,85 @@ pub fn clear_all() {
 ///
 /// Returns the configured error message if the failpoint action is `Error`.
 pub fn check(name: &str) -> Result<(), String> {
-    let registry = REGISTRY.lock().expect("operation should succeed");
-    match registry.get(name) {
+    // A failpoint armed for THIS thread (see `set_for_this_thread`) takes
+    // precedence over the process-global registry. The action is cloned out
+    // so no registry borrow/lock is held while it runs (a callback may
+    // re-enter `check`).
+    let action = THREAD_REGISTRY
+        .with(|r| r.borrow().get(name).cloned())
+        .or_else(|| {
+            REGISTRY
+                .lock()
+                .expect("operation should succeed")
+                .get(name)
+                .cloned()
+        });
+    match action {
         None | Some(FailpointAction::Off) => Ok(()),
-        Some(FailpointAction::Error(msg)) => Err(msg.clone()),
+        Some(FailpointAction::Error(msg)) => Err(msg),
         Some(FailpointAction::Panic(msg)) => panic!("failpoint {name}: {msg}"),
         Some(FailpointAction::Abort) => std::process::abort(),
         Some(FailpointAction::Sleep(d)) => {
-            let d = *d;
-            drop(registry); // release lock before sleeping
             std::thread::sleep(d);
             Ok(())
         }
         Some(FailpointAction::Callback(cb)) => {
-            let cb = cb.clone();
-            drop(registry); // release lock before running the callback (it may re-enter)
             cb();
             Ok(())
         }
         Some(FailpointAction::Corrupt(path)) => {
-            let path = path.clone();
-            drop(registry); // release lock before touching the filesystem
             // Best-effort: a failed injection must not crash the process.
             let _ = std::fs::write(&path, CORRUPT_BYTES);
             Ok(())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread-scoped failpoints (bn-1svi)
+// ---------------------------------------------------------------------------
+//
+// `set()` arms a failpoint for the whole process. In-process unit tests run
+// in parallel threads of one process, so a test that arms a global failpoint
+// perturbs every sibling test that reaches the same site while it is armed
+// (bn-1svi: `sync_fp_auto_sync_before_checkout_aborts_cleanly` made
+// unrelated sync tests fail under `just sg1-faithful-test`). Tests should
+// use `set_for_this_thread` instead: the failpoint fires only on the
+// arming thread, and the returned guard disarms it on drop (even when the
+// test panics).
+
+std::thread_local! {
+    static THREAD_REGISTRY: std::cell::RefCell<HashMap<&'static str, FailpointAction>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Arm a failpoint that fires only when `check(name)` runs on the calling
+/// thread. Disarmed when the returned guard is dropped.
+///
+/// Use this (not [`set`]) in in-process tests, which share the process-global
+/// registry with concurrently running sibling tests. The site must execute
+/// on the calling thread; a site reached on another thread does not fire.
+#[must_use = "the failpoint is disarmed when the guard is dropped"]
+pub fn set_for_this_thread(name: &'static str, action: FailpointAction) -> ThreadFailpointGuard {
+    THREAD_REGISTRY.with(|r| r.borrow_mut().insert(name, action));
+    ThreadFailpointGuard {
+        name,
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+/// Guard returned by [`set_for_this_thread`]; disarms the failpoint on drop.
+/// Not `Send`: it must be dropped on the thread that armed it.
+#[derive(Debug)]
+pub struct ThreadFailpointGuard {
+    name: &'static str,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for ThreadFailpointGuard {
+    fn drop(&mut self) {
+        // `try_with`: the thread-local may already be torn down at thread exit.
+        let _ = THREAD_REGISTRY.try_with(|r| r.borrow_mut().remove(self.name));
     }
 }
 
@@ -403,6 +457,26 @@ mod tests {
         TEST_REGISTRY_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// bn-1svi: a thread-scoped failpoint fires only on the arming thread,
+    /// never on a concurrently running sibling, and is disarmed when its
+    /// guard drops.
+    #[test]
+    fn thread_scoped_failpoint_fires_only_on_arming_thread() {
+        // No global-registry mutation, so no `lock_registry()` needed — that
+        // independence from the global registry is the point.
+        let guard = set_for_this_thread(
+            "FP_TEST_THREAD_SCOPED",
+            FailpointAction::Error("scoped".into()),
+        );
+        assert_eq!(check("FP_TEST_THREAD_SCOPED"), Err("scoped".to_owned()));
+        let other = std::thread::spawn(|| check("FP_TEST_THREAD_SCOPED"))
+            .join()
+            .expect("join");
+        assert_eq!(other, Ok(()), "must not fire on another thread");
+        drop(guard);
+        assert_eq!(check("FP_TEST_THREAD_SCOPED"), Ok(()), "guard must disarm");
     }
 
     /// check returns Ok when no failpoint is set.

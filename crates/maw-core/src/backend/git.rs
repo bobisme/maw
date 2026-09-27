@@ -225,9 +225,8 @@ impl GitWorktreeBackend {
     ///
     /// Missing config or parse/load failures fall back to enabled.
     fn git_compat_refs_enabled(&self) -> bool {
-        let config_path = crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
-            .bootstrap_config_path(&self.root);
-        ManifoldConfig::load(&config_path).map_or(true, |cfg| cfg.workspace.git_compat_refs)
+        ManifoldConfig::load_for_root(&self.root)
+            .map_or(true, |resolved| resolved.config.workspace.git_compat_refs)
     }
 
     /// Refresh `refs/manifold/ws/<name>` to point at a commit representing the

@@ -318,9 +318,18 @@ fn read_branch_head(root: &Path) -> Option<String> {
     git_rev_parse(root, &refspec)
 }
 
-/// Read the configured branch name from `.manifold/config.toml`.
+/// Read the configured branch name from the manifold `config.toml`
+/// (`.maw/manifold/` in the consolidated layout, `.manifold/` in v2 —
+/// same presence-based detection as `LayoutFlavor::detect`; maw-core is an
+/// optional dependency of this crate, so it is mirrored here).
 fn read_configured_branch(root: &Path) -> Option<String> {
-    let config_path = root.join(".manifold").join("config.toml");
+    let consolidated = root.join(".maw").join("manifold");
+    let manifold_dir = if consolidated.is_dir() {
+        consolidated
+    } else {
+        root.join(".manifold")
+    };
+    let config_path = manifold_dir.join("config.toml");
     let content = std::fs::read_to_string(config_path).ok()?;
 
     // Simple TOML parsing — look for branch = "..."

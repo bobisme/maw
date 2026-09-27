@@ -25,6 +25,11 @@ use checks::{
     is_default_workspace, sync_worktree_to_epoch, workspace_name_from_cwd,
 };
 use cross_target::cross_target_sync_risk;
+
+/// Merge quarantines (`merge-quarantine-<id>`) are never synced (bn-2dyz).
+fn is_quarantine(name: &str) -> bool {
+    maw_core::merge::quarantine_id::merge_id_from_name(name).is_some()
+}
 use rebase::rebase_workspace;
 
 pub use rebase::{
@@ -202,6 +207,8 @@ fn sync_one_text(name: Option<&str>, no_rebase: bool) -> Result<()> {
         print_default_sync_skip(&root, &workspace_name);
         return Ok(());
     }
+    // bn-2dyz: never rebase a merge quarantine's candidate.
+    super::refuse_quarantine_operand(&workspace_name, "maw ws sync")?;
 
     if !backend.exists(&ws_id) {
         println!("Workspace '{workspace_name}' not found.");
@@ -407,6 +414,7 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
     );
     let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    super::refuse_quarantine_operand(&workspace_name, "maw ws sync")?;
     if is_default_workspace(&workspace_name) {
         let branch = MawConfig::load(&root)
             .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
@@ -607,7 +615,7 @@ fn sync_all_json(no_rebase: bool) -> Result<()> {
 
     for ws in &workspaces {
         let name = ws.id.as_str();
-        if !ws.state.is_stale() || is_default_workspace(name) {
+        if !ws.state.is_stale() || is_default_workspace(name) || is_quarantine(name) {
             continue;
         }
         match build_sync_json(Some(name), no_rebase) {
@@ -651,7 +659,11 @@ fn sync_all(no_rebase: bool) -> Result<()> {
 
     let stale_count = workspaces
         .iter()
-        .filter(|ws| ws.state.is_stale() && !is_default_workspace(ws.id.as_str()))
+        .filter(|ws| {
+            ws.state.is_stale()
+                && !is_default_workspace(ws.id.as_str())
+                && !is_quarantine(ws.id.as_str())
+        })
         .count();
 
     if stale_count == 0 {
@@ -673,7 +685,10 @@ fn sync_all(no_rebase: bool) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     for ws in &workspaces {
-        if !ws.state.is_stale() || is_default_workspace(ws.id.as_str()) {
+        if !ws.state.is_stale()
+            || is_default_workspace(ws.id.as_str())
+            || is_quarantine(ws.id.as_str())
+        {
             continue;
         }
 
@@ -867,7 +882,9 @@ fn claim_stale_warning_slot() -> bool {
     reason = "bn-29z8: the lock+CAS guard adds necessary sequential steps; splitting would obscure the invariant"
 )]
 pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
-    if is_default_workspace(name) {
+    // bn-2dyz: a quarantine is fixed in place at its recorded epoch
+    // (`maw exec merge-quarantine-<id> -- ...`); never auto-rebase it.
+    if is_default_workspace(name) || is_quarantine(name) {
         return Ok(());
     }
 

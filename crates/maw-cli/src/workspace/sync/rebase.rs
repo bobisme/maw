@@ -42,7 +42,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use maw_core::config::ManifoldConfig;
 use maw_core::merge::apply::apply_unilateral_patchset;
 use maw_core::merge::diff_extract::diff_patchset;
 use maw_core::merge::materialize::{
@@ -634,10 +633,7 @@ pub(super) fn rebase_workspace_run(
     // there) we use defaults — i.e. strict ON, ratio 1.5x. Failing
     // closed: a config we can't parse is not a license to skip the
     // check.
-    let manifold_config = ManifoldConfig::load(
-        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).bootstrap_config_path(root),
-    )
-    .unwrap_or_default();
+    let manifold_config = crate::workspace::load_manifold_config(root).unwrap_or_default();
     let sanity_cfg = PostRebaseSanityConfig::from_merge(&manifold_config.merge);
     let mut sanity_flagged_steps = 0usize;
     let mut sanity_flagged_paths_total: Vec<PathBuf> = Vec::new();
@@ -3145,13 +3141,18 @@ mod tests {
             // The interleaving: when the rebase hits FP_REBASE_BEFORE_SETHEAD
             // (after the walk, before the CAS re-read), land a concurrent
             // commit in feat so HEAD moves off C1. Deterministic, no threads.
+            // Thread-scoped (bn-1svi): sibling lib tests rebase through the
+            // same site in parallel and must not trigger this callback.
             let feat_cb = feat.clone();
-            maw_core::failpoints::set_callback("FP_REBASE_BEFORE_SETHEAD", move || {
-                let _ = Command::new("git")
-                    .args(["commit", "-q", "--allow-empty", "-m", "concurrent C2"])
-                    .current_dir(&feat_cb)
-                    .output();
-            });
+            let fp = maw_core::failpoints::set_for_this_thread(
+                "FP_REBASE_BEFORE_SETHEAD",
+                maw_core::failpoints::FailpointAction::Callback(std::sync::Arc::new(move || {
+                    let _ = Command::new("git")
+                        .args(["commit", "-q", "--allow-empty", "-m", "concurrent C2"])
+                        .current_dir(&feat_cb)
+                        .output();
+                })),
+            );
 
             let opts = RebaseRunOptions {
                 print: false,
@@ -3169,7 +3170,7 @@ mod tests {
                 opts,
                 "test:bn-2byw",
             );
-            maw_core::failpoints::clear("FP_REBASE_BEFORE_SETHEAD");
+            drop(fp);
 
             let err = res.expect_err("rebase must abort when HEAD moved mid-operation");
             let msg = err.to_string();

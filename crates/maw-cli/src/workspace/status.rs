@@ -229,8 +229,18 @@ pub fn status(format: OutputFormat) -> Result<()> {
             // outputs cannot disagree. Skip classification for the
             // default workspace — it's a permanent fixture, not a
             // candidate for the stale/integrate-ready vocabulary.
+            let quarantine_id = maw_core::merge::quarantine_id::merge_id_from_name(ws.id.as_str());
             let (lifecycle_state, behind, commits_ahead_field, fix_command) = if is_default {
                 (None, None, 0_u32, None)
+            } else if let Some(id) = quarantine_id {
+                // bn-2dyz: a merge quarantine is not a `ws merge` / `ws sync`
+                // candidate (both refuse it); its way out is promote/abandon.
+                (
+                    None,
+                    None,
+                    ws.commits_ahead,
+                    Some(format!("maw merge promote {id}")),
+                )
             } else {
                 let has_uncommitted = maw_git::GixRepo::open(&ws.path)
                     .ok()
@@ -268,7 +278,11 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 // `lifecycle_state`. Cluster `read_from_stale_workspace`
                 // fires when an agent misreads this surface; the
                 // prefixed slug closes the inference gap.
-                state: build_entry_state(is_default, rebase_conflicts, lifecycle_state, &ws.state),
+                state: if quarantine_id.is_some() {
+                    "quarantine".to_owned()
+                } else {
+                    build_entry_state(is_default, rebase_conflicts, lifecycle_state, &ws.state)
+                },
                 mode: format!("{ws_mode}"),
                 rebase_conflicts,
                 lifecycle_state,

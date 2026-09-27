@@ -16,7 +16,7 @@
 //! When `repo_root` is provided, `collect_snapshots` enriches each
 //! [`FileChange`] with:
 //!
-//! - `file_id`: looked up from `.manifold/fileids` for Modified/Deleted files
+//! - `file_id`: looked up from `<manifold_dir>/fileids` for Modified/Deleted files
 //!   (files that existed in the epoch). Added files receive a fresh random
 //!   [`FileId`]. If the fileids file is absent, `FileIds` are omitted.
 //! - `blob`: the git blob OID for the new content, computed via
@@ -126,7 +126,7 @@ impl std::error::Error for CollectError {}
 /// 2. Calls `backend.status()` to determine the workspace's base epoch.
 /// 3. Reads file content for added/modified files from the workspace directory.
 /// 4. Enriches each [`FileChange`] with a git blob OID (via `git hash-object`)
-///    and a stable [`FileId`] (from `.manifold/fileids` or freshly generated).
+///    and a stable [`FileId`] (from `<manifold_dir>/fileids` or freshly generated).
 ///
 /// Returns one `PatchSet` per workspace in the same order as `workspace_ids`.
 /// Empty workspaces (no changes) produce an empty `PatchSet` — they are **not**
@@ -136,7 +136,7 @@ impl std::error::Error for CollectError {}
 ///
 /// * `repo_root` — Path to the git repository root, used to:
 ///   - Write blobs via `git hash-object -w --stdin`.
-///   - Load the epoch `FileId` map from `<repo_root>/.manifold/fileids`.
+///   - Load the epoch `FileId` map from `<manifold_dir>/fileids` (layout-aware).
 ///
 /// # Errors
 ///
@@ -151,7 +151,11 @@ pub fn collect_snapshots<B: WorkspaceBackend>(
 ) -> Result<Vec<PatchSet>, CollectError> {
     // Load the epoch FileId map once; shared across all workspaces.
     // If the file doesn't exist yet (new repo), use an empty map.
-    let fileids_path = repo_root.join(".manifold").join("fileids");
+    // bn-2dyz: layout-aware — `.maw/manifold/fileids` in the consolidated
+    // layout, `.manifold/fileids` in v2 (same resolution as model::diff).
+    let fileids_path = crate::model::layout::LayoutFlavor::detect_with_env(repo_root)
+        .manifold_dir(repo_root)
+        .join("fileids");
     let file_id_map = FileIdMap::load(&fileids_path).unwrap_or_default();
 
     let mut patch_sets = Vec::with_capacity(workspace_ids.len());
@@ -1089,6 +1093,39 @@ mod tests {
     // -----------------------------------------------------------------------
     // Phase 3: FileId + blob OID enrichment
     // -----------------------------------------------------------------------
+
+    /// bn-2dyz: in the consolidated layout the epoch `FileId` map lives at
+    /// `.maw/manifold/fileids`; collect must read it there (it used to read
+    /// `<root>/.manifold/fileids` unconditionally and silently mint fresh ids).
+    #[test]
+    fn collect_reads_fileids_from_consolidated_manifold_dir() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let manifold = temp_dir.path().join(".maw").join("manifold");
+        fs::create_dir_all(&manifold).expect("operation should succeed");
+        let mut map = FileIdMap::default();
+        let stored = map
+            .track_new(PathBuf::from("README.md"))
+            .expect("operation should succeed");
+        map.save(&manifold.join("fileids"))
+            .expect("operation should succeed");
+
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("fileid-consolidated").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+        fs::write(info.path.join("README.md"), "# Modified").expect("operation should succeed");
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
+        let change = &results[0].changes[0];
+        assert_eq!(change.path, PathBuf::from("README.md"));
+        assert_eq!(
+            change.file_id,
+            Some(stored),
+            "Modified file must keep the FileId recorded in .maw/manifold/fileids"
+        );
+    }
 
     /// Added files should receive a fresh (non-None) `FileId`.
     #[test]

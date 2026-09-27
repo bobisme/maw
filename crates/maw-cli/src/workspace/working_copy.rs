@@ -798,13 +798,17 @@ pub fn replay_snapshot_with_merge_protection(
             .and_then(std::path::Path::parent)
             .map(std::path::Path::to_path_buf);
 
+        // The consolidated default workspace IS the repo root, so try
+        // `ws_path` itself first.
         let mut cfg = maw_core::config::ManifoldConfig::default();
-        for candidate_root in [two_up, three_up].into_iter().flatten() {
+        for candidate_root in [Some(ws_path.to_path_buf()), two_up, three_up]
+            .into_iter()
+            .flatten()
+        {
             let manifold = maw_core::model::layout::LayoutFlavor::detect_with_env(&candidate_root)
                 .manifold_dir(&candidate_root);
-            let cfg_path = manifold.join("config.toml");
-            if cfg_path.exists()
-                && let Ok(loaded) = maw_core::config::ManifoldConfig::load(&cfg_path)
+            if manifold.is_dir()
+                && let Ok(loaded) = super::load_manifold_config(&candidate_root)
             {
                 cfg = loaded;
                 break;

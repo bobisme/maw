@@ -721,10 +721,41 @@ impl ManifoldConfig {
         manifold_config_path: &Path,
         maw_toml_path: Option<&Path>,
     ) -> Result<LayeredConfig, ConfigError> {
-        let mut config = Self::load(manifold_config_path)?;
-        let mut warnings = Vec::new();
+        Self::load_layered_with_legacy(manifold_config_path, None, maw_toml_path)
+    }
 
-        let Some(maw_toml_path) = maw_toml_path else {
+    /// [`Self::load_layered`] for a repo root: canonical manifold config
+    /// (plus the consolidated layout's deprecated `.maw/config.toml`
+    /// fallback, see [`Self::load_with_legacy`]) layered with `maw_toml_path`.
+    ///
+    /// # Errors
+    /// As [`Self::load_layered`].
+    pub fn load_layered_for_root(
+        root: &Path,
+        maw_toml_path: Option<&Path>,
+    ) -> Result<LayeredConfig, ConfigError> {
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(root);
+        let legacy = flavor.legacy_manifold_config_path(root);
+        Self::load_layered_with_legacy(
+            &flavor.manifold_config_path(root),
+            legacy.as_deref(),
+            maw_toml_path,
+        )
+    }
+
+    fn load_layered_with_legacy(
+        manifold_config_path: &Path,
+        legacy_path: Option<&Path>,
+        maw_toml_path: Option<&Path>,
+    ) -> Result<LayeredConfig, ConfigError> {
+        let base = Self::load_with_legacy(manifold_config_path, legacy_path)?;
+        let mut config = base.config;
+        let mut warnings = base.warnings;
+
+        // In the consolidated layout `.maw/config.toml` doubles as the
+        // `.maw.toml` fallback. Its `[merge]` keys were already handled by
+        // the legacy fallback above; layering it again would double-warn.
+        let Some(maw_toml_path) = maw_toml_path.filter(|p| Some(*p) != legacy_path) else {
             return Ok(LayeredConfig { config, warnings });
         };
         let Some(maw_merge) = read_toml_table(maw_toml_path)?
@@ -753,7 +784,11 @@ impl ManifoldConfig {
                 .as_ref()
                 .and_then(|t| t.get("merge"))
                 .and_then(|m| m.get("validation"))
-                .is_some();
+                .is_some()
+                || base
+                    .adopted_legacy_keys
+                    .iter()
+                    .any(|k| k == "merge.validation");
             if manifold_has_validation {
                 warnings.push(format!(
                     "{shown}: [merge.validation] is shadowed by [merge.validation] in \
@@ -770,6 +805,145 @@ impl ManifoldConfig {
             }
         }
         Ok(LayeredConfig { config, warnings })
+    }
+}
+
+/// Top-level sections of the deprecated consolidated-layout location
+/// (`.maw/config.toml`) that are adopted as a fallback. `[repo]` is written
+/// to both files by `maw init` and is not adopted; any other table belongs
+/// to the `.maw.toml`-fallback role of that file.
+const LEGACY_ADOPTED_SECTIONS: &[&str] = &["merge", "workspace"];
+
+/// Result of [`ManifoldConfig::load_with_legacy`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedConfig {
+    /// The effective configuration.
+    pub config: ManifoldConfig,
+    /// Deprecation / shadowing warnings for the legacy location.
+    pub warnings: Vec<String>,
+    /// `section.key` names taken from the legacy location.
+    pub adopted_legacy_keys: Vec<String>,
+}
+
+impl ManifoldConfig {
+    /// Load the manifold config for a repo root from its single canonical
+    /// location ([`crate::model::layout::LayoutFlavor::manifold_config_path`]),
+    /// falling back per key to the deprecated consolidated-layout location
+    /// (`.maw/config.toml`) with a warning (bn-2dyz).
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] if the canonical file cannot be read or
+    /// parsed. Problems with the legacy file only produce warnings.
+    pub fn load_for_root(root: &Path) -> Result<ResolvedConfig, ConfigError> {
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(root);
+        let legacy = flavor.legacy_manifold_config_path(root);
+        Self::load_with_legacy(&flavor.manifold_config_path(root), legacy.as_deref())
+    }
+
+    /// [`Self::load_for_root`] for callers that were handed an explicit
+    /// `manifold_dir`: the legacy fallback applies only when `manifold_dir`
+    /// is the layout's own manifold dir for `root`.
+    ///
+    /// # Errors
+    /// As [`Self::load_for_root`].
+    pub fn load_for_manifold_dir(
+        root: &Path,
+        manifold_dir: &Path,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(root);
+        let legacy = if flavor.manifold_dir(root) == manifold_dir {
+            flavor.legacy_manifold_config_path(root)
+        } else {
+            None
+        };
+        Self::load_with_legacy(
+            &manifold_dir.join(crate::model::layout::CONFIG_FILE),
+            legacy.as_deref(),
+        )
+    }
+
+    /// Load `canonical`, then adopt `[merge]` / `[workspace]` keys that are
+    /// set only in `legacy` (each adoption warns that the location is
+    /// deprecated). A key set in both files uses the canonical value and
+    /// warns if the legacy value differs. An unreadable/invalid legacy file
+    /// is ignored with a warning.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] if `canonical` cannot be read or parsed.
+    pub fn load_with_legacy(
+        canonical: &Path,
+        legacy: Option<&Path>,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let config = Self::load(canonical)?;
+        let mut resolved = ResolvedConfig {
+            config,
+            warnings: Vec::new(),
+            adopted_legacy_keys: Vec::new(),
+        };
+        let Some(legacy) = legacy else {
+            return Ok(resolved);
+        };
+        let legacy_table = match read_toml_table(legacy) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(resolved),
+            Err(e) => {
+                resolved
+                    .warnings
+                    .push(format!("ignoring deprecated manifold settings: {e}"));
+                return Ok(resolved);
+            }
+        };
+        let mut merged = read_toml_table(canonical)?.unwrap_or_default();
+        let (legacy_shown, canonical_shown) = (legacy.display(), canonical.display());
+        let mut deprecations = Vec::new();
+        for section in LEGACY_ADOPTED_SECTIONS {
+            let Some(toml::Value::Table(legacy_section)) = legacy_table.get(*section) else {
+                continue;
+            };
+            let target = merged
+                .entry((*section).to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let Some(target) = target.as_table_mut() else {
+                continue; // canonical parse would have failed already
+            };
+            for (key, value) in legacy_section {
+                match target.get(key) {
+                    Some(existing) if existing != value => resolved.warnings.push(format!(
+                        "{legacy_shown}: [{section}] {key} is ignored (shadowed by \
+                         {canonical_shown}); remove it from the deprecated location"
+                    )),
+                    Some(_) => {}
+                    None => {
+                        target.insert(key.clone(), value.clone());
+                        resolved
+                            .adopted_legacy_keys
+                            .push(format!("{section}.{key}"));
+                        deprecations.push(format!(
+                            "{legacy_shown}: [{section}] {key} is read from a deprecated \
+                             location; move it to {canonical_shown}"
+                        ));
+                    }
+                }
+            }
+        }
+        if resolved.adopted_legacy_keys.is_empty() {
+            return Ok(resolved);
+        }
+        match toml::Value::Table(merged).try_into::<Self>() {
+            Ok(config) => {
+                resolved.config = config;
+                resolved.warnings.extend(deprecations);
+            }
+            Err(e) => {
+                resolved.adopted_legacy_keys.clear();
+                resolved.warnings.push(format!(
+                    "{legacy_shown}: ignoring deprecated manifold settings ({}); \
+                     set them in {canonical_shown}",
+                    e.message()
+                ));
+            }
+        }
+        Ok(resolved)
     }
 }
 
@@ -1481,6 +1655,142 @@ languages = ["cobol"]
             err.message.contains("unknown variant"),
             "expected 'unknown variant' but got: {}",
             err.message
+        );
+    }
+
+    // -- bn-2dyz: single canonical manifold config + legacy fallback --------
+
+    fn consolidated_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".maw").join("manifold")).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn load_for_root_reads_canonical_manifold_config_in_consolidated_layout() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        write(
+            &root.join(".maw").join("manifold"),
+            "config.toml",
+            "[merge]\nauto_absorb_ff = false\n",
+        );
+        // Bootstrap file as `maw init` writes it: [repo] only.
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[repo]\nbranch = \"main\"\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert!(!r.config.merge.auto_absorb_ff);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.adopted_legacy_keys.is_empty());
+    }
+
+    #[test]
+    fn load_for_root_adopts_legacy_only_key_with_deprecation_warning() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        write(
+            &root.join(".maw").join("manifold"),
+            "config.toml",
+            "[repo]\nbranch = \"main\"\n",
+        );
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[repo]\nbranch = \"main\"\n[merge]\nauto_rebase_siblings = false\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert!(!r.config.merge.auto_rebase_siblings);
+        assert_eq!(r.adopted_legacy_keys, vec!["merge.auto_rebase_siblings"]);
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].contains("deprecated"), "{:?}", r.warnings);
+        assert!(
+            r.warnings[0].contains("manifold/config.toml"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn load_for_root_canonical_wins_over_conflicting_legacy_key() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        write(
+            &root.join(".maw").join("manifold"),
+            "config.toml",
+            "[merge]\nauto_absorb_ff = false\n",
+        );
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[merge]\nauto_absorb_ff = true\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert!(!r.config.merge.auto_absorb_ff, "canonical must win");
+        assert!(r.adopted_legacy_keys.is_empty());
+        assert!(
+            r.warnings.iter().any(|w| w.contains("shadowed")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn load_for_root_ignores_invalid_legacy_with_warning() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[merge]\nno_such_key = 1\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert_eq!(r.config, ManifoldConfig::default());
+        assert!(r.adopted_legacy_keys.is_empty());
+        assert!(
+            r.warnings.iter().any(|w| w.contains("ignoring")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn load_for_root_v2_has_no_legacy_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".manifold")).expect("mkdir");
+        std::fs::create_dir_all(root.join(".maw")).expect("mkdir");
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[merge]\nauto_absorb_ff = false\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert!(r.config.merge.auto_absorb_ff);
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn load_layered_for_root_does_not_double_layer_legacy_as_maw_toml() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        let legacy = write(
+            &root.join(".maw"),
+            "config.toml",
+            "[merge]\nauto_absorb_ff = false\n[merge.validation]\ncommand = \"true\"\n",
+        );
+        // `.maw/config.toml` is also the `.maw.toml` fallback in this layout.
+        let l = ManifoldConfig::load_layered_for_root(root, Some(&legacy)).expect("load");
+        assert!(!l.config.merge.auto_absorb_ff);
+        assert_eq!(l.config.merge.validation.command.as_deref(), Some("true"));
+        assert!(
+            !l.warnings
+                .iter()
+                .any(|w| w.contains("ignored in .maw.toml")),
+            "{:?}",
+            l.warnings
         );
     }
 }

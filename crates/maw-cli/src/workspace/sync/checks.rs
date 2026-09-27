@@ -843,13 +843,15 @@ mod tests {
         // Record HEAD before the sync attempt.
         let head_before = git_test(&ws_path, &["rev-parse", "HEAD"]);
 
-        // Arm the failpoint.
-        failpoints::set(
+        // Arm the failpoint for THIS thread only (bn-1svi): the registry is
+        // process-global and sibling lib tests run sync through the same
+        // site in parallel.
+        let fp = failpoints::set_for_this_thread(
             "FP_AUTO_SYNC_BEFORE_CHECKOUT",
             FailpointAction::Error("injected by test".into()),
         );
         let result = sync_worktree_to_epoch(root, "feat", &new_epoch, None);
-        failpoints::clear("FP_AUTO_SYNC_BEFORE_CHECKOUT");
+        drop(fp);
 
         // Sync should return SkippedHeadMoved (abort path), not an error.
         let outcome = result.expect("failpoint should cause a clean skip, not propagate an error");

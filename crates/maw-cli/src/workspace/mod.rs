@@ -2251,16 +2251,69 @@ pub fn load_manifold_config_layered(root: &Path, manifold_dir: &Path) -> Result<
         .maw_toml_search_paths(root, DEFAULT_WORKSPACE)
         .into_iter()
         .find(|p| p.exists());
-    let layered =
+    let layered = if LayoutFlavor::detect_with_env(root).manifold_dir(root) == manifold_dir {
+        ManifoldConfig::load_layered_for_root(root, maw_toml.as_deref())
+    } else {
         ManifoldConfig::load_layered(&manifold_dir.join("config.toml"), maw_toml.as_deref())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-    for warning in &layered.warnings {
-        eprintln!("WARNING: {warning}");
     }
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    emit_config_warnings(&layered.warnings);
     Ok(layered.config)
 }
 
-/// Resolve the workspace backend from `.manifold/config.toml` and platform capabilities.
+/// Refuse a `maw ws sync` / `maw ws merge` operand that is a merge quarantine.
+///
+/// A quarantine (`merge-quarantine-<id>`, bn-2dyz) has a HEAD that is a merge
+/// candidate anchored at the quarantine's recorded epoch; rebasing or
+/// re-merging it would rewrite the candidate out from under
+/// `maw merge promote`. The only ways out are promote and abandon.
+///
+/// # Errors
+///
+/// Returns the refusal when `name` is a quarantine workspace.
+pub fn refuse_quarantine_operand(name: &str, command: &str) -> Result<()> {
+    if let Some(id) = maw_core::merge::quarantine_id::merge_id_from_name(name) {
+        bail!(
+            "'{name}' is a merge quarantine (a merge that failed validation); \
+             `{command}` does not operate on quarantines.\n  \
+             To fix: repair it in place, then promote it: maw merge promote {id}\n  \
+             Or discard it: maw merge abandon {id}"
+        );
+    }
+    Ok(())
+}
+
+/// Load the manifold config for `root` from its single canonical location.
+///
+/// That is `LayoutFlavor::manifold_config_path`, with the deprecated
+/// consolidated-layout `.maw/config.toml` as a per-key fallback (bn-2dyz).
+/// Deprecation warnings go to stderr once per process.
+///
+/// # Errors
+///
+/// Returns the canonical file's read/parse error.
+pub fn load_manifold_config(root: &Path) -> Result<ManifoldConfig, maw_core::config::ConfigError> {
+    let resolved = ManifoldConfig::load_for_root(root)?;
+    emit_config_warnings(&resolved.warnings);
+    Ok(resolved.config)
+}
+
+/// Print config warnings to stderr, each distinct message at most once per
+/// process (several code paths load the config during one merge).
+fn emit_config_warnings(warnings: &[String]) {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for warning in warnings {
+        if seen.insert(warning.clone()) {
+            eprintln!("WARNING: {warning}");
+        }
+    }
+}
+
+/// Resolve the workspace backend from the manifold `config.toml` and platform capabilities.
 ///
 /// Auto-selects the best backend for the current platform and repo size (§7.5).
 /// Falls back to `git-worktree` if detection fails or no `CoW` backend is available.
@@ -2271,11 +2324,9 @@ pub fn load_manifold_config_layered(root: &Path, manifold_dir: &Path) -> Result<
 pub fn get_backend() -> Result<AnyBackend> {
     let root = repo_root()?;
 
-    // Load the bootstrap manifold config (missing file → all defaults).
-    // Layout-aware so the consolidated `.maw/config.toml` is picked up too.
-    let flavor = LayoutFlavor::detect_with_env(&root);
-    let manifold_config_path = flavor.bootstrap_config_path(&root);
-    let manifold_config = ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
+    // Load the manifold config (missing file → all defaults) from its
+    // canonical, layout-aware location (bn-2dyz).
+    let manifold_config = load_manifold_config(&root).unwrap_or_default();
     let configured_kind = manifold_config.workspace.backend;
 
     // Detect platform capabilities (cached in .manifold/platform-capabilities).

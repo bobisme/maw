@@ -388,8 +388,9 @@ pub fn run_build_phase<B: WorkspaceBackend>(
     }
 
     // Load merge configuration (defaults if file missing).
-    let config_path = manifold_dir.join("config.toml");
-    let config = ManifoldConfig::load(&config_path)?;
+    // bn-2dyz: same resolution as every other manifold-config reader
+    // (canonical `<manifold_dir>/config.toml` + deprecated-location fallback).
+    let config = ManifoldConfig::load_for_manifold_dir(repo_root, manifold_dir)?.config;
 
     // 2. Advance to BUILD (fsync — crash after this means recovery aborts)
     let now = now_secs();

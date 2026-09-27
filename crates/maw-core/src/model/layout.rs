@@ -166,15 +166,32 @@ impl LayoutFlavor {
         }
     }
 
-    /// Where Manifold's bootstrap config (`config.toml`) is read from.
+    /// The single canonical location of the manifold config
+    /// ([`crate::config::ManifoldConfig`]) — `<manifold_dir>/config.toml`.
     ///
     /// - V2: `<root>/.manifold/config.toml`
-    /// - Consolidated: `<root>/.maw/config.toml`
+    /// - Consolidated: `<root>/.maw/manifold/config.toml`
+    ///
+    /// Every manifold-config reader (merge, sync, backend selection,
+    /// FF-absorb, auto-rebase) must resolve through this path — load it via
+    /// [`crate::config::ManifoldConfig::load_for_root`] (bn-2dyz: before, the
+    /// consolidated layout read merge policy from `.maw/manifold/config.toml`
+    /// but backend/FF-absorb/auto-rebase settings from `.maw/config.toml`).
     #[must_use]
-    pub fn bootstrap_config_path(self, root: &Path) -> PathBuf {
+    pub fn manifold_config_path(self, root: &Path) -> PathBuf {
+        self.manifold_dir(root).join(CONFIG_FILE)
+    }
+
+    /// Deprecated location some consolidated-layout code paths used to read
+    /// manifold settings from (`<root>/.maw/config.toml`, the bootstrap
+    /// file). Still consulted as a fallback, with a deprecation warning, for
+    /// `[merge]` / `[workspace]` keys absent from
+    /// [`Self::manifold_config_path`]. `None` for V2 (no split ever existed).
+    #[must_use]
+    pub fn legacy_manifold_config_path(self, root: &Path) -> Option<PathBuf> {
         match self {
-            Self::V2WsRoot => root.join(MANIFOLD_DIR).join(CONFIG_FILE),
-            Self::ConsolidatedMawDir => root.join(MAW_DIR).join(MAW_CONFIG_FILE),
+            Self::V2WsRoot => None,
+            Self::ConsolidatedMawDir => Some(root.join(MAW_DIR).join(MAW_CONFIG_FILE)),
         }
     }
 
@@ -320,13 +337,13 @@ fn init_maw_bootstrap_config_if_missing(path: &Path) -> io::Result<()> {
     writeln!(file, "# maw bootstrap config (.maw/config.toml)")?;
     writeln!(
         file,
-        "# Fixed location; consulted by `maw` before any other config."
+        "# Merge/workspace settings ([merge], [workspace]) belong in"
     )?;
     writeln!(
         file,
-        "# Mirror your repository defaults here; user-editable settings"
+        "# .maw/manifold/config.toml; user-editable settings live at"
     )?;
-    writeln!(file, "# also live at <root>/.maw.toml.")?;
+    writeln!(file, "# <root>/.maw.toml.")?;
     writeln!(file)?;
     writeln!(file, "[repo]")?;
     writeln!(file, "branch = \"main\"")?;
@@ -388,9 +405,10 @@ mod tests {
             Path::new("/repo/ws/default")
         );
         assert_eq!(
-            f.bootstrap_config_path(root),
+            f.manifold_config_path(root),
             Path::new("/repo/.manifold/config.toml")
         );
+        assert_eq!(f.legacy_manifold_config_path(root), None);
         assert_eq!(f.cache_dir(root), None);
         assert!(f.root_is_bare());
     }
@@ -407,8 +425,12 @@ mod tests {
         assert_eq!(f.manifold_dir(root), Path::new("/repo/.maw/manifold"));
         assert_eq!(f.default_target_path(root, "default"), Path::new("/repo"));
         assert_eq!(
-            f.bootstrap_config_path(root),
-            Path::new("/repo/.maw/config.toml")
+            f.manifold_config_path(root),
+            Path::new("/repo/.maw/manifold/config.toml")
+        );
+        assert_eq!(
+            f.legacy_manifold_config_path(root),
+            Some(PathBuf::from("/repo/.maw/config.toml"))
         );
         assert_eq!(f.cache_dir(root), Some(PathBuf::from("/repo/.maw/cache")));
         assert!(!f.root_is_bare());
