@@ -18,7 +18,6 @@ use maw::merge::quarantine::{
     PromoteResult, QuarantineError, abandon_quarantine, list_quarantines, promote_quarantine,
     quarantine_workspace_path, validate_merge_id,
 };
-use maw_core::config::ManifoldConfig;
 
 /// `maw merge` subcommands.
 #[derive(Subcommand)]
@@ -187,6 +186,16 @@ fn ensure_valid_merge_id(merge_id: &str) -> Result<()> {
 fn promote(merge_id: &str) -> Result<()> {
     ensure_valid_merge_id(merge_id)?;
     let root = repo_root()?;
+    // bn-3w2b: hold the epoch lock for the WHOLE promote (re-validate, CAS,
+    // default refresh), like `ws merge`; FF-absorb's plain epoch write and
+    // promote's merge-state check both rely on it.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "merge promote")?;
+    promote_locked(&root, merge_id)
+}
+
+/// [`promote`] body; the caller holds the epoch lock.
+fn promote_locked(root: &std::path::Path, merge_id: &str) -> Result<()> {
+    let root = root.to_path_buf();
     let manifold_dir =
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
@@ -230,10 +239,10 @@ fn promote(merge_id: &str) -> Result<()> {
         );
     }
 
-    // Load validation config from .manifold/config.toml
-    let config_path = manifold_dir.join("config.toml");
-    let manifold_config = ManifoldConfig::load(&config_path)
-        .map_err(|e| anyhow::anyhow!("load manifold config: {e}"))?;
+    // Load validation config: manifold config.toml, layered over `.maw.toml`
+    // (bn-ila3) — the same resolution `ws merge` VALIDATE uses.
+    let manifold_config = crate::workspace::load_manifold_config_layered(&root, &manifold_dir)
+        .map_err(|e| anyhow::anyhow!("load manifold config: {e:#}"))?;
     let validation_config = &manifold_config.merge.validation;
 
     println!("VALIDATE: Re-running validation...");

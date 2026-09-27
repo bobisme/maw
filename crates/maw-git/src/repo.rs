@@ -76,6 +76,17 @@ pub trait GitRepo {
     /// Returns a `GitError` if the backend operation fails.
     fn delete_ref(&self, name: &RefName) -> Result<(), GitError>;
 
+    /// Delete a ref only if it currently points at `expected` (compare-and-
+    /// swap delete).
+    ///
+    /// Replaces: `git update-ref -d <name> <expected>`.
+    ///
+    /// # Errors
+    /// Returns [`GitError::RefConflict`] if the ref is missing or points
+    /// elsewhere (nothing is deleted), or another `GitError` if the backend
+    /// operation fails.
+    fn delete_ref_cas(&self, name: &RefName, expected: GitOid) -> Result<(), GitError>;
+
     /// Atomically apply a batch of ref updates with compare-and-swap semantics.
     ///
     /// All updates succeed or all fail. Each [`RefEdit`] carries an expected

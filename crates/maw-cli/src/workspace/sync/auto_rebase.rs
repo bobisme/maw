@@ -75,6 +75,12 @@ pub enum SiblingResult {
     SkippedDirty,
     /// The sibling is named as a source in the in-progress merge state.
     SkippedInProgress,
+    /// The sibling is a merge quarantine (`merge-quarantine-<id>`, bn-ila3).
+    /// Its HEAD is a fix-forward candidate built on the quarantine's recorded
+    /// `epoch_before`; `maw merge promote` CASes the epoch from exactly that
+    /// base, so replaying it onto a newer epoch (or moving its epoch ref)
+    /// would rewrite the candidate out from under promote.
+    SkippedQuarantine,
     /// All workspace commits replayed cleanly AND the worktree was
     /// synchronized to the rebased HEAD (bn-103k). `replayed` is the number
     /// of commits. `overlap` is the bn-2cvx semantic-risk hint: `Some` when
@@ -140,6 +146,7 @@ impl SiblingResult {
             Self::SkippedInUse => "skipped: in use".to_string(),
             Self::SkippedDirty => "skipped: dirty".to_string(),
             Self::SkippedInProgress => "skipped: in progress".to_string(),
+            Self::SkippedQuarantine => "skipped: merge quarantine".to_string(),
             Self::RebasedClean { replayed, overlap } => {
                 format!(
                     "rebased clean ({replayed} commit(s), worktree synced){}",
@@ -254,6 +261,16 @@ pub fn auto_rebase_siblings<B: WorkspaceBackend>(
     for ws in &workspaces {
         let name = ws.id.as_str();
         if name == target_workspace || is_default_workspace(name) {
+            continue;
+        }
+        // bn-ila3: never replay / re-base a merge quarantine (see
+        // `SiblingResult::SkippedQuarantine`).
+        if maw_core::merge::quarantine_id::merge_id_from_name(name).is_some() {
+            reports.push(SiblingReport {
+                name: name.to_string(),
+                result: SiblingResult::SkippedQuarantine,
+                post_sync_hook: None,
+            });
             continue;
         }
         if in_progress.contains(name) {
@@ -548,6 +565,7 @@ fn record_rebase_notice(
         | SiblingResult::SkippedInUse
         | SiblingResult::SkippedDirty
         | SiblingResult::SkippedInProgress
+        | SiblingResult::SkippedQuarantine
         | SiblingResult::Failed { .. } => None,
     }) else {
         return;

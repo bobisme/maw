@@ -104,6 +104,23 @@ fn fast_doctor_repair_vs_merge() {
     check_green(configs::doctor_vs_merge());
 }
 
+/// bn-3w2b fix: COMMIT enters `phase=commit` and records `epoch_after` in
+/// ONE journal write, so Oracle B's strict journal shape holds at every crash
+/// point (was `residual_oracle_b_commit_phase_without_epoch_after`).
+#[test]
+fn fast_oracle_b_strict() {
+    check_green(configs::fast_oracle_b_strict());
+}
+
+/// bn-3w2b fix: `maw merge promote` under the epoch lock with one atomic
+/// epoch+branch CAS never splits the refs, never regresses the epoch, and
+/// loses nothing, racing `ws merge` + FF-absorb + a crash; promote and merge
+/// are both still reachable (non-vacuity).
+#[test]
+fn fast_quarantine_promote_vs_merge() {
+    check_green(configs::fast_quarantine_promote_vs_merge());
+}
+
 // ---------------------------------------------------------------------------
 // Mutations: every property catches a real bug class
 // ---------------------------------------------------------------------------
@@ -217,6 +234,46 @@ fn mutation_pre_bn_32g8_doctor_repair_unlocked_regresses_epoch() {
     );
 }
 
+/// Pre-bn-3w2b COMMIT journal: `advance_merge_state(Commit)` and
+/// `record_epoch_after` as two writes; a crash between them leaves
+/// phase=commit with no `epoch_after` — the shape Oracle B flags.
+#[test]
+fn mutation_pre_bn_3w2b_split_commit_journal_breaks_oracle_b() {
+    expect_counterexample(
+        mutated(
+            configs::fast_oracle_b_strict(),
+            Mutation::SplitCommitJournal,
+        ),
+        P_ORACLE_B_JOURNAL,
+    );
+}
+
+/// Pre-bn-3w2b `maw merge promote` (no epoch lock, epoch CAS then branch
+/// CAS): the refs are observed split around the quarantine candidate.
+#[test]
+fn mutation_pre_bn_3w2b_promote_split_cas_breaks_atomicity() {
+    expect_counterexample(
+        mutated(
+            configs::fast_quarantine_promote_vs_merge(),
+            Mutation::QuarantinePromoteUnlockedSplitCas,
+        ),
+        P_COMMIT_ATOMIC,
+    );
+}
+
+/// ... and racing FF-absorb's plain `write_epoch_current`, the promoted epoch
+/// is overwritten by the absorbed branch tip (the epoch regresses).
+#[test]
+fn mutation_pre_bn_3w2b_promote_unlocked_regresses_epoch() {
+    expect_counterexample(
+        mutated(
+            configs::fast_quarantine_promote_vs_merge(),
+            Mutation::QuarantinePromoteUnlockedSplitCas,
+        ),
+        P_EPOCH_MONOTONE,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Residuals: real races in the faithful model under weaker assumptions
 // ---------------------------------------------------------------------------
@@ -243,13 +300,6 @@ fn residual_ff_absorb_crash_then_merge_reverts() {
         configs::residual_ff_absorb_crash_then_merge_sibling(),
         P_NO_SILENT_REVERT,
     );
-}
-
-/// A crash between `advance_merge_state(Commit)` and `record_epoch_after`
-/// leaves phase=commit with no `epoch_after` — the shape Oracle B flags.
-#[test]
-fn residual_oracle_b_commit_phase_without_epoch_after() {
-    expect_counterexample(configs::residual_oracle_b_strict(), P_ORACLE_B_JOURNAL);
 }
 
 // ---------------------------------------------------------------------------

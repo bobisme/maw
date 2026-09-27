@@ -92,6 +92,34 @@ pub fn delete_ref(repo: &GixRepo, name: &RefName) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Compare-and-swap delete: remove `name` only if it points at `expected`.
+///
+/// One gix ref transaction with `PreviousValue::MustExistAndMatch`, so the
+/// check and the delete are atomic w.r.t. other ref writers (loose and
+/// packed). A missing ref or a different value is [`GitError::RefConflict`].
+pub fn delete_ref_cas(repo: &GixRepo, name: &RefName, expected: GitOid) -> Result<(), GitError> {
+    let full: FullName =
+        name.as_str()
+            .try_into()
+            .map_err(
+                |e: gix::validate::reference::name::Error| GitError::BackendError {
+                    message: e.to_string(),
+                },
+            )?;
+    let edit = gix::refs::transaction::RefEdit {
+        change: Change::Delete {
+            expected: PreviousValue::MustExistAndMatch(Target::Object(to_gix_oid(&expected))),
+            log: gix::refs::transaction::RefLog::AndReference,
+        },
+        name: full,
+        deref: false,
+    };
+    repo.repo
+        .edit_references([edit])
+        .map_err(|e| classify_edit_error(&e))?;
+    Ok(())
+}
+
 /// Classify a `gix::Repository::edit_references` failure as a CAS conflict
 /// or an opaque backend error, by matching the *typed* gix error variant
 /// rather than substring-matching its `Display` text (bn-36id).
@@ -109,7 +137,9 @@ pub fn delete_ref(repo: &GixRepo, name: &RefName) -> Result<(), GitError> {
 /// - `MustExist` — the edit required the ref to already exist
 ///   (`PreviousValue::MustExist`), but it was missing.
 ///
-/// All three are optimistic-concurrency precondition failures: the ref was
+/// - `DeleteReferenceMustExist` — a CAS delete found the ref missing.
+///
+/// All four are optimistic-concurrency precondition failures: the ref was
 /// not in the state the caller's compare-and-swap assumed. They all map to
 /// [`GitError::RefConflict`]. Every other prepare/commit error (lock
 /// contention, I/O, malformed packed-refs, ...) stays [`GitError::BackendError`].
@@ -122,7 +152,9 @@ fn classify_edit_error(err: &gix::reference::edit::Error) -> GitError {
         gix::reference::edit::Error::FileTransactionPrepare(
             PrepareError::MustNotExist { full_name, .. }
             | PrepareError::ReferenceOutOfDate { full_name, .. }
-            | PrepareError::MustExist { full_name, .. },
+            | PrepareError::MustExist { full_name, .. }
+            // A CAS delete (`delete_ref_cas`) of a ref that no longer exists.
+            | PrepareError::DeleteReferenceMustExist { full_name },
         ) => Some(full_name.to_string()),
         _ => None,
     };

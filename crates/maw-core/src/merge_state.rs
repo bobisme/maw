@@ -291,6 +291,30 @@ impl MergeStateFile {
         Ok(())
     }
 
+    /// Enter the `Commit` phase AND record `epoch_after` in one in-memory
+    /// mutation, so the caller persists both with a single atomic write.
+    ///
+    /// bn-3w2b (closes the bn-38vw residual found by the bn-3ppf Stateright
+    /// audit): writing `phase = commit` and `epoch_after` as two separate
+    /// journal writes left a crash window with `phase = commit,
+    /// epoch_after = None` — the shape Oracle B flags. With this method no
+    /// persisted journal can ever be in `Commit` without `epoch_after`.
+    ///
+    /// On error, `self` is left unchanged.
+    ///
+    /// # Errors
+    /// Returns [`MergeStateError::InvalidTransition`] if the current phase
+    /// cannot transition to `Commit`.
+    pub fn advance_to_commit(
+        &mut self,
+        epoch_after: EpochId,
+        now: u64,
+    ) -> Result<(), MergeStateError> {
+        self.advance(MergePhase::Commit, now)?;
+        self.epoch_after = Some(epoch_after);
+        Ok(())
+    }
+
     /// Abort the merge with a reason.
     ///
     /// # Errors
@@ -913,6 +937,27 @@ mod tests {
         // Terminal states go nowhere
         assert!(!MergePhase::Complete.can_transition_to(&MergePhase::Aborted));
         assert!(!MergePhase::Aborted.can_transition_to(&MergePhase::Prepare));
+    }
+
+    // bn-3w2b: entering Commit always carries epoch_after in the same
+    // mutation (one journal write), and a rejected transition changes nothing.
+    #[test]
+    fn advance_to_commit_records_epoch_after_atomically() {
+        let mut s = MergeStateFile::new(test_sources(), test_epoch(), 1);
+        s.advance(MergePhase::Build, 2).expect("build");
+        s.advance(MergePhase::Validate, 3).expect("validate");
+        let after = EpochId::new(&"c".repeat(40)).expect("epoch");
+        s.advance_to_commit(after.clone(), 4).expect("commit");
+        assert_eq!(s.phase, MergePhase::Commit);
+        assert_eq!(s.epoch_after, Some(after.clone()));
+        assert_eq!(s.updated_at, 4);
+
+        // Invalid transition (Prepare -> Commit): nothing recorded.
+        let mut p = MergeStateFile::new(test_sources(), test_epoch(), 1);
+        assert!(p.advance_to_commit(after, 5).is_err());
+        assert_eq!(p.phase, MergePhase::Prepare);
+        assert_eq!(p.epoch_after, None);
+        assert_eq!(p.updated_at, 1);
     }
 
     #[test]

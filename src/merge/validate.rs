@@ -153,9 +153,19 @@ impl From<MergeStateError> for ValidateError {
 
 /// Stable admin-directory name for the merge VALIDATE temp worktree.
 ///
-/// VALIDATE uses a single fixed path (`.manifold/validate-tmp`) so a fixed
+/// VALIDATE uses a single fixed path ([`validate_worktree_dir`]) so a fixed
 /// admin name is fine; we prune any stale entry before re-creating.
 const VALIDATE_WORKTREE_NAME: &str = "manifold-validate-tmp";
+
+/// Where VALIDATE materializes the candidate: `<manifold_dir>/validate-tmp`
+/// (`.manifold/validate-tmp` in v2, `.maw/manifold/validate-tmp` in the
+/// consolidated layout).
+#[must_use]
+pub fn validate_worktree_dir(repo_root: &Path) -> PathBuf {
+    crate::model::layout::LayoutFlavor::detect_with_env(repo_root)
+        .manifold_dir(repo_root)
+        .join("validate-tmp")
+}
 
 /// Create a temporary detached git worktree at the given commit.
 fn create_temp_worktree(
@@ -288,8 +298,11 @@ pub fn run_validate_phase(
     candidate_oid: &GitOid,
     config: &ValidationConfig,
 ) -> Result<ValidateOutcome, ValidateError> {
-    // 2. Create temp worktree first (needed for preset auto-detection)
-    let worktree_dir = repo_root.join(".manifold").join("validate-tmp");
+    // 2. Create temp worktree first (needed for preset auto-detection).
+    // Layout-aware (bn-ila3): a hardcoded `<root>/.manifold/validate-tmp`
+    // created a stray `.manifold/` at the root of every consolidated repo
+    // (same class as bn-1lj2).
+    let worktree_dir = validate_worktree_dir(repo_root);
     // Clean up any stale worktree from a previous crash
     if worktree_dir.exists() {
         let _ = remove_temp_worktree(repo_root, &worktree_dir);
@@ -1052,6 +1065,55 @@ mod tests {
         let outcome =
             run_validate_phase(dir.path(), &oid, &config).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
+    }
+
+    /// bn-ila3: in the consolidated layout VALIDATE materializes under
+    /// `.maw/manifold/validate-tmp` and never creates a root `.manifold/`.
+    #[test]
+    fn validate_phase_consolidated_layout_creates_no_root_manifold_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("spawn git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "T"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("f.txt"), "x\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "c"]);
+        let oid = GitOid::new(&git(&["rev-parse", "HEAD"])).expect("oid");
+        fs::create_dir_all(root.join(".maw").join("manifold")).expect("layout marker");
+
+        // The command records the directory it ran in.
+        let mark = root.join("cwd.txt");
+        let config = ValidationConfig {
+            command: Some(format!("pwd -P > '{}'", mark.display())),
+            ..ValidationConfig::default()
+        };
+        let outcome = run_validate_phase(root, &oid, &config).expect("validate");
+        assert!(outcome.may_proceed(), "outcome: {outcome:?}");
+
+        let cwd = fs::read_to_string(&mark).expect("cwd mark");
+        let expected = root.join(".maw").join("manifold").join("validate-tmp");
+        let canon_expected = fs::canonicalize(root)
+            .expect("canon root")
+            .join(".maw")
+            .join("manifold")
+            .join("validate-tmp");
+        assert_eq!(PathBuf::from(cwd.trim()), canon_expected);
+        assert!(
+            !root.join(".manifold").exists(),
+            "no stray root .manifold/ in a consolidated repo"
+        );
+        assert_eq!(validate_worktree_dir(root), expected);
     }
 
     #[test]

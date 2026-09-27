@@ -186,6 +186,11 @@ pub enum QuarantineError {
     Validate(String),
     /// Commit phase error during promote.
     Commit(String),
+    /// A `ws merge` journal (`merge-state.json`) is still in progress (live
+    /// or crashed). Promote refuses: moving the epoch under it would turn a
+    /// recoverable crashed merge into one `ws merge --abort` refuses to
+    /// clear (bn-3w2b).
+    MergeInProgress { phase: String },
 }
 
 impl std::fmt::Display for QuarantineError {
@@ -212,6 +217,12 @@ impl std::fmt::Display for QuarantineError {
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
             Self::Validate(msg) => write!(f, "validation error: {msg}"),
             Self::Commit(msg) => write!(f, "commit error: {msg}"),
+            Self::MergeInProgress { phase } => write!(
+                f,
+                "a `maw ws merge` is in progress (merge-state phase: {phase}); \
+                 refusing to promote while its journal exists.\n  \
+                 Finish or recover it first: maw ws merge --abort"
+            ),
         }
     }
 }
@@ -382,12 +393,21 @@ pub enum PromoteResult {
 
 /// Promote a quarantine workspace: re-validate, then commit if green.
 ///
+/// **Locking (bn-3w2b):** the caller must hold the repo epoch lock for the
+/// whole call (`maw merge promote` does), exactly like `ws merge`: the epoch
+/// and branch refs are read-modify-written, and FF-absorb's plain
+/// `write_epoch_current` relies solely on that lock for exclusion.
+///
+/// 0. Refuse if a `ws merge` journal is in progress (see
+///    [`QuarantineError::MergeInProgress`]).
 /// 1. Read the quarantine state (`epoch_before`, candidate, branch, sources).
 /// 2. Stage and commit any uncommitted changes in the quarantine workspace
 ///    (a no-op if there are no changes, preserving the original candidate OID).
 /// 3. Re-run validation commands in the quarantine workspace directory.
 /// 4. If validation passes:
-///    a. Advance epoch refs (refs/manifold/epoch/current and refs/heads/<branch>).
+///    a. Advance `refs/manifold/epoch/current` and `refs/heads/<branch>`
+///    from `epoch_before` to the promoted commit in ONE atomic 2-ref CAS
+///    (as `ws merge`'s COMMIT does): both move or neither does.
 ///    b. Abandon the quarantine (remove worktree + state).
 /// 5. If validation fails: return `PromoteResult::ValidationFailed` with
 ///    diagnostics; the quarantine remains intact.
@@ -416,6 +436,28 @@ pub fn promote_quarantine(
     // 1. Read quarantine state
     let state = QuarantineState::read(manifold_dir, merge_id)?;
 
+    // 0. Refuse while a `ws merge` journal exists (live or crashed). Under
+    // the epoch lock no live merge can be running, so this is a crashed
+    // merge awaiting recovery; advancing the epoch now would strand it
+    // (`--abort` refuses once the epoch moved away from its epoch_before —
+    // Stateright `fast_quarantine_promote_vs_merge`, "crash recovery
+    // converges").
+    let merge_state_path = crate::merge_state::MergeStateFile::default_path(manifold_dir);
+    match crate::merge_state::MergeStateFile::read(&merge_state_path) {
+        Ok(ms) if !ms.phase.is_terminal() => {
+            return Err(QuarantineError::MergeInProgress {
+                phase: ms.phase.to_string(),
+            });
+        }
+        Ok(_) | Err(crate::merge_state::MergeStateError::NotFound(_)) => {}
+        Err(e) => {
+            return Err(QuarantineError::Io(format!(
+                "read {}: {e}",
+                merge_state_path.display()
+            )));
+        }
+    }
+
     let ws_path = quarantine_workspace_path(repo_root, merge_id)?;
     if !ws_path.exists() {
         return Err(QuarantineError::WorktreeNotFound {
@@ -435,25 +477,32 @@ pub fn promote_quarantine(
         ValidateOutcome::Skipped
         | ValidateOutcome::Passed(_)
         | ValidateOutcome::PassedWithWarnings(_) => {
-            // 4a. Advance epoch refs
-            //
-            // bn-3ppf lock audit: `maw merge promote` takes NO epoch lock and
-            // moves the two refs with two separate CASes (epoch, then branch),
-            // unlike `ws merge`'s single `update_refs_atomic`. Each CAS alone
-            // cannot clobber a concurrent writer, but (a) a failed branch CAS
-            // after a successful epoch CAS leaves epoch/branch split (the
-            // Stateright `SplitCommitCas` mutation shows this breaks G3), and
-            // (b) a concurrent `ws merge` FF-absorb uses a PLAIN
-            // `write_epoch_current` under the epoch lock and can overwrite the
-            // promoted epoch. Neither loses content (the quarantine worktree
-            // still holds the commit) but both leave refs incoherent.
+            // 4a. Advance epoch + branch refs in ONE atomic 2-ref CAS
+            // (bn-3w2b; mirrors src/merge/commit.rs). The pre-fix shape —
+            // no epoch lock, epoch CAS then a separate branch CAS — could
+            // leave the refs split (the Stateright
+            // `mutation_pre_bn_3w2b_promote_split_cas_breaks_atomicity`) and
+            // let a concurrent FF-absorb's plain epoch write overwrite the
+            // promoted epoch (`..._promote_unlocked_regresses_epoch`).
             let epoch_before_oid = state.epoch_before.clone();
-            crate::refs::advance_epoch(repo_root, &epoch_before_oid, &commit_oid)
-                .map_err(|e| QuarantineError::Commit(format!("advance epoch: {e}")))?;
-
             let branch_ref = format!("refs/heads/{}", state.branch);
-            crate::refs::write_ref_cas(repo_root, &branch_ref, &epoch_before_oid, &commit_oid)
-                .map_err(|e| QuarantineError::Commit(format!("update branch ref: {e}")))?;
+            crate::refs::update_refs_atomic(
+                repo_root,
+                &[
+                    (crate::refs::EPOCH_CURRENT, &epoch_before_oid, &commit_oid),
+                    (&branch_ref, &epoch_before_oid, &commit_oid),
+                ],
+            )
+            .map_err(|e| {
+                QuarantineError::Commit(format!(
+                    "advance epoch + branch '{}' from {}: {e}\n  \
+                     The epoch or branch moved since this quarantine was created; \
+                     neither ref was changed. Abandon it and re-run the merge: \
+                     maw merge abandon {merge_id}",
+                    state.branch,
+                    &epoch_before_oid.as_str()[..12]
+                ))
+            })?;
 
             // 4b. Clean up quarantine (best-effort)
             let _ = abandon_quarantine(repo_root, manifold_dir, merge_id);
@@ -1186,6 +1235,123 @@ mod tests {
         assert!(
             matches!(state_result, Err(QuarantineError::NotFound { .. })),
             "quarantine state should be removed after promote"
+        );
+    }
+
+    /// Shared setup for the bn-3w2b promote tests: a quarantine whose
+    /// candidate sits on `epoch`, with epoch = main = `epoch`.
+    fn setup_promotable_quarantine(root: &Path, manifold_dir: &Path) -> (GitOid, String) {
+        let epoch_oid = GitOid::new(&run_git(root, &["rev-parse", "HEAD"])).expect("oid");
+        let candidate = make_candidate_commit(root, "content\n");
+        let merge_id = candidate.as_str()[..12].to_owned();
+        run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
+        run_git(
+            root,
+            &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()],
+        );
+        create_quarantine_workspace(
+            root,
+            manifold_dir,
+            &merge_id,
+            vec![WorkspaceId::new("ws-1").expect("ws id")],
+            &EpochId::new(epoch_oid.as_str()).expect("epoch id"),
+            candidate,
+            "main",
+            dummy_validation_result(false),
+        )
+        .expect("create quarantine");
+        (epoch_oid, merge_id)
+    }
+
+    fn passing_config() -> ValidationConfig {
+        crate::config::ValidationConfig {
+            command: Some("true".to_owned()),
+            commands: Vec::new(),
+            timeout_seconds: 30,
+            preset: None,
+            on_failure: crate::config::OnFailure::Block,
+        }
+    }
+
+    /// bn-3w2b: epoch + branch move in ONE atomic CAS. If the branch moved
+    /// since the quarantine was created, NEITHER ref may change (the pre-fix
+    /// split CAS advanced the epoch, then failed on the branch, leaving the
+    /// refs split) and the quarantine survives.
+    #[test]
+    fn promote_branch_moved_leaves_both_refs_untouched() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (epoch_oid, merge_id) = setup_promotable_quarantine(root, &manifold_dir);
+
+        // A direct trunk commit lands on main after the quarantine was made.
+        let tree = run_git(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", epoch_oid.as_str())],
+        );
+        let trunk = run_git(
+            root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                epoch_oid.as_str(),
+                "-m",
+                "trunk",
+            ],
+        );
+        run_git(root, &["update-ref", "refs/heads/main", &trunk]);
+
+        let err = promote_quarantine(root, &manifold_dir, &merge_id, &passing_config())
+            .expect_err("promote must fail: branch moved");
+        assert!(matches!(err, QuarantineError::Commit(_)), "got {err}");
+
+        assert_eq!(
+            run_git(root, &["rev-parse", crate::refs::EPOCH_CURRENT]),
+            epoch_oid.as_str(),
+            "epoch must NOT advance when the branch CAS cannot succeed"
+        );
+        assert_eq!(run_git(root, &["rev-parse", "refs/heads/main"]), trunk);
+        assert!(
+            QuarantineState::read(&manifold_dir, &merge_id).is_ok(),
+            "quarantine must survive a failed promote"
+        );
+    }
+
+    /// bn-3w2b: promote refuses while a `ws merge` journal is in progress
+    /// (a crashed merge awaiting recovery), touching no ref.
+    #[test]
+    fn promote_refuses_while_merge_state_in_progress() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (epoch_oid, merge_id) = setup_promotable_quarantine(root, &manifold_dir);
+
+        let mut ms = crate::merge_state::MergeStateFile::new(
+            vec![WorkspaceId::new("other").expect("ws id")],
+            EpochId::new(epoch_oid.as_str()).expect("epoch id"),
+            1,
+        );
+        ms.advance(crate::merge_state::MergePhase::Build, 2)
+            .expect("build");
+        ms.write_atomic(&crate::merge_state::MergeStateFile::default_path(
+            &manifold_dir,
+        ))
+        .expect("write merge-state");
+
+        let err = promote_quarantine(root, &manifold_dir, &merge_id, &passing_config())
+            .expect_err("promote must refuse");
+        assert!(
+            matches!(err, QuarantineError::MergeInProgress { .. }),
+            "got {err}"
+        );
+        assert_eq!(
+            run_git(root, &["rev-parse", crate::refs::EPOCH_CURRENT]),
+            epoch_oid.as_str()
+        );
+        assert_eq!(
+            run_git(root, &["rev-parse", "refs/heads/main"]),
+            epoch_oid.as_str()
         );
     }
 

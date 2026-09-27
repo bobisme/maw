@@ -997,13 +997,22 @@ fn delete_change_branch_if_requested(
             );
         }
     }
-    // bn-3ppf lock audit — narrow race: the merged-into-HEAD check above and
-    // this delete are not one CAS (the delete does not pin `branch_oid`), and
-    // no epoch lock is held. A `ws merge --into <change>` that CAS-advances the
-    // branch in between gets its merge commit unreferenced by the branch (the
-    // source workspace HEAD still reaches its content unless it is destroyed).
-    repo.delete_ref(&ref_name)
-        .with_context(|| format!("Failed to delete local branch '{branch}'"))?;
+    // bn-3w2b (bn-3ppf lock audit): CAS-delete against the OID the safety
+    // check above judged. A `ws merge --into <change>` that CAS-advances the
+    // branch between the check and here now makes the delete fail instead of
+    // silently unreferencing its merge commit.
+    match repo.delete_ref_cas(&ref_name, branch_oid) {
+        Ok(()) => {}
+        Err(maw_git::GitError::RefConflict { .. }) => bail!(
+            "Failed to delete local branch '{branch}': it moved while closing \
+             (was {}); nothing was deleted.\n  To fix: inspect the branch and re-run \
+             `maw changes close`",
+            &branch_oid.to_string()[..12]
+        ),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to delete local branch '{branch}'"));
+        }
+    }
 
     if !delete_remote {
         return Ok((true, false));

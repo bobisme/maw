@@ -1315,7 +1315,8 @@ pub enum WorkspaceCommands {
     ///   destroyed[]       workspaces destroyed by --destroy
     ///   siblings[]        per-sibling auto-rebase rows: {name, action
     ///                     (replayed|conflicted|up_to_date|skipped_dirty|
-    ///                     skipped_in_progress|skipped_in_use|failed),
+    ///                     skipped_in_progress|skipped_in_use|
+    ///                     skipped_quarantine|failed),
     ///                     replayed_commits, conflicted, conflict_files[],
     ///                     overlap_hint {count, sample_paths}, post_sync_hook
     ///                     {ran, exit_code, timed_out}, reason}
@@ -2234,6 +2235,29 @@ pub fn resolve_workspace_path_for_cd(name: &str) -> Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+/// Load the manifold `config.toml` layered with `.maw.toml` (bn-ila3).
+///
+/// `[merge.validation]` may come from the user-editable `.maw.toml`
+/// (precedence in [`ManifoldConfig::load_layered`]). Warnings about shadowed
+/// or ignored `.maw.toml` settings go to stderr.
+///
+/// # Errors
+///
+/// Returns an error if either config file cannot be read or parsed.
+pub fn load_manifold_config_layered(root: &Path, manifold_dir: &Path) -> Result<ManifoldConfig> {
+    let maw_toml = LayoutFlavor::detect_with_env(root)
+        .maw_toml_search_paths(root, DEFAULT_WORKSPACE)
+        .into_iter()
+        .find(|p| p.exists());
+    let layered =
+        ManifoldConfig::load_layered(&manifold_dir.join("config.toml"), maw_toml.as_deref())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for warning in &layered.warnings {
+        eprintln!("WARNING: {warning}");
+    }
+    Ok(layered.config)
 }
 
 /// Resolve the workspace backend from `.manifold/config.toml` and platform capabilities.

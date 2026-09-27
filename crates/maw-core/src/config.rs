@@ -679,6 +679,122 @@ impl ManifoldConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Layered loading: manifold config.toml + `.maw.toml` (bn-ila3)
+// ---------------------------------------------------------------------------
+
+/// `[merge]` keys of `.maw.toml` that maw reads. Everything else under
+/// `[merge]` in `.maw.toml` is ignored and warned about.
+const MAW_TOML_MERGE_KEYS: &[&str] = &["validation", "auto_resolve_from_main"];
+
+/// A [`ManifoldConfig`] with `[merge.validation]` resolved across the
+/// manifold `config.toml` and the user-editable `.maw.toml`, plus warnings
+/// about `.maw.toml` settings that have no effect.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredConfig {
+    /// The effective configuration.
+    pub config: ManifoldConfig,
+    /// Human-readable warnings (shadowed / ignored `.maw.toml` settings).
+    pub warnings: Vec<String>,
+}
+
+impl ManifoldConfig {
+    /// Load the manifold `config.toml` and resolve `[merge.validation]`
+    /// against `.maw.toml` (bn-ila3).
+    ///
+    /// Precedence for `[merge.validation]`:
+    /// 1. an explicit `[merge.validation]` table in the manifold
+    ///    `config.toml` (`.manifold/config.toml`, or
+    ///    `.maw/manifold/config.toml` in the consolidated layout) — the
+    ///    long-standing location, kept authoritative for compatibility;
+    /// 2. otherwise `[merge.validation]` in `.maw.toml` (the tracked,
+    ///    user-editable config the bootstrap comment points users at);
+    /// 3. otherwise the defaults (no validation).
+    ///
+    /// A `.maw.toml` `[merge.validation]` shadowed by (1) and any other
+    /// `.maw.toml` `[merge]` key maw does not read (e.g. `drivers`,
+    /// `append_only`) produce a warning instead of being silently ignored.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] if either file cannot be read or parsed, or
+    /// if `.maw.toml`'s `[merge.validation]` is invalid.
+    pub fn load_layered(
+        manifold_config_path: &Path,
+        maw_toml_path: Option<&Path>,
+    ) -> Result<LayeredConfig, ConfigError> {
+        let mut config = Self::load(manifold_config_path)?;
+        let mut warnings = Vec::new();
+
+        let Some(maw_toml_path) = maw_toml_path else {
+            return Ok(LayeredConfig { config, warnings });
+        };
+        let Some(maw_merge) = read_toml_table(maw_toml_path)?
+            .and_then(|mut t| t.remove("merge"))
+            .and_then(|m| match m {
+                toml::Value::Table(t) => Some(t),
+                _ => None,
+            })
+        else {
+            return Ok(LayeredConfig { config, warnings });
+        };
+
+        let shown = maw_toml_path.display();
+        let manifold_shown = manifold_config_path.display();
+        for key in maw_merge.keys() {
+            if !MAW_TOML_MERGE_KEYS.contains(&key.as_str()) {
+                warnings.push(format!(
+                    "{shown}: [merge] key `{key}` is ignored in .maw.toml; \
+                     set it in {manifold_shown} instead"
+                ));
+            }
+        }
+
+        if let Some(v) = maw_merge.get("validation") {
+            let manifold_has_validation = read_toml_table(manifold_config_path)?
+                .as_ref()
+                .and_then(|t| t.get("merge"))
+                .and_then(|m| m.get("validation"))
+                .is_some();
+            if manifold_has_validation {
+                warnings.push(format!(
+                    "{shown}: [merge.validation] is shadowed by [merge.validation] in \
+                     {manifold_shown} (that one is used)"
+                ));
+            } else {
+                config.merge.validation =
+                    v.clone()
+                        .try_into()
+                        .map_err(|e: toml::de::Error| ConfigError {
+                            path: Some(maw_toml_path.to_owned()),
+                            message: format!("[merge.validation]: {}", e.message()),
+                        })?;
+            }
+        }
+        Ok(LayeredConfig { config, warnings })
+    }
+}
+
+/// Read a TOML file as a raw table; `Ok(None)` if it does not exist.
+fn read_toml_table(path: &Path) -> Result<Option<toml::Table>, ConfigError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ConfigError {
+                path: Some(path.to_owned()),
+                message: format!("could not read file: {e}"),
+            });
+        }
+    };
+    contents
+        .parse::<toml::Table>()
+        .map(Some)
+        .map_err(|e| ConfigError {
+            path: Some(path.to_owned()),
+            message: e.message().to_owned(),
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -911,6 +1027,91 @@ on_failure = "explode"
             "error should include line number: {}",
             err.message
         );
+    }
+
+    // -- load_layered (bn-ila3) --
+
+    fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("write");
+        p
+    }
+
+    #[test]
+    fn layered_maw_toml_validation_used_when_manifold_has_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifold = write(dir.path(), "config.toml", "[repo]\nbranch = \"main\"\n");
+        let maw = write(
+            dir.path(),
+            ".maw.toml",
+            "[merge.validation]\ncommand = \"cargo test\"\non_failure = \"block\"\n",
+        );
+        let l = ManifoldConfig::load_layered(&manifold, Some(&maw)).expect("load");
+        assert_eq!(
+            l.config.merge.validation.command.as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(l.config.merge.validation.on_failure, OnFailure::Block);
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+
+        // Missing manifold config file behaves the same.
+        let missing = dir.path().join("nope.toml");
+        let l = ManifoldConfig::load_layered(&missing, Some(&maw)).expect("load");
+        assert_eq!(
+            l.config.merge.validation.command.as_deref(),
+            Some("cargo test")
+        );
+    }
+
+    #[test]
+    fn layered_manifold_validation_wins_and_warns_about_shadowed_maw_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifold = write(
+            dir.path(),
+            "config.toml",
+            "[merge.validation]\ncommand = \"make check\"\n",
+        );
+        let maw = write(
+            dir.path(),
+            ".maw.toml",
+            "[merge.validation]\ncommand = \"cargo test\"\n",
+        );
+        let l = ManifoldConfig::load_layered(&manifold, Some(&maw)).expect("load");
+        assert_eq!(
+            l.config.merge.validation.command.as_deref(),
+            Some("make check")
+        );
+        assert_eq!(l.warnings.len(), 1);
+        assert!(l.warnings[0].contains("shadowed"), "{:?}", l.warnings);
+    }
+
+    #[test]
+    fn layered_warns_on_ignored_maw_toml_merge_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifold = dir.path().join("config.toml");
+        let maw = write(
+            dir.path(),
+            ".maw.toml",
+            "[merge]\nauto_resolve_from_main = []\nappend_only = [\"x\"]\n",
+        );
+        let l = ManifoldConfig::load_layered(&manifold, Some(&maw)).expect("load");
+        assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+        assert!(l.warnings[0].contains("append_only"));
+        assert!(l.config.merge.append_only.is_empty());
+        assert!(!l.config.merge.validation.has_commands());
+    }
+
+    #[test]
+    fn layered_invalid_maw_toml_validation_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifold = dir.path().join("config.toml");
+        let maw = write(
+            dir.path(),
+            ".maw.toml",
+            "[merge.validation]\ncommand = \"x\"\nbogus = 1\n",
+        );
+        let err = ManifoldConfig::load_layered(&manifold, Some(&maw)).expect_err("invalid");
+        assert!(err.to_string().contains(".maw.toml"), "{err}");
     }
 
     #[test]

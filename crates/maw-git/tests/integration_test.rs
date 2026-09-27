@@ -165,6 +165,38 @@ fn delete_ref() {
     );
 }
 
+/// bn-3w2b: CAS delete removes the ref only when it still holds the
+/// expected OID; a moved or missing ref is a `RefConflict` and nothing is
+/// deleted.
+#[test]
+fn delete_ref_cas_only_deletes_expected_value() {
+    let (_dir, repo, commit_oid, tree_oid) = setup_repo_with_commit();
+    let refname = RefName::new("refs/heads/cas-delete").expect("ref name");
+    repo.write_ref(&refname, commit_oid, "setup")
+        .expect("write");
+    let moved = repo
+        .create_commit(tree_oid, &[commit_oid], "moved", None)
+        .expect("commit");
+    repo.write_ref(&refname, moved, "moved").expect("move");
+
+    // Stale expectation: refused, ref intact.
+    match repo.delete_ref_cas(&refname, commit_oid) {
+        Err(GitError::RefConflict { .. }) => {}
+        other => panic!("expected RefConflict, got {other:?}"),
+    }
+    assert_eq!(repo.read_ref(&refname).expect("read"), Some(moved));
+
+    // Current expectation: deleted.
+    repo.delete_ref_cas(&refname, moved).expect("cas delete");
+    assert_eq!(repo.read_ref(&refname).expect("read"), None);
+
+    // Missing ref: refused (not a silent no-op).
+    match repo.delete_ref_cas(&refname, moved) {
+        Err(GitError::RefConflict { .. }) => {}
+        other => panic!("expected RefConflict for missing ref, got {other:?}"),
+    }
+}
+
 #[test]
 fn list_refs_with_prefix() {
     let (_dir, repo, commit_oid, _) = setup_repo_with_commit();

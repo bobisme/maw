@@ -42,13 +42,18 @@
 //!   (`reconcile_epoch_with_branch`: classify → replay committed-ahead
 //!   siblings → `write_epoch_current` → per-FF-sibling epoch-ref write,
 //!   materialize, `set_head`), PREPARE → BUILD → VALIDATE → COMMIT (phase
-//!   write, bn-38vw `epoch_after` write, commit-state write, ONE atomic 2-ref
+//!   write carrying the bn-38vw `epoch_after` in the SAME atomic journal
+//!   write (bn-3w2b), commit-state write, ONE atomic 2-ref
 //!   CAS via `update_refs_atomic`, or the branch-only `write_ref_cas` path for
 //!   `--into <change>`), sibling auto-rebase (try-lock per sibling), CLEANUP.
 //! * `ws sync` ([`ProcSpec::Sync`]) — epoch lock, then ws try-lock, refuse
 //!   dirty, fast-forward checkout or replay, then epoch-ref write.
 //! * `ws destroy` ([`ProcSpec::Destroy`]) — epoch lock, status, refuse or
 //!   (with `--force`) capture a recovery snapshot, then remove.
+//! * `maw merge promote` ([`ProcSpec::QuarantinePromote`]) — epoch lock,
+//!   then ONE atomic 2-ref CAS of epoch + branch from the quarantine's
+//!   `epoch_before` to its candidate (bn-3w2b); the pre-fix shape (no lock,
+//!   two separate CASes) is [`Mutation::QuarantinePromoteUnlockedSplitCas`].
 //! * `auto_sync_if_stale` ([`ProcSpec::AutoSync`]) — NO epoch lock; ws
 //!   try-lock only around the decision, released before the checkout, with the
 //!   bn-29z8 HEAD CAS + ancestor refusal before the checkout.
@@ -273,9 +278,11 @@ pub enum Pc {
     MBuild,
     /// VALIDATE.
     MValidate,
-    /// `advance_merge_state(Commit)`.
+    /// `enter_commit_phase`: phase = Commit AND `epoch_after` in one atomic
+    /// journal write (bn-3w2b).
     MCommitPhase,
-    /// bn-38vw `record_epoch_after` (before the CAS).
+    /// MUTATION ONLY ([`Mutation::SplitCommitJournal`]): the pre-bn-3w2b
+    /// separate `record_epoch_after` write (still before the CAS).
     MEpochAfter,
     /// Branch pre-flight + write commit-state.json (`Commit`).
     MCommitState,
@@ -325,6 +332,16 @@ pub enum Pc {
     /// (a no-op on mismatch). Under [`Mutation::DoctorRepairUnlocked`]: the
     /// pre-bn-32g8 plain `write_epoch_current(branch_reread)`.
     XWrite,
+
+    // --- maw merge promote --------------------------------------------------
+    /// Re-validate (always green here) + the ref CAS. Faithful: one atomic
+    /// 2-ref CAS under the epoch lock. Mutation: the epoch CAS only.
+    QCas,
+    /// MUTATION ONLY ([`Mutation::QuarantinePromoteUnlockedSplitCas`]): the
+    /// separate branch CAS.
+    QCasBranch,
+    /// `abandon_quarantine` after a successful promote.
+    QCleanup,
 }
 
 /// Process runtime state (program counter + locals).
@@ -386,6 +403,7 @@ pub mod ev {
     pub const AGENT_COMMIT: u16 = 1 << 11;
     pub const DESTROYED_DIRTY: u16 = 1 << 12;
     pub const DOCTOR_ADVANCED: u16 = 1 << 13;
+    pub const QUARANTINE_PROMOTED: u16 = 1 << 14;
 }
 
 /// The full model state.
@@ -415,6 +433,10 @@ pub struct State {
     pub events: u16,
     /// Ghost: every value `refs/manifold/epoch/current` has ever held.
     pub epochs_seen: u64,
+    /// A live quarantine workspace's candidate commit (`maw merge promote`
+    /// configurations only). Its worktree keeps the candidate reachable until
+    /// a successful promote abandons it.
+    pub quarantine: Option<Oid>,
 }
 
 impl State {
@@ -529,6 +551,10 @@ pub enum ProcSpec {
     /// classified epoch to the classified branch tip (bn-32g8). The pre-fix
     /// shape (no lock, plain write) is [`Mutation::DoctorRepairUnlocked`].
     DoctorRepair,
+    /// `maw merge promote <id>` of a quarantine created (at init) from a
+    /// candidate built on the initial epoch. Faithful = bn-3w2b (epoch lock +
+    /// one atomic epoch+branch CAS).
+    QuarantinePromote,
 }
 
 /// Initial repository shape.
@@ -601,6 +627,12 @@ pub enum Mutation {
     /// Pre-bn-32g8 `doctor --repair`: no epoch lock, re-read the branch after
     /// classification, plain (non-CAS) `write_epoch_current`.
     DoctorRepairUnlocked,
+    /// Pre-bn-3w2b COMMIT journal: `advance_merge_state(Commit)` and
+    /// `record_epoch_after` as two separate journal writes.
+    SplitCommitJournal,
+    /// Pre-bn-3w2b `maw merge promote`: no epoch lock, epoch CAS then a
+    /// separate branch CAS.
+    QuarantinePromoteUnlockedSplitCas,
 }
 
 /// The protocol model.
@@ -680,6 +712,7 @@ impl ProtocolModel {
             stuck: false,
             events: 0,
             epochs_seen: 0,
+            quarantine: None,
         };
         if self.init == InitShape::SiblingBehind {
             let mut t = [0; NPATHS];
@@ -696,6 +729,24 @@ impl ProtocolModel {
                 base: c1,
                 wt: t,
             };
+        }
+        // A quarantine left by an earlier `ws merge` whose validation failed:
+        // candidate = initial epoch + one new atom on the last path.
+        if let Some(pid) = self
+            .procs
+            .iter()
+            .position(|p| *p == ProcSpec::QuarantinePromote)
+        {
+            let bit = 1u16 << s.next_atom;
+            s.next_atom += 1;
+            s.created |= bit;
+            let mut t = *s.tree(s.epoch);
+            t[NPATHS - 1] |= bit;
+            let e = s.epoch;
+            let q = s.mk_commit(t, e, None);
+            s.quarantine = Some(q);
+            s.procs[pid].epoch_before = e;
+            s.procs[pid].candidate = q;
         }
         s
     }
@@ -739,6 +790,7 @@ impl ProtocolModel {
             ProcSpec::Destroy { ws, force } => self.step_destroy(s, pid, ws as usize, force),
             ProcSpec::AutoSync { ws } => self.step_autosync(s, pid, ws as usize),
             ProcSpec::DoctorRepair => self.step_doctor(s, pid),
+            ProcSpec::QuarantinePromote => self.step_promote(s, pid),
         }
     }
 
@@ -953,13 +1005,25 @@ impl ProtocolModel {
                 s.procs[i].pc = Pc::MCommitPhase;
             }
             Pc::MCommitPhase => {
+                // bn-3w2b `enter_commit_phase`: phase + epoch_after in ONE
+                // atomic journal write. The two mutations reproduce the
+                // historical shapes (pre-bn-38vw: epoch_after after the CAS;
+                // pre-bn-3w2b: a second write before the CAS).
+                let together = !matches!(
+                    self.mutation,
+                    Mutation::EpochAfterAfterCas | Mutation::SplitCommitJournal
+                );
+                let cand = s.procs[i].candidate;
                 if let Some(j) = s.merge_state.as_mut() {
                     j.phase = JPhase::Commit;
+                    if together {
+                        j.epoch_after = Some(cand);
+                    }
                 }
-                s.procs[i].pc = if self.mutation == Mutation::EpochAfterAfterCas {
-                    Pc::MCommitState
-                } else {
+                s.procs[i].pc = if self.mutation == Mutation::SplitCommitJournal {
                     Pc::MEpochAfter
+                } else {
+                    Pc::MCommitState
                 };
             }
             Pc::MEpochAfter | Pc::MLateEpochAfter => {
@@ -1290,6 +1354,69 @@ impl ProtocolModel {
         true
     }
 
+    fn step_promote(&self, s: &mut State, pid: Pid) -> bool {
+        let i = pid as usize;
+        let legacy = self.mutation == Mutation::QuarantinePromoteUnlockedSplitCas;
+        match s.procs[i].pc {
+            Pc::Start => {
+                if !legacy {
+                    // bn-3w2b: `maw merge promote` holds the epoch lock for
+                    // the whole promote.
+                    if s.epoch_lock.is_some() {
+                        return false;
+                    }
+                    s.epoch_lock = Some(pid);
+                }
+                s.procs[i].pc = Pc::QCas;
+            }
+            Pc::QCas => {
+                let (eb, q) = (s.procs[i].epoch_before, s.procs[i].candidate);
+                // bn-3w2b: refuse while a (crashed) `ws merge` journal
+                // exists — moving the epoch under it would make its recovery
+                // refuse ("epoch advanced since this merge started").
+                if !legacy && s.merge_state.is_some() {
+                    s.finish(pid); // QuarantineError::MergeInProgress
+                    return true;
+                }
+                if legacy {
+                    // refs::advance_epoch (CAS on the epoch only).
+                    if s.epoch != eb {
+                        s.finish(pid); // CasMismatch → error, quarantine kept
+                        return true;
+                    }
+                    s.epoch = q;
+                    s.procs[i].pc = Pc::QCasBranch;
+                    return true;
+                }
+                // refs::update_refs_atomic([(epoch, eb, q), (branch, eb, q)])
+                if s.epoch != eb || s.branch != eb {
+                    s.finish(pid); // CasMismatch → error, quarantine kept
+                    return true;
+                }
+                s.epoch = q;
+                s.branch = q;
+                s.events |= ev::QUARANTINE_PROMOTED;
+                s.procs[i].pc = Pc::QCleanup;
+            }
+            Pc::QCasBranch => {
+                let (eb, q) = (s.procs[i].epoch_before, s.procs[i].candidate);
+                if s.branch != eb {
+                    s.finish(pid); // branch CAS failed; epoch already moved
+                    return true;
+                }
+                s.branch = q;
+                s.events |= ev::QUARANTINE_PROMOTED;
+                s.procs[i].pc = Pc::QCleanup;
+            }
+            Pc::QCleanup => {
+                s.quarantine = None;
+                s.finish(pid);
+            }
+            pc => unreachable!("promote pc {pc:?}"),
+        }
+        true
+    }
+
     /// Crash recovery of a killed merge, as performed by the next
     /// `maw ws merge` PREPARE (`src/merge/prepare.rs`) and, failing that,
     /// `maw ws merge --abort` (`AbortOutcome`). Phase dispatch goes through
@@ -1336,6 +1463,11 @@ impl ProtocolModel {
             (ProcSpec::Sync { .. }, Pc::SEpochLock) => other(s.epoch_lock),
             (ProcSpec::AutoSync { .. }, _) => None,
             (ProcSpec::DoctorRepair, _) if self.mutation == Mutation::DoctorRepairUnlocked => None,
+            (ProcSpec::QuarantinePromote, _)
+                if self.mutation == Mutation::QuarantinePromoteUnlockedSplitCas =>
+            {
+                None
+            }
             (_, Pc::Start) => other(s.epoch_lock),
             (ProcSpec::Merge { .. }, Pc::MReplay(w) | Pc::MAutoRebase(w)) if reversed => {
                 other(s.ws_lock[w as usize])
@@ -1402,6 +1534,9 @@ fn covered(s: &State) -> u16 {
     for &r in &s.recovery {
         c |= tree_atoms(s.tree(r));
     }
+    if let Some(q) = s.quarantine {
+        c |= tree_atoms(s.tree(q));
+    }
     c
 }
 
@@ -1426,7 +1561,17 @@ fn prop_ws_coherent(m: &ProtocolModel, s: &State) -> bool {
     })
 }
 
-fn prop_commit_atomic(_: &ProtocolModel, s: &State) -> bool {
+fn prop_commit_atomic(m: &ProtocolModel, s: &State) -> bool {
+    // `maw merge promote`: the quarantine candidate is never on one of
+    // epoch/branch without the other.
+    let promote_ok = m.procs.iter().zip(&s.procs).all(|(spec, p)| {
+        *spec != ProcSpec::QuarantinePromote
+            || s.is_ancestor_or_eq(p.candidate, s.epoch)
+                == s.is_ancestor_or_eq(p.candidate, s.branch)
+    });
+    if !promote_ok {
+        return false;
+    }
     let Some(j) = &s.merge_state else {
         return true;
     };
@@ -1507,6 +1652,7 @@ event_prop!(ev_recovered_pre_cas, ev::RECOVERED_PRE_CAS);
 event_prop!(ev_agent_commit, ev::AGENT_COMMIT);
 event_prop!(ev_destroyed_dirty, ev::DESTROYED_DIRTY);
 event_prop!(ev_doctor_advanced, ev::DOCTOR_ADVANCED);
+event_prop!(ev_quarantine_promoted, ev::QUARANTINE_PROMOTED);
 
 type PropFn = fn(&ProtocolModel, &State) -> bool;
 
@@ -1568,6 +1714,11 @@ const EVENT_PROPS: &[(u16, &str, PropFn)] = &[
         ev::DOCTOR_ADVANCED,
         "sometimes: doctor --repair advanced epoch",
         ev_doctor_advanced,
+    ),
+    (
+        ev::QUARANTINE_PROMOTED,
+        "sometimes: quarantine promoted",
+        ev_quarantine_promoted,
     ),
 ];
 
@@ -1915,15 +2066,32 @@ pub mod configs {
     }
 
     /// Faithful single-merge model checked against Oracle B's strict journal
-    /// shape.
-    pub fn residual_oracle_b_strict() -> ProtocolModel {
+    /// shape. Green since bn-3w2b (phase + `epoch_after` in one journal
+    /// write); the pre-fix shape is [`Mutation::SplitCommitJournal`].
+    pub fn fast_oracle_b_strict() -> ProtocolModel {
         ProtocolModel {
             strict_oracle_b: true,
             procs: vec![merge(0)],
             agent_edits: 1,
             agent_commits: 0,
             crashes: 1,
-            expect: 0,
+            expect: ev::MERGE_COMMITTED | ev::RECOVERED_PRE_CAS | ev::RECOVERED_POST_CAS,
+            ..ProtocolModel::new(1)
+        }
+    }
+
+    /// `maw merge promote` of a quarantine racing `ws merge` (with FF-absorb
+    /// of a direct trunk commit). Faithful = bn-3w2b (epoch lock + one
+    /// atomic 2-ref CAS); the pre-fix shape is
+    /// [`Mutation::QuarantinePromoteUnlockedSplitCas`].
+    pub fn fast_quarantine_promote_vs_merge() -> ProtocolModel {
+        ProtocolModel {
+            procs: vec![merge(0), ProcSpec::QuarantinePromote],
+            agent_edits: 1,
+            agent_commits: 0,
+            trunk_commits: 1,
+            crashes: 1,
+            expect: ev::MERGE_COMMITTED | ev::FF_ABSORBED | ev::QUARANTINE_PROMOTED,
             ..ProtocolModel::new(1)
         }
     }

@@ -281,7 +281,8 @@ pub struct SiblingMergeJson {
     /// Sibling workspace name.
     pub name: String,
     /// Outcome tag. One of: `replayed`, `conflicted`, `up_to_date`,
-    /// `skipped_dirty`, `skipped_in_progress`, `skipped_in_use`, `failed`.
+    /// `skipped_dirty`, `skipped_in_progress`, `skipped_in_use`,
+    /// `skipped_quarantine`, `failed`.
     pub action: &'static str,
     /// Number of commits replayed onto the new epoch (0 for skips / up-to-date).
     pub replayed_commits: usize,
@@ -2177,8 +2178,8 @@ pub fn plan_merge(
 
     let manifold_dir =
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
-    let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // bn-ila3: `[merge.validation]` may also come from `.maw.toml`.
+    let manifold_config = super::load_manifold_config_layered(&root, &manifold_dir)?;
     let sources = parse_workspace_ids(workspaces)?;
     validate_workspace_dirs(&sources, &backend)?;
     let workspace_dirs = workspace_dirs_map(&sources, &backend);
@@ -3688,6 +3689,21 @@ fn reconcile_epoch_with_branch(
                     paths: dirty,
                 });
             }
+            continue;
+        }
+        // bn-ila3: a merge quarantine (`merge-quarantine-<id>`) is not a
+        // sibling. Its HEAD is a candidate built on the quarantine's recorded
+        // `epoch_before`, which `maw merge promote` CASes from; replaying or
+        // fast-forwarding it would rewrite the candidate out from under
+        // promote. Leave it exactly in place (promote then refuses cleanly
+        // because the epoch moved) and keep it out of the FF-safety check —
+        // nothing the absorb does touches it.
+        if maw_core::merge::quarantine_id::merge_id_from_name(name).is_some() {
+            continue;
+        }
+        // bn-ila3: quarantines never block or join an FF-absorb (mirrors
+        // `reconcile_epoch_with_branch`).
+        if maw_core::merge::quarantine_id::merge_id_from_name(name).is_some() {
             continue;
         }
         let touched = super::touched::collect_touched_workspace(&backend, &info.id)?;
@@ -5596,8 +5612,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // -----------------------------------------------------------------------
     // Phase 3: VALIDATE — run post-merge validation commands
     // -----------------------------------------------------------------------
-    let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // bn-ila3: `[merge.validation]` may also come from `.maw.toml`.
+    let manifold_config = super::load_manifold_config_layered(&root, &manifold_dir)?;
     let validation_config = &manifold_config.merge.validation;
 
     // bn-39zu: refuse (or, with --force, warn and bypass) a merge that would
@@ -5789,42 +5805,35 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!("COMMIT: Updating target branch...");
     }
 
-    // Advance merge-state to Commit phase
-    advance_merge_state(&manifold_dir, MergePhase::Commit)?;
-
-    // bn-38vw: record `epoch_after` into the merge-state journal BEFORE the
-    // ref-advancing CAS — not after.
+    // Advance merge-state to the Commit phase AND record `epoch_after` in ONE
+    // atomic journal write (bn-3w2b).
     //
-    // bn-3ppf: this is a SECOND atomic write after `advance_merge_state(Commit)`
-    // above, so a crash between the two still leaves phase=commit with no
-    // `epoch_after` (refs not yet moved) — the shape Oracle B flags. Harmless
-    // for data (recovery sees NotCommitted) but the "coherent at every
-    // post-build crash point" claim below is off by that one window
-    // (Stateright `residual_oracle_b_commit_phase_without_epoch_after`). The candidate (= the new epoch commit
-    // OID) was already built in BUILD and validated in VALIDATE, so it is a
-    // durable commit object regardless of where the refs currently point.
+    // bn-38vw moved the `epoch_after` record BEFORE the ref-advancing CAS: it
+    // used to be written only AFTER the CAS, so a crash between the CAS
+    // (refs advanced — the point of no return) and the journal write left
+    // merge-state in `phase=commit` with `epoch_after=None`, the incoherent
+    // shape Oracle B flags. bn-38vw still did it as a SECOND write after
+    // `advance_merge_state(Commit)`, so a crash between the two writes left
+    // the same shape (refs not yet moved; data-safe but flagged). The
+    // bn-3ppf Stateright audit pinned that window
+    // (`mutation_split_commit_journal_breaks_oracle_b`); writing both fields
+    // together closes it: no persisted journal is ever in `Commit` without
+    // `epoch_after`.
     //
-    // Recording it here closes a crash window: previously `epoch_after` was
-    // written only AFTER the CAS, so a crash between the CAS (refs advanced —
-    // the point of no return) and the journal write left merge-state in
-    // `phase=commit` with `epoch_after=None`. Oracle B flags that incoherent
-    // shape ("past the point-of-no-return but epoch_after is not recorded")
-    // and nothing self-healed it on demand.
-    //
-    // Journal coherence at EVERY post-build crash point now holds:
-    //   * crash AFTER this write, BEFORE the CAS  → phase=commit, refs at old
+    // The candidate (= the new epoch commit OID) was already built in BUILD
+    // and validated in VALIDATE, so it is a durable commit object regardless
+    // of where the refs currently point. Crash points:
+    //   * crash BEFORE this write → phase=validate; recovery treats it as a
+    //     pre-commit orphan (no ref moved).
+    //   * crash AFTER this write, BEFORE the CAS → phase=commit, refs at old
     //     epoch, epoch_after=candidate. Oracle B only checks epoch_after
     //     resolves to a commit (it does). Recovery (`CheckCommit` →
     //     `recover_partial_commit_with_branch_base`) reads the LIVE refs, sees
-    //     NotCommitted, and the caller aborts — no work to orphan (nothing was
-    //     committed; the candidate is reachable from no ref but is a transient
-    //     build artifact, identical to the pre-fix pre-CAS crash).
+    //     NotCommitted, and the caller aborts — nothing to orphan.
     //   * crash AFTER the CAS → refs advanced + epoch_after=candidate.
     //     Recovery converges forward idempotently to AlreadyCommitted /
     //     FinalizedMainRef.
-    // The candidate OID written here is identical to the value the post-CAS
-    // path used, so this is a pure reordering: no new value is journaled.
-    record_epoch_after(&manifold_dir, &build_output.candidate)?;
+    enter_commit_phase(&manifold_dir, &build_output.candidate)?;
 
     let epoch_before_oid = merge_base_epoch.oid().clone();
     // Pre-flight: verify the branch hasn't diverged from the target head
@@ -6632,19 +6641,20 @@ fn record_validation_result(
     Ok(())
 }
 
-/// Record the `epoch_after` in the merge-state file.
-fn record_epoch_after(
+/// Enter the COMMIT phase and record `epoch_after` in one atomic
+/// merge-state write (bn-3w2b; see the call site).
+fn enter_commit_phase(
     manifold_dir: &Path,
     candidate: &maw_core::model::types::GitOid,
 ) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
     let mut state =
         MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
-    state.epoch_after = Some(
-        maw_core::model::types::EpochId::new(candidate.as_str())
-            .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?,
-    );
-    state.updated_at = now_secs();
+    let epoch_after = maw_core::model::types::EpochId::new(candidate.as_str())
+        .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?;
+    state
+        .advance_to_commit(epoch_after, now_secs())
+        .map_err(|e| anyhow::anyhow!("advance merge-state: {e}"))?;
     state
         .write_atomic(&state_path)
         .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
@@ -7720,6 +7730,7 @@ fn sibling_report_to_json(
         SiblingResult::SkippedInUse => ("skipped_in_use", 0, false, None, None),
         SiblingResult::SkippedDirty => ("skipped_dirty", 0, false, None, None),
         SiblingResult::SkippedInProgress => ("skipped_in_progress", 0, false, None, None),
+        SiblingResult::SkippedQuarantine => ("skipped_quarantine", 0, false, None, None),
         SiblingResult::RebasedClean { replayed, overlap } => {
             ("replayed", *replayed, false, overlap.clone(), None)
         }

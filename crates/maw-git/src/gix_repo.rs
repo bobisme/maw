@@ -291,6 +291,10 @@ impl GitRepo for GixRepo {
         crate::refs_impl::delete_ref(self, name)
     }
 
+    fn delete_ref_cas(&self, name: &RefName, expected: GitOid) -> Result<(), GitError> {
+        crate::refs_impl::delete_ref_cas(self, name, expected)
+    }
+
     fn atomic_ref_update(&self, edits: &[RefEdit]) -> Result<(), GitError> {
         crate::refs_impl::atomic_ref_update(self, edits)
     }

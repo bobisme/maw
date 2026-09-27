@@ -2,7 +2,8 @@
 //!
 //! maw's core use case is many agents mutating one repository concurrently.
 //! Epoch mutations — `ws merge` (including FF-absorb and sibling auto-rebase),
-//! `ws advance`, `epoch sync`, `gc`, and `ws destroy` — all read-modify-write
+//! `ws advance`, `epoch sync`, `gc`, `ws destroy`, `doctor --repair` and
+//! `merge promote` — all read-modify-write
 //! shared manifold state (`refs/manifold/epoch/current`, per-workspace epoch
 //! refs, the branch tip, destroy/recovery records). If two maw processes
 //! interleave those phases the result is undefined: a lost epoch write, a
