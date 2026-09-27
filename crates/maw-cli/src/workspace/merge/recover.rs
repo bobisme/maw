@@ -435,7 +435,13 @@ fn finalize(
         // state) and nothing follows the Merge op yet. Recorded BEFORE the
         // checkout so a crash inside it cannot lead a second recovery to
         // snapshot the already-merged tree.
+        //
+        // bn-15fzo: a pending checkout intent means an interrupted run already
+        // snapshotted (and possibly checked out) the tree: it no longer holds
+        // the pre-merge state, so a patch set of it would record the merge's
+        // own changes as user edits.
         if !checkout_done
+            && !super::checkout_intent::pending_for(root, &target_ws, candidate.as_str())
             && let Some(target_id) = &target_id
             && target_ops(root, target_id, candidate) == TargetOps::AtHead
             && let Ok(patch_set) =

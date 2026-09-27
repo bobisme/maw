@@ -135,12 +135,17 @@ Use uppercase IDs with stable namespace prefixes:
     is updated to the new epoch; committed refs are valid but the default workspace
     shows stale content until re-checkout
 
-- `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT`
-  - Location: `src/workspace/merge.rs:2484` (after `update_default_workspace` returns)
-  - Risk: LOW
-  - Invariants: G3
-  - Description: default workspace updated; crash before merge-state removal leaves a
-    stale state file that cleanup-on-next-run should handle
+- `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` (implemented, bn-15fzo)
+  - Location: `crates/maw-cli/src/workspace/merge.rs` `update_default_workspace`
+    (after the target checkout, before the snapshot replay and the per-workspace
+    epoch ref write)
+  - Risk: HIGH
+  - Invariants: G3, Prime Invariant (dirty target edits)
+  - Description: the tree is the merged tree and the user's pre-merge edits exist
+    only in the pinned snapshot. Recovery (or a re-crashed recovery) must resume
+    from the `target-checkout-<ws>.json` intent, not re-snapshot the merged tree
+    against `epoch_before`. Not yet in the DST crash pools (`CRASHABLE_BY_PHASE`,
+    `DANGEROUS_FAILPOINTS`).
 
 - `FP_CLEANUP_BEFORE_STATE_REMOVE`
   - Location: `src/workspace/merge.rs:2492-2497` (before merge-state file removal via `run_cleanup_phase`)

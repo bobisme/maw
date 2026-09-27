@@ -11,7 +11,9 @@ use maw_core::model::types::WorkspaceId;
 use maw_core::oplog::read::{OpLogReadError, walk_chain};
 use maw_core::oplog::types::OpPayload;
 
-use super::{get_backend, repo_root};
+use maw_core::model::layout::LayoutFlavor;
+
+use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, repo_root};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,20 +75,34 @@ pub struct HistoryCommit {
 pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
     let format = OutputFormat::resolve(format);
 
-    let backend = get_backend()?;
-    let ws_id =
-        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
-
-    if !backend.exists(&ws_id) {
-        bail!(
-            "Workspace '{name}' not found.\n  \
-             List workspaces: maw ws list"
-        );
-    }
-
-    let ws_path = backend.workspace_path(&ws_id);
-
     let root = repo_root()?;
+    let backend = get_backend()?;
+
+    // bn-15fzo: the default workspace is the privileged merge target. In the
+    // consolidated layout it IS the repo root — there is no
+    // `.maw/workspaces/default/` directory, so `backend.exists()` is false and
+    // `backend.workspace_path()` points at nothing. Resolve it through the
+    // layout (like `maw cd default`) instead of refusing with "not found"
+    // while `maw ops log` happily shows its op log.
+    let config = MawConfig::load_or_warn(&root);
+    let default_name = config.default_workspace().to_owned();
+    let (ws_id, ws_path) = if name == default_name || name == DEFAULT_WORKSPACE {
+        let ws_id = WorkspaceId::new(&default_name)
+            .map_err(|e| anyhow::anyhow!("Invalid default workspace name: {e}"))?;
+        let flavor = LayoutFlavor::detect_with_env(&root);
+        (ws_id, flavor.default_target_path(&root, &default_name))
+    } else {
+        let ws_id =
+            WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+        if !backend.exists(&ws_id) {
+            bail!(
+                "Workspace '{name}' not found.\n  \
+                 List workspaces: maw ws list"
+            );
+        }
+        let ws_path = backend.workspace_path(&ws_id);
+        (ws_id, ws_path)
+    };
 
     // Try op log first (reads refs/manifold/head/<name> chain via read APIs)
     match fetch_oplog_history(&root, &ws_id, limit)? {

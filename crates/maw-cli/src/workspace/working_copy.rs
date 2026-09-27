@@ -58,7 +58,7 @@ use maw_core::refs as manifold_refs;
 const SNAPSHOT_REF_PREFIX: &str = "refs/manifold/snapshot/";
 
 /// Build the snapshot ref name for a workspace.
-fn snapshot_ref_name(ws_name: &str) -> String {
+pub fn snapshot_ref_name(ws_name: &str) -> String {
     format!("{SNAPSHOT_REF_PREFIX}{ws_name}")
 }
 

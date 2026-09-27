@@ -271,6 +271,7 @@ pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_BUILD_BEFORE_WORKTREE_ADD",
     "FP_CAPTURE_BEFORE_PIN",
     "FP_CLEANUP_AFTER_CAPTURE",
+    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
     "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
     "FP_COMMIT_AFTER_EPOCH_CAS",
     "FP_COMMIT_BEFORE_BRANCH_CAS",
@@ -692,8 +693,8 @@ mod tests {
             assert!(parse_env_spec("FP_X=sleep:abc").is_empty());
         }
 
-        /// Trailing-`*` glob expands against the canonical table; the two
-        /// real `FP_CLEANUP_*` sites must both appear with the same action.
+        /// Trailing-`*` glob expands against the canonical table; the three
+        /// real `FP_CLEANUP_*` sites must all appear with the same action.
         #[test]
         fn glob_expands_against_known() {
             let v = parse_env_spec("FP_CLEANUP_*=sleep:5000");
@@ -703,6 +704,7 @@ mod tests {
                 names,
                 vec![
                     "FP_CLEANUP_AFTER_CAPTURE".to_string(),
+                    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT".to_string(),
                     "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT".to_string(),
                 ]
             );

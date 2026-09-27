@@ -46,6 +46,10 @@ use tracing::instrument;
 /// bn-1fcox: crash recovery for an unfinished merge journal.
 mod recover;
 
+/// bn-15fzo: durable intent for the target checkout, so a crash between the
+/// checkout and the epoch-ref write resumes from the real pre-merge state.
+mod checkout_intent;
+
 use super::capture::capture_before_destroy;
 use super::destroy_record::{DestroyReason, write_destroy_record};
 use super::{
@@ -6388,6 +6392,18 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         // still points at the old epoch.
         maw::fp!("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT")?;
 
+        // Record a Snapshot op if the default workspace had dirty files.
+        // Recorded BEFORE the checkout (as crash recovery does) so a crash
+        // inside it leaves the op trail complete (bn-15fzo): recovery can no
+        // longer take the patch set, since the tree is no longer pre-merge.
+        if let Some(ref patch_set) = pre_checkout_patchset
+            && !patch_set.is_empty()
+        {
+            let default_ws_id = WorkspaceId::new(default_ws)
+                .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
+            record_target_snapshot_op(&root, &default_ws_id, &merge_base_epoch, patch_set);
+        }
+
         update_default_workspace(
             &default_ws_path,
             default_ws,
@@ -6400,15 +6416,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             text_mode,
             &ws_to_merge,
         )?;
-
-        // Record a Snapshot op if the default workspace had dirty files.
-        if let Some(ref patch_set) = pre_checkout_patchset
-            && !patch_set.is_empty()
-        {
-            let default_ws_id = WorkspaceId::new(default_ws)
-                .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
-            record_target_snapshot_op(&root, &default_ws_id, &merge_base_epoch, patch_set);
-        }
     }
 
     // Destroy source workspaces if requested. bn-20fp: the outcome carries
@@ -7277,7 +7284,35 @@ pub fn update_default_workspace(
                 epoch_ref,
                 ws_name
             );
+            // Keep the checkout intent: without the epoch ref it is the only
+            // record that the checkout ran (bn-15fzo).
+            return;
         }
+        checkout_intent::clear(repo_root, ws_name);
+    };
+
+    // bn-15fzo: an earlier run of this function for the SAME merged commit
+    // was interrupted after it snapshotted the target (the snapshot resets the
+    // tree to the anchor) — possibly after the checkout too. The on-disk tree
+    // is then NOT the pre-merge state; the intent's snapshot, relative to the
+    // intent's anchor, is. Resume from it instead of anchoring at
+    // `epoch_before` against a tree that may already be the merged one.
+    let resume = match checkout_intent::read(repo_root, ws_name) {
+        Some(intent) if intent.epoch_after == epoch_after => Some(intent),
+        Some(stale) => {
+            // An interrupted checkout of a different commit. Its snapshot is
+            // pinned; say where, and start fresh.
+            if let Some(pin) = stale.recovery_ref.as_deref().or(stale.snapshot.as_deref()) {
+                eprintln!(
+                    "  WARNING: an earlier interrupted update of '{ws_name}' (to {}) left its \
+                     pre-merge edits pinned at {pin}",
+                    &stale.epoch_after[..stale.epoch_after.len().min(12)]
+                );
+            }
+            checkout_intent::clear(repo_root, ws_name);
+            None
+        }
+        None => None,
     };
 
     let updated_message = || {
@@ -7336,6 +7371,11 @@ pub fn update_default_workspace(
         }
     };
 
+    // bn-15fzo: resuming, the anchor is the one the snapshot was taken against.
+    let anchor_epoch = resume
+        .as_ref()
+        .map_or(anchor_epoch, |intent| intent.anchor.clone());
+
     // Step 0: ANCHOR — detach HEAD at the default workspace base epoch
     // (or epoch_before fallback) without touching the
     // working tree.
@@ -7361,7 +7401,14 @@ pub fn update_default_workspace(
         let ws_repo = maw_git::GixRepo::open(default_ws_path)
             .with_context(|| format!("failed to open repo at {}", default_ws_path.display()))?;
         let head_path = ws_repo.git_dir().join("HEAD");
-        std::fs::write(&head_path, format!("{anchor_epoch}\n"))
+        // Resuming (bn-15fzo): the tree may already be the merged one, so
+        // anything left on disk is measured against the merged commit.
+        let detach_at = if resume.is_some() {
+            epoch_after
+        } else {
+            anchor_epoch.as_str()
+        };
+        std::fs::write(&head_path, format!("{detach_at}\n"))
             .with_context(|| format!("failed to write detached HEAD to {}", head_path.display()))?;
 
         // Reset the index to match HEAD (anchor_epoch) without touching the
@@ -7385,7 +7432,15 @@ pub fn update_default_workspace(
     // relative to the workspace's own base. This map is the authoritative user
     // state and the ultimate backstop for the post-replay fidelity repair
     // below — it does not depend on `git stash create` succeeding.
-    let pre_merge_dirty = capture_pre_merge_dirty(default_ws_path);
+    // Resuming (bn-15fzo): the tree is NOT the pre-merge state (the snapshot
+    // already reset it, and the checkout may have run), so there is no
+    // in-memory pre-merge content to verify against; the intent's snapshot is
+    // the authority.
+    let pre_merge_dirty = if resume.is_some() {
+        Vec::new()
+    } else {
+        capture_pre_merge_dirty(default_ws_path)
+    };
     if !pre_merge_dirty.is_empty() {
         // Visibility: one loud line so a dirty-trunk merge is never silent.
         eprintln!(
@@ -7400,12 +7455,34 @@ pub fn update_default_workspace(
     // deleted on clean replay and is invisible to recover.
     let mut durable_recovery_ref: Option<String> = None;
 
+    // bn-15fzo: resuming, the snapshot is the one the interrupted run took.
+    let resumed = resume.as_ref().map(|intent| {
+        resume_interrupted_checkout(
+            default_ws_path,
+            repo_root,
+            ws_name,
+            branch,
+            epoch_after,
+            intent,
+            text_mode,
+        )
+    });
+    let resuming = resumed.is_some();
+
     // Step 1: SNAPSHOT — capture dirty state if any.
     // FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT (bn-3jqfk): `error` forces the
     // snapshot-failed fallback below (pin from memory + force checkout).
-    let snapshot = match maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
-        .and_then(|()| snapshot_working_copy(default_ws_path, repo_root, ws_name))
-    {
+    // bn-15fzo: when resuming, the snapshot is the one the interrupted run took.
+    let snapshot = match resumed.map_or_else(
+        || {
+            maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
+                .and_then(|()| snapshot_working_copy(default_ws_path, repo_root, ws_name))
+        },
+        |(snap, pinned)| {
+            durable_recovery_ref = pinned;
+            Ok(snap)
+        },
+    ) {
         Ok(snap) => snap,
         Err(e) => {
             // Snapshot failed. The COMMIT already succeeded so we must not
@@ -7444,11 +7521,28 @@ pub fn update_default_workspace(
     // Pin the durable recovery ref from the ephemeral snapshot's commit (the
     // ADMIN-safe stash built by `snapshot_working_copy`) so recovery survives a
     // clean replay too.
-    if let Some(snap) = &snapshot {
+    if let Some(snap) = &snapshot
+        && !resuming
+    {
         durable_recovery_ref =
             pin_recovery_ref_from_oid(repo_root, ws_name, &snap.oid).or_else(|| {
                 pin_pre_merge_recovery_ref(repo_root, ws_name, &anchor_epoch, &pre_merge_dirty)
             });
+    }
+
+    // bn-15fzo: from here until the epoch ref is written, the tree is not the
+    // pre-merge state (the snapshot reset it). Record what a resumed run needs
+    // (best-effort, like the rest of this post-COMMIT step).
+    if !resuming {
+        let intent = checkout_intent::CheckoutIntent {
+            epoch_after: epoch_after.to_owned(),
+            anchor: anchor_epoch.clone(),
+            snapshot: snapshot.as_ref().map(|s| s.oid.clone()),
+            recovery_ref: durable_recovery_ref.clone(),
+        };
+        if let Err(e) = checkout_intent::write(repo_root, ws_name, &intent) {
+            tracing::warn!("failed to record the target checkout intent: {e:#}");
+        }
     }
 
     // Step 2: CHECKOUT — switch to the branch (tree is clean after snapshot).
@@ -7471,6 +7565,11 @@ pub fn update_default_workspace(
     // still be at the old epoch if checkout_to failed and we fell through to
     // force_checkout_fallback.
     lfs_post_checkout(default_ws_path, epoch_after);
+
+    // FP: crash after the target checkout, before the snapshot replay and the
+    // per-workspace epoch ref write (bn-15fzo). The tree is the merged tree;
+    // the user's pre-merge edits exist only in the pinned snapshot.
+    maw::fp!("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT")?;
 
     // Step 3: REPLAY — if there was a snapshot, replay it.
     let Some(snapshot) = snapshot else {
@@ -7642,6 +7741,111 @@ pub fn update_default_workspace(
     record_workspace_epoch();
 
     Ok(())
+}
+
+/// The tree of `rev` in the repo at `ws_path`, or `None` if it cannot be read.
+fn tree_of(ws_path: &Path, rev: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(ws_path)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{tree}}"),
+        ])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// bn-15fzo: resume a target update of `epoch_after` that an earlier run
+/// interrupted after its snapshot (and possibly after its checkout).
+///
+/// On entry HEAD is detached at `epoch_after` with the index reset to it.
+/// Whatever the interrupted run left on disk is cleaned away — pinned first
+/// when it is anything other than the anchor tree (crash before the checkout)
+/// or the fully replayed snapshot (crash after the replay), e.g. a partial
+/// replay or edits made since — and the interrupted run's snapshot is
+/// returned for the caller to replay against the intent's anchor. Returns
+/// the snapshot and its durable recovery ref.
+fn resume_interrupted_checkout(
+    ws_path: &Path,
+    repo_root: &Path,
+    ws_name: &str,
+    branch: &str,
+    epoch_after: &str,
+    intent: &checkout_intent::CheckoutIntent,
+    text_mode: bool,
+) -> (Option<super::working_copy::SnapshotRef>, Option<String>) {
+    use super::working_copy::{
+        SnapshotRef, cleanup_snapshot, snapshot_ref_name, snapshot_working_copy,
+    };
+
+    let source = intent
+        .recovery_ref
+        .as_deref()
+        .or(intent.snapshot.as_deref())
+        .unwrap_or("none — it was clean");
+    eprintln!("  resuming an interrupted update of '{ws_name}' (its pre-merge edits: {source})");
+
+    let residual_dirty = capture_pre_merge_dirty(ws_path);
+    match snapshot_working_copy(ws_path, repo_root, ws_name) {
+        Ok(Some(residual)) => {
+            let residual_tree = tree_of(ws_path, &residual.oid);
+            let expected = residual_tree.is_some()
+                && (residual_tree == tree_of(ws_path, &intent.anchor)
+                    || intent
+                        .snapshot
+                        .as_deref()
+                        .is_some_and(|snap| tree_of(ws_path, snap) == residual_tree));
+            if !expected {
+                let pin = pin_recovery_ref_from_oid(repo_root, ws_name, &residual.oid)
+                    .unwrap_or_else(|| residual.oid.clone());
+                eprintln!(
+                    "  WARNING: '{ws_name}' held changes beyond the interrupted update \
+                     (a partial replay, or edits made since). They are pinned at {pin}; \
+                     the pre-merge edits are replayed from {source}."
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("  WARNING: snapshot of the interrupted tree failed: {e:#}");
+            if let Some(pin) =
+                pin_pre_merge_recovery_ref(repo_root, ws_name, epoch_after, &residual_dirty)
+            {
+                eprintln!("  Its content is pinned at {pin}.");
+            }
+            force_checkout_fallback(ws_path, ws_name, branch, text_mode);
+        }
+    }
+
+    // `snapshot_working_copy` moved the ephemeral snapshot ref; point it back
+    // at the interrupted run's snapshot (kept on a conflicted replay).
+    let snapshot = intent.snapshot.as_ref().map(|oid| {
+        let ref_name = snapshot_ref_name(ws_name);
+        match GitOid::new(oid) {
+            Ok(git_oid) => {
+                if let Err(e) = maw_core::refs::write_ref(repo_root, &ref_name, &git_oid) {
+                    tracing::warn!("failed to restore snapshot ref '{ref_name}': {e}");
+                }
+            }
+            Err(e) => tracing::warn!("invalid snapshot OID '{oid}' in checkout intent: {e}"),
+        }
+        SnapshotRef {
+            oid: oid.clone(),
+            ref_name,
+        }
+    });
+    if snapshot.is_none()
+        && let Err(e) = cleanup_snapshot(repo_root, ws_name)
+    {
+        tracing::warn!("failed to clean up snapshot ref: {e}");
+    }
+    (snapshot, intent.recovery_ref.clone())
 }
 
 /// Print the dirty-replay type conflicts (bn-2ygs0): a symlink vs a file (or

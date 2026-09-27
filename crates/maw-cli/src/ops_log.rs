@@ -6,7 +6,7 @@
 //! and prints them newest-first with a stable short id. That id is what makes
 //! `maw undo <op-id>` targetable and the whole surface auditable.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -53,8 +53,12 @@ impl RepoOp {
 }
 
 /// Collect every operation reachable from any workspace op-log head, de-duped
-/// by blob OID and sorted newest-first (by timestamp, then id for a stable
-/// tie-break).
+/// by blob OID and sorted newest-first.
+///
+/// Order: by timestamp, then by op-log chain order (an op always sorts before
+/// its ancestors — timestamps only have millisecond resolution, so an op and
+/// its parent can share one; bn-15fzo), then by id for a deterministic
+/// tie-break.
 ///
 /// Best-effort per workspace: a workspace whose head ref dangles (e.g. a
 /// destroyed workspace not yet gc'd) is skipped rather than failing the whole
@@ -73,6 +77,7 @@ pub fn collect_repo_ops(root: &Path) -> Result<Vec<RepoOp>> {
 
     let mut ops: Vec<RepoOp> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
 
     for (ref_name, _oid) in heads {
         let Some(ws_name) = ref_name.as_str().strip_prefix(HEAD_REF_PREFIX) else {
@@ -90,6 +95,13 @@ pub fn collect_repo_ops(root: &Path) -> Result<Vec<RepoOp>> {
             if !seen.insert(oid.as_str().to_owned()) {
                 continue;
             }
+            parents.insert(
+                oid.as_str().to_owned(),
+                op.parent_ids
+                    .iter()
+                    .map(|p| p.as_str().to_owned())
+                    .collect(),
+            );
             ops.push(RepoOp {
                 id: oid,
                 workspace: ws_name.to_owned(),
@@ -99,15 +111,64 @@ pub fn collect_repo_ops(root: &Path) -> Result<Vec<RepoOp>> {
         }
     }
 
-    // Newest first. ISO-8601 UTC timestamps sort lexicographically in
-    // chronological order; the id is a deterministic tie-break.
+    sort_newest_first(&mut ops, &parents);
+    Ok(ops)
+}
+
+/// Sort newest first. ISO-8601 UTC timestamps sort lexicographically in
+/// chronological order; ops sharing a timestamp are ordered by chain
+/// generation (a descendant's generation always exceeds its ancestors', so
+/// within a chain the later op comes first), and the id is the final
+/// deterministic tie-break. Lexicographic on a fixed key, so a total order.
+fn sort_newest_first(ops: &mut [RepoOp], parents: &HashMap<String, Vec<String>>) {
+    let generations = generations(parents);
+    let generation = |op: &RepoOp| generations.get(op.id.as_str()).copied().unwrap_or(0);
     ops.sort_by(|a, b| {
         b.timestamp
             .cmp(&a.timestamp)
+            .then_with(|| generation(b).cmp(&generation(a)))
             .then_with(|| b.id.as_str().cmp(a.id.as_str()))
     });
+}
 
-    Ok(ops)
+/// Longest-path depth of every op from a root of the op DAG (ops whose
+/// parents are all outside `parents` have generation 0). Iterative, so a
+/// long chain cannot overflow the stack; a (corrupt) cycle is cut at the
+/// back edge instead of looping.
+fn generations(parents: &HashMap<String, Vec<String>>) -> HashMap<String, usize> {
+    let mut done: HashMap<String, usize> = HashMap::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+    for start in parents.keys() {
+        if done.contains_key(start) {
+            continue;
+        }
+        let mut stack: Vec<(String, bool)> = vec![(start.clone(), false)];
+        while let Some((id, expanded)) = stack.pop() {
+            if done.contains_key(&id) {
+                continue;
+            }
+            let ps = parents.get(&id).map(Vec::as_slice).unwrap_or_default();
+            if expanded {
+                on_stack.remove(&id);
+                let generation = ps
+                    .iter()
+                    .filter(|p| parents.contains_key(p.as_str()))
+                    .map(|p| done.get(p).map_or(0, |g| g + 1))
+                    .max()
+                    .unwrap_or(0);
+                done.insert(id, generation);
+                continue;
+            }
+            on_stack.insert(id.clone());
+            stack.push((id, true));
+            for p in ps {
+                if parents.contains_key(p) && !done.contains_key(p) && !on_stack.contains(p) {
+                    stack.push((p.clone(), false));
+                }
+            }
+        }
+    }
+    done
 }
 
 /// Stable op-kind slug for a payload. Mirrors `workspace::history`'s mapping so
@@ -322,6 +383,86 @@ mod tests {
         assert_eq!(ops.len(), 2, "two distinct ops");
         assert_eq!(ops[0].kind(), "merge", "newest first");
         assert_eq!(ops[1].kind(), "create");
+    }
+
+    /// bn-15fzo: ops written in the same millisecond keep op-log chain order
+    /// (newest first), whatever their blob ids.
+    #[test]
+    fn same_timestamp_ops_keep_chain_order() {
+        let (dir, _root, _oid) = maw_git::test_support::init_test_repo_with_commit();
+        let root = dir.path();
+        let a = ws("agent-a");
+        let ts = "2026-01-01T00:00:00.000Z".to_owned();
+
+        let mut head = append_operation(
+            root,
+            &a,
+            &Operation {
+                parent_ids: vec![],
+                workspace_id: a.clone(),
+                timestamp: ts.clone(),
+                payload: OpPayload::Create { epoch: epoch('a') },
+            },
+            None,
+        )
+        .expect("append create");
+        for i in 0..8 {
+            let op = Operation {
+                parent_ids: vec![head.clone()],
+                workspace_id: a.clone(),
+                timestamp: ts.clone(),
+                payload: OpPayload::Describe {
+                    message: format!("step {i}"),
+                },
+            };
+            head = append_operation(root, &a, &op, Some(&head)).expect("append describe");
+        }
+
+        let ops = collect_repo_ops(root).expect("collect");
+        let order: Vec<String> = ops
+            .iter()
+            .map(|op| match &op.payload {
+                OpPayload::Describe { message } => message.clone(),
+                other => op_kind(other).to_owned(),
+            })
+            .collect();
+        let mut expected: Vec<String> = (0..8).rev().map(|i| format!("step {i}")).collect();
+        expected.push("create".to_owned());
+        assert_eq!(
+            order, expected,
+            "same-ms ops must list newest-first in chain order"
+        );
+    }
+
+    #[test]
+    fn generations_follow_longest_path_and_survive_cycles() {
+        let map = |pairs: &[(&str, &[&str])]| -> HashMap<String, Vec<String>> {
+            pairs
+                .iter()
+                .map(|(k, ps)| {
+                    (
+                        (*k).to_owned(),
+                        ps.iter().map(|p| (*p).to_owned()).collect(),
+                    )
+                })
+                .collect()
+        };
+        // a <- b <- d, a <- c <- d, and x's parent is outside the set.
+        let g = generations(&map(&[
+            ("a", &[]),
+            ("b", &["a"]),
+            ("c", &["a"]),
+            ("d", &["b", "c"]),
+            ("x", &["missing"]),
+        ]));
+        assert_eq!(g["a"], 0);
+        assert_eq!(g["b"], 1);
+        assert_eq!(g["c"], 1);
+        assert_eq!(g["d"], 2);
+        assert_eq!(g["x"], 0);
+        // A corrupt cycle terminates.
+        let g = generations(&map(&[("p", &["q"]), ("q", &["p"])]));
+        assert_eq!(g.len(), 2);
     }
 
     #[test]
