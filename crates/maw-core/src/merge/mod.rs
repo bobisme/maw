@@ -13,5 +13,6 @@ pub mod diff_extract;
 pub mod materialize;
 pub mod partition;
 pub mod plan;
+pub mod quarantine_id;
 pub mod rename;
 pub mod types;

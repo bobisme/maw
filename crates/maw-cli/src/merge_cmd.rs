@@ -16,7 +16,7 @@ use maw::merge::events::{self as merge_events, MergeEvent, MergeEventKind};
 use maw::merge::last_conflict;
 use maw::merge::quarantine::{
     PromoteResult, QuarantineError, abandon_quarantine, list_quarantines, promote_quarantine,
-    quarantine_workspace_path,
+    quarantine_workspace_path, validate_merge_id,
 };
 use maw_core::config::ManifoldConfig;
 
@@ -168,8 +168,24 @@ pub fn run(cmd: &MergeCommands) -> Result<()> {
 // promote
 // ---------------------------------------------------------------------------
 
+/// Reject a malformed quarantine id before touching the filesystem.
+///
+/// Quarantine ids are joined into paths (`<manifold>/quarantine/<id>`), so an
+/// id like `../..` must never reach `abandon`'s `remove_dir_all`.
+fn ensure_valid_merge_id(merge_id: &str) -> Result<()> {
+    if let Err(reason) = validate_merge_id(merge_id) {
+        bail!(
+            "Invalid quarantine id {merge_id:?}: {reason}.\n  \
+             Quarantine ids are the 12-character hex ids printed by `maw ws merge`.\n  \
+             List active quarantines: maw merge list"
+        );
+    }
+    Ok(())
+}
+
 /// Re-validate and commit a quarantine workspace.
 fn promote(merge_id: &str) -> Result<()> {
+    ensure_valid_merge_id(merge_id)?;
     let root = repo_root()?;
     let manifold_dir =
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
@@ -187,7 +203,7 @@ fn promote(merge_id: &str) -> Result<()> {
             }
         })?;
 
-    let ws_path = quarantine_workspace_path(&root, merge_id);
+    let ws_path = quarantine_workspace_path(&root, merge_id)?;
 
     println!("Promoting quarantine '{merge_id}'...");
     println!();
@@ -303,8 +319,12 @@ fn refresh_default_after_promote(
     epoch_before: &str,
     new_epoch: &str,
 ) {
+    // The default workspace IS the repo root in the consolidated layout, so
+    // this must go through `default_target_path`, never `workspace_path`
+    // (which yields a non-existent `.maw/workspaces/default` there and made
+    // this refresh a silent no-op — bn-1cth).
     let default_ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
-        .workspace_path(root, "default");
+        .default_target_path(root, "default");
     if !default_ws_path.exists() {
         return;
     }
@@ -355,11 +375,12 @@ fn print_promote_success(merge_id: &str, new_epoch_short: &str, branch: &str) {
 
 /// Discard a quarantine workspace.
 fn abandon(merge_id: &str) -> Result<()> {
+    ensure_valid_merge_id(merge_id)?;
     let root = repo_root()?;
     let manifold_dir =
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
-    let ws_path = quarantine_workspace_path(&root, merge_id);
+    let ws_path = quarantine_workspace_path(&root, merge_id)?;
 
     println!("Abandoning quarantine '{merge_id}'...");
 
@@ -421,7 +442,7 @@ fn list() -> Result<()> {
     println!();
 
     for q in &quarantines {
-        let ws_path = quarantine_workspace_path(&root, &q.merge_id);
+        let ws_path = quarantine_workspace_path(&root, &q.merge_id)?;
         let ws_exists = ws_path.exists();
         let _ = maw_config;
 

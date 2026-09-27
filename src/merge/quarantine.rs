@@ -10,10 +10,11 @@
 //! ```text
 //! merge validation fails (quarantine policy)
 //!   → create_quarantine_workspace()
-//!       creates ws/merge-quarantine-<id>/ (git worktree at candidate OID)
+//!       creates <workspaces>/merge-quarantine-<id>/ (git worktree at candidate
+//!       OID; .maw/workspaces/ in the consolidated layout, ws/ in legacy v2)
 //!       writes .manifold/quarantine/<id>/state.json
 //!
-//! agent edits files in ws/merge-quarantine-<id>/ to fix the build failure
+//! agent edits files in <workspaces>/merge-quarantine-<id>/ to fix the build failure
 //!
 //! maw merge promote <id>
 //!   → re-run validation in the quarantine workspace directory
@@ -47,18 +48,22 @@ use serde::{Deserialize, Serialize};
 use crate::config::ValidationConfig;
 use crate::merge::validate::{ValidateOutcome, run_validate_config_in_dir};
 use crate::merge_state::ValidationResult;
+use crate::model::layout::LayoutFlavor;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
+pub use maw_core::merge::quarantine_id::{
+    InvalidMergeId, MERGE_ID_MAX_LEN, QUARANTINE_NAME_PREFIX, merge_id_from_name,
+    quarantine_workspace_name, validate_merge_id,
+};
+use maw_core::merge::quarantine_id::{quarantine_state_base, quarantine_state_dir};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Prefix for quarantine workspace names. All quarantine worktrees have names
-/// starting with this prefix so they can be identified in `maw ws list`.
-pub const QUARANTINE_NAME_PREFIX: &str = "merge-quarantine-";
-
-/// Subdirectory under `.manifold/` where quarantine state files are stored.
-const QUARANTINE_STATE_SUBDIR: &str = "quarantine";
+/// Legacy (v2) directory, relative to the repo root, that older maw versions
+/// used for quarantine worktrees in every layout. Consolidated repos may still
+/// have quarantines there from before bn-1cth; they are found as a fallback.
+const LEGACY_WS_DIR: &str = "ws";
 
 // ---------------------------------------------------------------------------
 // QuarantineState
@@ -107,6 +112,7 @@ impl QuarantineState {
     ///
     /// Returns an error if the file does not exist or cannot be parsed.
     pub fn read(manifold_dir: &Path, merge_id: &str) -> Result<Self, QuarantineError> {
+        check_merge_id(merge_id)?;
         let path = state_path(manifold_dir, merge_id);
         let contents = fs::read_to_string(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -124,6 +130,7 @@ impl QuarantineState {
     /// Write the quarantine state file atomically (write-tmp + fsync + rename).
     #[allow(clippy::missing_errors_doc)]
     pub fn write_atomic(&self, manifold_dir: &Path) -> Result<(), QuarantineError> {
+        check_merge_id(&self.merge_id)?;
         let dir = state_dir(manifold_dir, &self.merge_id);
         fs::create_dir_all(&dir)
             .map_err(|e| QuarantineError::Io(format!("create dir {}: {e}", dir.display())))?;
@@ -161,6 +168,12 @@ impl QuarantineState {
 /// Errors from quarantine operations.
 #[derive(Debug)]
 pub enum QuarantineError {
+    /// The supplied `merge_id` is not a valid quarantine id (e.g. contains
+    /// `/` or `..`). Rejected before any filesystem access.
+    InvalidId {
+        merge_id: String,
+        reason: InvalidMergeId,
+    },
     /// No quarantine with the given `merge_id` exists.
     NotFound { merge_id: String },
     /// The quarantine worktree directory does not exist.
@@ -178,6 +191,13 @@ pub enum QuarantineError {
 impl std::fmt::Display for QuarantineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidId { merge_id, reason } => {
+                write!(
+                    f,
+                    "invalid quarantine id {merge_id:?}: {reason}\n  \
+                     List active quarantines: maw merge list"
+                )
+            }
             Self::NotFound { merge_id } => {
                 write!(f, "no quarantine with id '{merge_id}' found")
             }
@@ -202,40 +222,52 @@ impl std::error::Error for QuarantineError {}
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Return the name of the quarantine workspace for the given `merge_id`.
-///
-/// The name is `merge-quarantine-<merge_id>` which:
-/// - Passes workspace name validation (alphanumeric + hyphens only)
-/// - Is identifiable by the [`QUARANTINE_NAME_PREFIX`] prefix
-/// - Creates the worktree at `ws/merge-quarantine-<merge_id>/`
-#[must_use]
-pub fn quarantine_workspace_name(merge_id: &str) -> String {
-    format!("{QUARANTINE_NAME_PREFIX}{merge_id}")
+/// Validate `merge_id`, mapping failure to [`QuarantineError::InvalidId`].
+fn check_merge_id(merge_id: &str) -> Result<(), QuarantineError> {
+    validate_merge_id(merge_id).map_err(|reason| QuarantineError::InvalidId {
+        merge_id: merge_id.to_owned(),
+        reason,
+    })
 }
 
 /// Return the workspace path for a quarantine with the given `merge_id`.
-#[must_use]
-pub fn quarantine_workspace_path(repo_root: &Path, merge_id: &str) -> PathBuf {
-    repo_root
-        .join("ws")
-        .join(quarantine_workspace_name(merge_id))
+///
+/// Layout-aware: `<root>/.maw/workspaces/merge-quarantine-<id>` in the
+/// consolidated layout, `<root>/ws/merge-quarantine-<id>` in the legacy v2
+/// layout. For an existing quarantine created by an older maw in a
+/// consolidated repo, the legacy `<root>/ws/` location is returned when the
+/// worktree exists only there.
+///
+/// # Errors
+///
+/// Returns [`QuarantineError::InvalidId`] if `merge_id` fails
+/// [`validate_merge_id`].
+pub fn quarantine_workspace_path(
+    repo_root: &Path,
+    merge_id: &str,
+) -> Result<PathBuf, QuarantineError> {
+    check_merge_id(merge_id)?;
+    let name = quarantine_workspace_name(merge_id);
+    let primary = LayoutFlavor::detect_with_env(repo_root).workspace_path(repo_root, &name);
+    if !primary.exists() {
+        let legacy = repo_root.join(LEGACY_WS_DIR).join(&name);
+        if legacy != primary && legacy.exists() {
+            return Ok(legacy);
+        }
+    }
+    Ok(primary)
 }
 
 /// Return the directory that holds the quarantine state files.
+///
+/// Callers must have validated `merge_id` (all public entry points do).
 fn state_dir(manifold_dir: &Path, merge_id: &str) -> PathBuf {
-    manifold_dir.join(QUARANTINE_STATE_SUBDIR).join(merge_id)
+    quarantine_state_dir(manifold_dir, merge_id)
 }
 
 /// Return the path to the quarantine state file.
 fn state_path(manifold_dir: &Path, merge_id: &str) -> PathBuf {
     state_dir(manifold_dir, merge_id).join("state.json")
-}
-
-/// Extract the `merge_id` from a quarantine workspace name, if it has the
-/// quarantine prefix.
-#[must_use]
-pub fn merge_id_from_name(name: &str) -> Option<&str> {
-    name.strip_prefix(QUARANTINE_NAME_PREFIX)
 }
 
 // ---------------------------------------------------------------------------
@@ -244,8 +276,9 @@ pub fn merge_id_from_name(name: &str) -> Option<&str> {
 
 /// Create a quarantine workspace for a failed merge.
 ///
-/// 1. Creates a git worktree at `ws/merge-quarantine-<merge_id>/` checked
-///    out at `candidate`.
+/// 1. Creates a git worktree for workspace `merge-quarantine-<merge_id>` in
+///    the layout's workspaces dir (see [`quarantine_workspace_path`]),
+///    checked out at `candidate`.
 /// 2. Writes validation diagnostics to the quarantine state directory.
 /// 3. Writes a `state.json` with merge intent (sources, `epoch_before`, candidate).
 ///
@@ -280,8 +313,10 @@ pub fn create_quarantine_workspace(
     branch: &str,
     validation_result: ValidationResult,
 ) -> Result<PathBuf, QuarantineError> {
+    check_merge_id(merge_id)?;
     let workspace_name = quarantine_workspace_name(merge_id);
-    let workspace_path = repo_root.join("ws").join(&workspace_name);
+    let workspace_path =
+        LayoutFlavor::detect_with_env(repo_root).workspace_path(repo_root, &workspace_name);
 
     // Remove any stale worktree at this path (idempotent — previous partial failure)
     if workspace_path.exists() {
@@ -289,9 +324,12 @@ pub fn create_quarantine_workspace(
         let _ = fs::remove_dir_all(&workspace_path);
     }
 
-    // Ensure ws/ directory exists
-    let ws_dir = repo_root.join("ws");
-    fs::create_dir_all(&ws_dir).map_err(|e| QuarantineError::Io(format!("create ws/ dir: {e}")))?;
+    // Ensure the workspaces directory exists
+    if let Some(ws_dir) = workspace_path.parent() {
+        fs::create_dir_all(ws_dir).map_err(|e| {
+            QuarantineError::Io(format!("create workspaces dir {}: {e}", ws_dir.display()))
+        })?;
+    }
 
     // Create a detached git worktree at the candidate commit.
     let repo =
@@ -378,7 +416,7 @@ pub fn promote_quarantine(
     // 1. Read quarantine state
     let state = QuarantineState::read(manifold_dir, merge_id)?;
 
-    let ws_path = quarantine_workspace_path(repo_root, merge_id);
+    let ws_path = quarantine_workspace_path(repo_root, merge_id)?;
     if !ws_path.exists() {
         return Err(QuarantineError::WorktreeNotFound {
             merge_id: merge_id.to_owned(),
@@ -467,7 +505,7 @@ pub fn abandon_quarantine(
     manifold_dir: &Path,
     merge_id: &str,
 ) -> Result<(), QuarantineError> {
-    let ws_path = quarantine_workspace_path(repo_root, merge_id);
+    let ws_path = quarantine_workspace_path(repo_root, merge_id)?;
 
     // Remove the git worktree (idempotent — ignore "not registered" errors)
     if ws_path.exists() {
@@ -498,7 +536,7 @@ pub fn abandon_quarantine(
 /// Invalid or unreadable state files are silently skipped.
 #[must_use]
 pub fn list_quarantines(manifold_dir: &Path) -> Vec<QuarantineState> {
-    let quarantine_base = manifold_dir.join(QUARANTINE_STATE_SUBDIR);
+    let quarantine_base = quarantine_state_base(manifold_dir);
     if !quarantine_base.exists() {
         return Vec::new();
     }
@@ -519,8 +557,15 @@ pub fn list_quarantines(manifold_dir: &Path) -> Vec<QuarantineState> {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        if validate_merge_id(&merge_id).is_err() {
+            continue;
+        }
         if let Ok(state) = QuarantineState::read(manifold_dir, &merge_id) {
-            result.push(state);
+            // The state must describe the directory it lives in; a mismatched
+            // (hand-edited) id would make promote/abandon address other paths.
+            if state.merge_id == merge_id {
+                result.push(state);
+            }
         }
     }
 
@@ -903,7 +948,7 @@ mod tests {
 
         // validation.json should exist in state dir
         let val_json = manifold_dir
-            .join(QUARANTINE_STATE_SUBDIR)
+            .join(maw_core::merge::quarantine_id::QUARANTINE_STATE_SUBDIR)
             .join(merge_id)
             .join("validation.json");
         assert!(val_json.exists(), "validation.json should be written");
@@ -941,7 +986,7 @@ mod tests {
         )
         .expect("operation should succeed");
 
-        let ws_path = quarantine_workspace_path(root, merge_id);
+        let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         assert!(ws_path.exists());
 
         abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
@@ -1131,7 +1176,7 @@ mod tests {
         }
 
         // Quarantine should be cleaned up after promote
-        let ws_path = quarantine_workspace_path(root, merge_id);
+        let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         assert!(
             !ws_path.exists(),
             "quarantine worktree should be removed after promote"
@@ -1194,7 +1239,7 @@ mod tests {
         }
 
         // Quarantine should still exist
-        let ws_path = quarantine_workspace_path(root, merge_id);
+        let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         assert!(
             ws_path.exists(),
             "quarantine should remain after failed promote"
@@ -1243,7 +1288,7 @@ mod tests {
         .expect("operation should succeed");
 
         // Simulate the agent fixing the file in the quarantine workspace
-        let ws_path = quarantine_workspace_path(root, merge_id);
+        let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         fs::write(ws_path.join("candidate.txt"), "FIXED\n").expect("operation should succeed");
 
         // Validate with a command that checks the file content: "true" always passes
@@ -1320,5 +1365,126 @@ mod tests {
         // Verify the new file is in the commit
         let tree = run_git(root, &["show", "--name-only", "--format=", "HEAD"]);
         assert!(tree.contains("new_fix.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1cth: merge_id validation + layout-aware paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn abandon_rejects_traversal_id_and_leaves_target_intact() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        fs::create_dir_all(manifold_dir.join("quarantine")).unwrap();
+        // <manifold>/quarantine/../../victim == <root>/victim
+        let victim = root.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("state.json"), "{}").unwrap();
+
+        let err = abandon_quarantine(root, &manifold_dir, "../../victim")
+            .expect_err("traversal id must be rejected");
+        assert!(matches!(err, QuarantineError::InvalidId { .. }), "{err}");
+        assert!(victim.join("state.json").exists(), "victim must survive");
+    }
+
+    #[test]
+    fn entry_points_reject_invalid_ids() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let config = crate::config::ValidationConfig::default();
+        for bad in ["..", "a/b", "", "UPPER", "-a"] {
+            assert!(matches!(
+                QuarantineState::read(&manifold_dir, bad),
+                Err(QuarantineError::InvalidId { .. })
+            ));
+            assert!(matches!(
+                promote_quarantine(root, &manifold_dir, bad, &config),
+                Err(QuarantineError::InvalidId { .. })
+            ));
+            assert!(matches!(
+                quarantine_workspace_path(root, bad),
+                Err(QuarantineError::InvalidId { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn consolidated_layout_creates_quarantine_under_maw_workspaces() {
+        let (dir, epoch) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".maw").join("manifold");
+        fs::create_dir_all(&manifold_dir).unwrap();
+        let candidate = make_candidate_commit(root, "c\n");
+        let merge_id = &candidate.as_str()[..12];
+
+        let path = create_quarantine_workspace(
+            root,
+            &manifold_dir,
+            merge_id,
+            vec![WorkspaceId::new("w1").unwrap()],
+            &EpochId::new(epoch.as_str()).unwrap(),
+            candidate.clone(),
+            "main",
+            dummy_validation_result(false),
+        )
+        .expect("create quarantine");
+
+        let expected = root
+            .join(".maw")
+            .join("workspaces")
+            .join(quarantine_workspace_name(merge_id));
+        assert_eq!(path, expected);
+        assert!(path.join("candidate.txt").exists());
+        assert!(!root.join("ws").exists(), "no legacy ws/ in trunk checkout");
+        assert_eq!(quarantine_workspace_path(root, merge_id).unwrap(), expected);
+
+        abandon_quarantine(root, &manifold_dir, merge_id).expect("abandon");
+        assert!(!expected.exists());
+    }
+
+    #[test]
+    fn consolidated_layout_abandon_finds_pre_fix_legacy_ws_quarantine() {
+        let (dir, epoch) = setup_repo();
+        let root = dir.path();
+        let manifold_dir = root.join(".maw").join("manifold");
+        fs::create_dir_all(&manifold_dir).unwrap();
+        let candidate = make_candidate_commit(root, "c\n");
+        let merge_id = &candidate.as_str()[..12];
+        let name = quarantine_workspace_name(merge_id);
+
+        // Simulate a quarantine created by an older maw at <root>/ws/<name>.
+        let legacy = root.join("ws").join(&name);
+        run_git(
+            root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                legacy.to_str().unwrap(),
+                candidate.as_str(),
+            ],
+        );
+        QuarantineState {
+            merge_id: merge_id.to_owned(),
+            epoch_before: epoch.clone(),
+            candidate: candidate.clone(),
+            sources: vec![WorkspaceId::new("w1").unwrap()],
+            branch: "main".to_owned(),
+            validation_result: dummy_validation_result(false),
+            created_at: 0,
+        }
+        .write_atomic(&manifold_dir)
+        .unwrap();
+
+        assert_eq!(quarantine_workspace_path(root, merge_id).unwrap(), legacy);
+        abandon_quarantine(root, &manifold_dir, merge_id).expect("abandon");
+        assert!(
+            !legacy.exists(),
+            "legacy quarantine worktree must be removed"
+        );
+        let wt = run_git(root, &["worktree", "list"]);
+        assert!(!wt.contains(&name), "worktree must be unregistered:\n{wt}");
     }
 }
