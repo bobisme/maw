@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "maw-core",
  "maw-scenario",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "maw-bench"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "maw-assurance",
  "maw-scenario",
@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "maw-bench-adapters"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "maw-scenario",
  "serde",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "maw-bench-metrics"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "maw-bench",
  "maw-bench-adapters",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "maw-bench-sweep"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "maw-bench",
  "maw-bench-adapters",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "maw-cli"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "maw-core"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "anyhow",
  "maw-git",
@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "maw-git"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "filetime",
  "gix",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "maw-lfs"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "gix",
  "maw-git",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "maw-scenario"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "rand 0.9.5",
  "serde",
@@ -2431,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "maw-tui"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "maw-workspaces"
-version = "1.0.0-pre.15"
+version = "1.0.0-pre.16"
 dependencies = [
  "anyhow",
  "clap",
