@@ -33,7 +33,7 @@ use maw_core::merge::plan::{
     compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
 use maw_core::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
-use maw_core::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
+use maw_core::merge_state::{MergePhase, MergeStateFile};
 use maw_core::model::conflict::ConflictAtom;
 use maw_core::model::conflict::Region;
 use maw_core::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
@@ -6397,7 +6397,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             &root,
             target_updates_epoch,
             text_mode,
-            &build_output.resolved_paths,
             &ws_to_merge,
         )?;
 
@@ -6460,25 +6459,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         PostMergeDestroyOutcome::default()
     };
 
-    // Remove merge-state file
-    let merge_state_path = MergeStateFile::default_path(&manifold_dir);
-    let state = MergeStateFile::read(&merge_state_path)
-        .unwrap_or_else(|_| MergeStateFile::new(sources, merge_base_epoch.clone(), now_secs()));
-    run_cleanup_phase(&state, &merge_state_path, false, |_ws| Ok(()))
+    // Remove the merge journal and its COMMIT-phase sidecars (the same
+    // implementation crash recovery finishes with — bn-28s78).
+    maw_core::merge_state::clear_merge_journal(&manifold_dir)
         .map_err(|e| anyhow::anyhow!("cleanup failed: {e}"))?;
-
-    // Also clean up commit-phase sidecar state files if present.
-    // `commit-state.json` is current; `merge-state` is a legacy fallback.
-    let abort_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
-    let abort_manifold = abort_flavor.manifold_dir(&root);
-    let commit_state_path = abort_manifold.join("commit-state.json");
-    if commit_state_path.exists() {
-        let _ = std::fs::remove_file(&commit_state_path);
-    }
-    let legacy_commit_state_path = abort_manifold.join("merge-state");
-    if legacy_commit_state_path.exists() {
-        let _ = std::fs::remove_file(&legacy_commit_state_path);
-    }
 
     run_hooks(&maw_config.hooks.post_merge, "post-merge", &root, false)?;
 
@@ -7268,7 +7252,6 @@ pub fn update_default_workspace(
     repo_root: &Path,
     target_updates_epoch: bool,
     text_mode: bool,
-    resolved_paths: &[PathBuf],
     source_workspace_names: &[String],
 ) -> Result<()> {
     use super::working_copy::{
@@ -7490,7 +7473,6 @@ pub fn update_default_workspace(
     let replay_result = replay_snapshot_with_merge_protection(
         default_ws_path,
         &snapshot,
-        resolved_paths,
         &anchor_epoch,
         epoch_after,
         source_workspace_names,

@@ -113,8 +113,7 @@
 )]
 
 use maw_core::merge_state::{
-    CasObservation, JournalRecovery, MergePhase, RecoveryOutcome, classify_cas_landing,
-    decide_journal_recovery, recovery_outcome_for_phase,
+    CasObservation, JournalRecovery, MergePhase, classify_cas_landing, decide_journal_recovery,
 };
 use stateright::{Model, Property};
 
@@ -1611,7 +1610,8 @@ impl ProtocolModel {
 
     /// Pre-bn-1fcox: no production caller ran `CheckCommit` /
     /// `RetryCleanup`; the only recovery a user could invoke without starting
-    /// a new merge was `maw ws merge --abort` (`abort_merge_state`), which
+    /// a new merge was `maw ws merge --abort` (`abort_merge_state`, removed in
+    /// bn-28s78), which
     /// refuses a COMMIT/CLEANUP journal once the refs reached the candidate
     /// and any journal once the epoch left `epoch_before`.
     fn recover_pre_bn_1fcox_abort(s: &mut State, j: &MergeJournal) {

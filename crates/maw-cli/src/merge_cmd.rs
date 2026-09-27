@@ -466,7 +466,6 @@ fn refresh_default_after_promote(
         root,
         true, // target_updates_epoch — promote advanced the epoch
         true, // text_mode
-        &[],  // no conflict resolutions
         &[],  // no source workspaces to record
     ) {
         eprintln!(

@@ -711,57 +711,6 @@ pub fn recovery_outcome_for_phase(phase: &MergePhase) -> RecoveryOutcome {
     }
 }
 
-/// Execute crash-recovery dispatch from a merge-state file.
-///
-/// Behavior matches design doc §5.10:
-/// - PREPARE/BUILD: abort by removing merge-state
-/// - VALIDATE: re-run validation
-/// - COMMIT: check refs externally to decide finalize vs abort
-/// - CLEANUP: re-run cleanup
-pub fn recover_from_merge_state(
-    merge_state_path: &Path,
-) -> Result<RecoveryOutcome, MergeStateError> {
-    let state = match MergeStateFile::read(merge_state_path) {
-        Ok(s) => s,
-        Err(MergeStateError::NotFound(_)) => return Ok(RecoveryOutcome::NoMergeInProgress),
-        Err(e) => return Err(e),
-    };
-
-    let outcome = recovery_outcome_for_phase(&state.phase);
-    if matches!(
-        outcome,
-        RecoveryOutcome::AbortedPreCommit { .. } | RecoveryOutcome::RetryCleanup
-    ) {
-        // Safe and idempotent for PREPARE/BUILD abort and post-commit cleanup completion.
-        remove_merge_state_if_exists(merge_state_path)?;
-    }
-
-    Ok(outcome)
-}
-
-/// Cleanup phase helper:
-/// - optionally destroys source workspaces via callback
-/// - removes merge-state file
-///
-/// The operation is idempotent. Re-running it is safe.
-pub fn run_cleanup_phase<D>(
-    state: &MergeStateFile,
-    merge_state_path: &Path,
-    destroy_workspaces: bool,
-    mut destroy_workspace: D,
-) -> Result<(), MergeStateError>
-where
-    D: FnMut(&WorkspaceId) -> Result<(), MergeStateError>,
-{
-    if destroy_workspaces {
-        for workspace in &state.sources {
-            destroy_workspace(workspace)?;
-        }
-    }
-
-    remove_merge_state_if_exists(merge_state_path)
-}
-
 // ---------------------------------------------------------------------------
 // Journal recovery decision (bn-1fcox)
 // ---------------------------------------------------------------------------
@@ -901,111 +850,30 @@ pub fn decide_journal_recovery(phase: &MergePhase, landing: CasLanding) -> Journ
     }
 }
 
-/// Outcome of an explicit `--abort` request against a merge-state file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AbortOutcome {
-    /// No merge-state file existed — nothing to abort.
-    NothingToAbort,
-    /// The merge-state was cleared. `from` is the phase it was in.
-    Cleared {
-        /// The phase the aborted merge was in.
-        from: MergePhase,
-    },
-    /// Refused: the merge already passed COMMIT (epoch advanced past
-    /// `epoch_before`), so clearing could mask partially-committed work.
-    /// The caller must inspect refs / run recovery instead of blind abort.
-    RefusedPostCommit {
-        /// The phase the merge was in.
-        phase: MergePhase,
-        /// Human-readable reason.
-        reason: String,
-    },
-}
+/// Journal sidecars the COMMIT phase writes next to `merge-state.json`
+/// (`commit-state.json` is current; `merge-state` is a legacy name).
+pub const MERGE_JOURNAL_SIDECARS: [&str; 2] = ["commit-state.json", "merge-state"];
 
-/// Explicitly abort an orphaned/in-progress merge by clearing its
-/// merge-state file — but *only* when doing so cannot lose committed work.
+/// Remove a merge's journal and its COMMIT-phase sidecars.
 ///
-/// This upholds the Prime Invariant. It is safe to clear merge-state iff the
-/// merge never reached COMMIT, i.e. the epoch ref still equals the
-/// `epoch_before` recorded when the merge started (and, for non-default
-/// targets, the target branch has not moved to the candidate). The caller
-/// supplies the *currently observed* epoch (and optionally the target
-/// branch head) so this function stays free of git/IO dependencies.
+/// This is the last step of a merge's CLEANUP (`merge-state.json` plus
+/// [`MERGE_JOURNAL_SIDECARS`] under `manifold_dir`), shared by the live
+/// merge and crash recovery (bn-28s78: one implementation).
 ///
-/// Arguments:
-/// - `merge_state_path`: path to `.manifold/merge-state.json`.
-/// - `current_epoch`: the current `refs/manifold/epoch/current` OID hex, if
-///   any (None if the epoch ref is missing).
-/// - `current_target_head`: the current head of the recorded target branch,
-///   if the merge-state recorded a `target_branch` (None otherwise).
+/// Idempotent: missing files are fine. Only the journal's removal is
+/// load-bearing (it unblocks the next merge), so only its failure is an
+/// error; a sidecar that cannot be removed is ignored (nothing reads it
+/// without a journal).
 ///
 /// # Errors
-/// Returns [`MergeStateError`] on I/O or deserialization failure.
-pub fn abort_merge_state(
-    merge_state_path: &Path,
-    current_epoch: Option<&str>,
-    current_target_head: Option<&str>,
-) -> Result<AbortOutcome, MergeStateError> {
-    let state = match MergeStateFile::read(merge_state_path) {
-        Ok(s) => s,
-        Err(MergeStateError::NotFound(_)) => return Ok(AbortOutcome::NothingToAbort),
-        Err(e) => return Err(e),
-    };
-
-    // Terminal states carry no in-progress lock; just remove the file.
-    if state.phase.is_terminal() {
-        remove_merge_state_if_exists(merge_state_path)?;
-        return Ok(AbortOutcome::Cleared { from: state.phase });
+/// Returns [`MergeStateError::Io`] if the journal exists and cannot be
+/// removed.
+pub fn clear_merge_journal(manifold_dir: &Path) -> Result<(), MergeStateError> {
+    remove_merge_state_if_exists(&MergeStateFile::default_path(manifold_dir))?;
+    for sidecar in MERGE_JOURNAL_SIDECARS {
+        let _ = fs::remove_file(manifold_dir.join(sidecar));
     }
-
-    // Prime-Invariant gate: the kill must be provably pre-COMMIT.
-    //
-    // Pre-COMMIT phases (Prepare/Build/Validate) never touched a ref, so
-    // clearing is always safe. For Commit/Cleanup we must verify that the
-    // refs did NOT advance to the candidate; if they did, real work was
-    // committed and a blind abort could orphan it — refuse and point the
-    // user at recovery.
-    let post_commit = matches!(state.phase, MergePhase::Commit | MergePhase::Cleanup);
-    if post_commit && let Some(candidate) = state.epoch_candidate.as_ref().map(GitOid::as_str) {
-        let epoch_at_candidate = current_epoch == Some(candidate);
-        let branch_at_candidate = current_target_head == Some(candidate);
-        if epoch_at_candidate || branch_at_candidate {
-            return Ok(AbortOutcome::RefusedPostCommit {
-                phase: state.phase.clone(),
-                reason: format!(
-                    "merge reached {} and the {} already advanced to the merged commit; \
-                     clearing now could orphan committed work",
-                    state.phase,
-                    if epoch_at_candidate {
-                        "epoch"
-                    } else {
-                        "target branch"
-                    }
-                ),
-            });
-        }
-    }
-
-    // Epoch-drift gate: even for pre-COMMIT phases, if the epoch has moved
-    // away from epoch_before since this merge started, *something* advanced
-    // the epoch (another merge, a recovery). Refuse rather than risk
-    // clobbering that state — the user can inspect and retry.
-    if let Some(observed) = current_epoch
-        && observed != state.epoch_before.as_str()
-    {
-        return Ok(AbortOutcome::RefusedPostCommit {
-            phase: state.phase.clone(),
-            reason: format!(
-                "epoch advanced since this merge started (was {}, now {}); \
-                 refusing to clear merge-state to avoid clobbering newer state",
-                &state.epoch_before.as_str()[..state.epoch_before.as_str().len().min(12)],
-                &observed[..observed.len().min(12)]
-            ),
-        });
-    }
-
-    remove_merge_state_if_exists(merge_state_path)?;
-    Ok(AbortOutcome::Cleared { from: state.phase })
+    Ok(())
 }
 
 /// fsync the directory containing `path`, making a just-created or
@@ -1701,40 +1569,28 @@ mod tests {
         assert!(decoded.command_results.is_empty());
     }
 
-    // -- Cleanup + recovery helpers --
+    // -- Journal cleanup (bn-28s78) --
 
     #[test]
-    fn cleanup_phase_destroys_sources_and_removes_merge_state() {
+    fn clear_merge_journal_removes_journal_and_sidecars_idempotently() {
         let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
-
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
         state.write_atomic(&path).expect("operation should succeed");
-        assert!(path.exists());
+        for sidecar in MERGE_JOURNAL_SIDECARS {
+            fs::write(dir.path().join(sidecar), "{}").expect("operation should succeed");
+        }
 
-        let mut destroyed = Vec::new();
-        run_cleanup_phase(&state, &path, true, |ws| {
-            destroyed.push(ws.as_str().to_owned());
-            Ok(())
-        })
-        .expect("operation should succeed");
-
-        assert_eq!(destroyed, vec!["agent-1".to_owned(), "agent-2".to_owned()]);
+        clear_merge_journal(dir.path()).expect("operation should succeed");
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn cleanup_phase_is_idempotent() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).expect("operation should succeed");
-        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).expect("operation should succeed");
-
-        assert!(!path.exists());
+        for sidecar in MERGE_JOURNAL_SIDECARS {
+            assert!(
+                !dir.path().join(sidecar).exists(),
+                "{sidecar} must be removed"
+            );
+        }
+        // Idempotent.
+        clear_merge_journal(dir.path()).expect("operation should succeed");
     }
 
     fn state_in_phase(phase: MergePhase) -> MergeStateFile {
@@ -1805,64 +1661,6 @@ mod tests {
         state
     }
 
-    #[test]
-    fn recovery_no_merge_state_returns_no_merge_in_progress() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(outcome, RecoveryOutcome::NoMergeInProgress);
-    }
-
-    #[test]
-    fn recovery_prepare_aborts_and_deletes_state_file() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(
-            outcome,
-            RecoveryOutcome::AbortedPreCommit {
-                from: MergePhase::Prepare
-            }
-        );
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn recovery_build_aborts_and_deletes_state_file() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = state_in_phase(MergePhase::Build);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(
-            outcome,
-            RecoveryOutcome::AbortedPreCommit {
-                from: MergePhase::Build
-            }
-        );
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn recovery_commit_requests_ref_check_and_keeps_state_file() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = state_in_phase(MergePhase::Commit);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(outcome, RecoveryOutcome::CheckCommit);
-        assert!(path.exists());
-    }
-
     /// bn-38vw: `epoch_after` is now journaled BEFORE the ref-advancing CAS,
     /// so a crash anywhere in the COMMIT phase (refs old OR refs advanced)
     /// leaves a COHERENT merge-state: phase past the point-of-no-return AND
@@ -1899,7 +1697,11 @@ mod tests {
              state is ever missing it (Oracle B coherence)"
         );
         // Recovery for COMMIT inspects the live refs and converges forward.
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
+        let outcome = recovery_outcome_for_phase(
+            &MergeStateFile::read(&path)
+                .expect("operation should succeed")
+                .phase,
+        );
         assert_eq!(outcome, RecoveryOutcome::CheckCommit);
         assert!(path.exists(), "merge-state preserved for ref inspection");
 
@@ -1909,117 +1711,13 @@ mod tests {
         let post_cas = MergeStateFile::read(&path).expect("operation should succeed");
         assert_eq!(post_cas.phase, MergePhase::Commit);
         assert_eq!(post_cas.epoch_after.as_ref(), Some(&epoch_after));
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
+        let outcome = recovery_outcome_for_phase(
+            &MergeStateFile::read(&path)
+                .expect("operation should succeed")
+                .phase,
+        );
         assert_eq!(outcome, RecoveryOutcome::CheckCommit);
         assert!(path.exists());
-    }
-
-    #[test]
-    fn recovery_validate_requests_rerun_and_keeps_state_file() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state
-            .advance(MergePhase::Build, 1001)
-            .expect("operation should succeed");
-        state
-            .advance(MergePhase::Validate, 1002)
-            .expect("operation should succeed");
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(outcome, RecoveryOutcome::RetryValidate);
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn recovery_cleanup_requests_rerun_and_deletes_state_file() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state
-            .advance(MergePhase::Build, 1001)
-            .expect("operation should succeed");
-        state
-            .advance(MergePhase::Validate, 1002)
-            .expect("operation should succeed");
-        state
-            .advance(MergePhase::Commit, 1003)
-            .expect("operation should succeed");
-        state
-            .advance(MergePhase::Cleanup, 1004)
-            .expect("operation should succeed");
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert_eq!(outcome, RecoveryOutcome::RetryCleanup);
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn recovery_precommit_abort_preserves_workspace_files() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let workspace_file = dir.path().join("ws").join("agent-1").join("keep.txt");
-        fs::create_dir_all(workspace_file.parent().expect("operation should succeed"))
-            .expect("operation should succeed");
-        fs::write(&workspace_file, "important work\n").expect("operation should succeed");
-
-        let path = MergeStateFile::default_path(dir.path());
-        let state = state_in_phase(MergePhase::Build);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
-        assert!(matches!(
-            outcome,
-            RecoveryOutcome::AbortedPreCommit {
-                from: MergePhase::Build
-            }
-        ));
-        assert_eq!(
-            fs::read_to_string(&workspace_file).expect("operation should succeed"),
-            "important work\n"
-        );
-    }
-
-    #[test]
-    fn recovery_dispatch_is_repeatable_across_phases() {
-        for _ in 0..3 {
-            let scenarios = vec![
-                (MergePhase::Prepare, true),
-                (MergePhase::Build, true),
-                (MergePhase::Validate, false),
-                (MergePhase::Commit, false),
-                (MergePhase::Cleanup, true),
-            ];
-
-            for (phase, should_delete_state_file) in scenarios {
-                let dir = tempfile::tempdir().expect("operation should succeed");
-                let path = MergeStateFile::default_path(dir.path());
-                let state = state_in_phase(phase.clone());
-                state.write_atomic(&path).expect("operation should succeed");
-
-                let first = recover_from_merge_state(&path).expect("operation should succeed");
-                let second = recover_from_merge_state(&path).expect("operation should succeed");
-
-                match phase {
-                    MergePhase::Prepare | MergePhase::Build => {
-                        assert!(matches!(first, RecoveryOutcome::AbortedPreCommit { .. }));
-                    }
-                    MergePhase::Validate => assert_eq!(first, RecoveryOutcome::RetryValidate),
-                    MergePhase::Commit => assert_eq!(first, RecoveryOutcome::CheckCommit),
-                    MergePhase::Cleanup => assert_eq!(first, RecoveryOutcome::RetryCleanup),
-                    MergePhase::Complete | MergePhase::Aborted => unreachable!(),
-                }
-
-                if should_delete_state_file {
-                    assert_eq!(second, RecoveryOutcome::NoMergeInProgress);
-                } else {
-                    assert_eq!(second, first);
-                }
-            }
-        }
     }
 
     // -- Error display --
@@ -2194,97 +1892,6 @@ mod tests {
         state.owner_host = Some("definitely-not-this-host-xyzzy".to_owned());
         // Can't probe a pid on another machine → Unknown → still blocks.
         assert_eq!(state.owner_liveness(), Liveness::Unknown);
-    }
-
-    #[test]
-    fn abort_clears_precommit_and_preserves_epoch() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        // Build-phase orphan (pre-COMMIT), epoch unchanged.
-        let state = state_in_phase(MergePhase::Build);
-        let epoch_before = state.epoch_before.as_str().to_owned();
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome =
-            abort_merge_state(&path, Some(&epoch_before), None).expect("operation should succeed");
-        assert_eq!(
-            outcome,
-            AbortOutcome::Cleared {
-                from: MergePhase::Build
-            }
-        );
-        assert!(!path.exists(), "merge-state must be removed");
-        // Epoch is supplied by caller; abort never touches refs — the
-        // Prime Invariant is upheld because we only cleared a pre-COMMIT
-        // state and the epoch we observed equals epoch_before.
-    }
-
-    #[test]
-    fn abort_nothing_when_no_state() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-        let outcome = abort_merge_state(&path, None, None).expect("operation should succeed");
-        assert_eq!(outcome, AbortOutcome::NothingToAbort);
-    }
-
-    #[test]
-    fn abort_refuses_when_epoch_advanced_past_epoch_before() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = state_in_phase(MergePhase::Build);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        // Observed epoch differs from epoch_before → something advanced the
-        // epoch since this merge started. Refuse to clobber it.
-        let advanced_epoch = "f".repeat(40);
-        let outcome = abort_merge_state(&path, Some(&advanced_epoch), None)
-            .expect("operation should succeed");
-        assert!(
-            matches!(outcome, AbortOutcome::RefusedPostCommit { .. }),
-            "expected refusal, got {outcome:?}"
-        );
-        assert!(path.exists(), "merge-state must be preserved on refusal");
-    }
-
-    #[test]
-    fn abort_refuses_post_commit_when_epoch_at_candidate() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        // Commit-phase with a candidate; epoch already advanced TO the
-        // candidate → the merge committed → refuse (Prime Invariant).
-        let mut state = state_in_phase(MergePhase::Commit);
-        let candidate = test_oid();
-        state.epoch_candidate = Some(candidate.clone());
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = abort_merge_state(&path, Some(candidate.as_str()), None)
-            .expect("operation should succeed");
-        assert!(
-            matches!(outcome, AbortOutcome::RefusedPostCommit { .. }),
-            "expected refusal, got {outcome:?}"
-        );
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn abort_clears_terminal_state() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let path = MergeStateFile::default_path(dir.path());
-
-        let state = state_in_phase(MergePhase::Aborted);
-        state.write_atomic(&path).expect("operation should succeed");
-
-        let outcome = abort_merge_state(&path, None, None).expect("operation should succeed");
-        assert_eq!(
-            outcome,
-            AbortOutcome::Cleared {
-                from: MergePhase::Aborted
-            }
-        );
-        assert!(!path.exists());
     }
 
     #[test]

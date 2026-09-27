@@ -431,7 +431,9 @@ pub fn run_prepare_phase_with_epoch(
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
+    use crate::merge_state::{
+        CasLanding, JournalRecovery, MergePhase, clear_merge_journal, decide_journal_recovery,
+    };
 
     fn test_epoch() -> EpochId {
         EpochId::new(&"a".repeat(40)).expect("operation should succeed")
@@ -616,13 +618,18 @@ mod tests {
             .expect("operation should succeed");
 
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        let outcome = recover_from_merge_state(&state_path).expect("operation should succeed");
+        // Production recovery (bn-1fcox): decide over the journal's phase
+        // (no ref landing to observe pre-COMMIT), then clear it.
+        let phase = MergeStateFile::read(&state_path)
+            .expect("operation should succeed")
+            .phase;
         assert_eq!(
-            outcome,
-            RecoveryOutcome::AbortedPreCommit {
-                from: MergePhase::Prepare
+            decide_journal_recovery(&phase, CasLanding::Unknown),
+            JournalRecovery::ClearPreCommit {
+                phase: MergePhase::Prepare
             }
         );
+        clear_merge_journal(&manifold_dir).expect("operation should succeed");
         assert!(!state_path.exists());
         assert_eq!(
             std::fs::read_to_string(ws_file).expect("operation should succeed"),

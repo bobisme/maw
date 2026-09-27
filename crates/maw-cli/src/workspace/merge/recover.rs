@@ -21,7 +21,11 @@
 //! * CAS landed → converge FORWARD: finish CLEANUP exactly as the merge
 //!   would have (merge op records, sibling auto-rebase, target checkout,
 //!   `--destroy`), then clear the journal. Refs are never re-applied or
-//!   rolled back.
+//!   rolled back. The target checkout replays dirty target edits exactly as
+//!   the live merge does (the replay depends only on the anchor, the merged
+//!   commit and the snapshot — bn-28s78). Configured `post_merge` hooks are
+//!   NOT run: they are listed with instructions instead (see
+//!   [`Finalized::skipped_post_merge_hooks`]).
 //! * CAS provably did not land → abort: clear the journal (sources were
 //!   never destroyed — destroy runs only after the CAS).
 //! * Neither provable → refuse, keep the journal, and say exactly what the
@@ -89,6 +93,14 @@ pub struct Finalized {
     /// `--destroy` sources kept because their HEAD moved since the merge
     /// froze it (new work) or their destroy failed.
     pub kept: Vec<String>,
+    /// Configured `[hooks] post_merge` commands that recovery deliberately
+    /// did NOT run (bn-28s78). The live merge runs them as its very last
+    /// step, after clearing the journal, so a journal on disk proves they
+    /// never ran for this merge. Recovery can happen much later, from a
+    /// different command (the next merge's start) and without the merge's
+    /// context, so running side-effecting commands then is not safe to do
+    /// silently; they are listed for the user to run instead.
+    pub skipped_post_merge_hooks: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -98,22 +110,12 @@ fn journal_path(root: &Path) -> std::path::PathBuf {
     )
 }
 
-/// Remove the merge journal and the COMMIT-phase sidecars.
+/// Remove the merge journal and the COMMIT-phase sidecars (the same
+/// implementation the live merge's CLEANUP ends with).
 fn clear_journal(root: &Path) -> Result<()> {
-    let path = journal_path(root);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => bail!("failed to remove {}: {e}", path.display()),
-    }
     let manifold = maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root);
-    for sidecar in ["commit-state.json", "merge-state"] {
-        let p = manifold.join(sidecar);
-        if p.exists() {
-            let _ = std::fs::remove_file(&p);
-        }
-    }
-    Ok(())
+    maw_core::merge_state::clear_merge_journal(&manifold)
+        .map_err(|e| anyhow::anyhow!("failed to clear the merge journal: {e}"))
 }
 
 fn short(oid: &str) -> &str {
@@ -403,7 +405,6 @@ fn finalize(
             root,
             obs.updates_epoch,
             text_mode,
-            &[],
             &sources,
         )?;
         true
@@ -459,6 +460,7 @@ fn finalize(
         target_checked_out,
         destroyed,
         kept,
+        skipped_post_merge_hooks: config.hooks.post_merge.clone(),
         notes,
     })
 }
@@ -503,6 +505,16 @@ fn finalized_lines(f: &Finalized, trigger: Trigger) -> Vec<String> {
     }
     for note in &f.notes {
         lines.push(format!("  {note}"));
+    }
+    if !f.skipped_post_merge_hooks.is_empty() {
+        lines.push(
+            "  Post-merge hooks were NOT run: the interrupted merge never reached them, and \
+             recovery does not replay side effects late. To run them now, from the repo root:"
+                .to_owned(),
+        );
+        for cmd in &f.skipped_post_merge_hooks {
+            lines.push(format!("    {cmd}"));
+        }
     }
     lines.push("  Merge journal cleared. To revert the merge: maw undo".to_owned());
     lines
@@ -578,6 +590,7 @@ pub fn explicit(root: &Path, fmt: OutputFormat, trigger: Trigger) -> Result<()> 
                 "target_checked_out": f.target_checked_out,
                 "destroyed": f.destroyed,
                 "kept": f.kept,
+                "post_merge_hooks_skipped": f.skipped_post_merge_hooks,
             }),
         };
         println!("{value}");

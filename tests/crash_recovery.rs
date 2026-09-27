@@ -12,9 +12,12 @@
 //! # How crashes are simulated
 //!
 //! A crash is simulated by writing a `.manifold/merge-state.json` file at a
-//! specific phase as if maw had persisted it just before the crash. The
-//! recovery function (`recover_from_merge_state`) is invoked by constructing
-//! the JSON directly and validating filesystem outcomes.
+//! specific phase as if maw had persisted it just before the crash, and the
+//! pre-COMMIT recovery (clear the journal — production:
+//! `decide_journal_recovery` + `clear_merge_journal`, driven by
+//! `maw ws merge --recover` / `--abort`) is replicated to validate
+//! filesystem outcomes. Post-CAS recovery is exercised end to end with real
+//! crashes in `crates/maw-cli/tests/merge_crash_recovery_bn_1fcox.rs`.
 //!
 //! Because this is a binary crate (no lib target), integration tests cannot
 //! import Rust types from `src/`. Instead, they drive behavior through:
@@ -190,8 +193,9 @@ fn assert_git_integrity(root: &Path) {
 /// Simulate PREPARE-phase crash recovery: delete the merge-state file if the
 /// phase is pre-commit (prepare or build).
 ///
-/// In production this is `recover_from_merge_state`. We replicate the same
-/// behavior here to test the filesystem invariants end-to-end.
+/// In production this is `decide_journal_recovery` (`ClearPreCommit`) +
+/// `clear_merge_journal`. We replicate the same behavior here to test the
+/// filesystem invariants end-to-end.
 fn simulate_recovery(root: &Path) -> &'static str {
     let path = merge_state_path(root);
 

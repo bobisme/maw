@@ -1794,7 +1794,9 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::backend::{SnapshotResult, WorkspaceStatus};
-    use crate::merge_state::{RecoveryOutcome, recover_from_merge_state};
+    use crate::merge_state::{
+        CasLanding, JournalRecovery, clear_merge_journal, decide_journal_recovery,
+    };
     use crate::model::types::WorkspaceInfo;
     use std::fs;
     use std::process::Command as StdCommand;
@@ -2271,13 +2273,18 @@ mod tests {
         let output =
             run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&state_path).expect("operation should succeed");
+        // Production recovery (bn-1fcox): decide over the journal's phase
+        // (no ref landing to observe pre-COMMIT), then clear it.
+        let phase = MergeStateFile::read(&state_path)
+            .expect("operation should succeed")
+            .phase;
         assert_eq!(
-            outcome,
-            RecoveryOutcome::AbortedPreCommit {
-                from: MergePhase::Build
+            decide_journal_recovery(&phase, CasLanding::Unknown),
+            JournalRecovery::ClearPreCommit {
+                phase: MergePhase::Build
             }
         );
+        clear_merge_journal(&manifold_dir).expect("operation should succeed");
         assert!(!state_path.exists());
 
         let head_after = run_git(dir.path(), &["rev-parse", "HEAD"]);

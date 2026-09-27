@@ -719,7 +719,8 @@ pub fn replay_snapshot(ws_path: &Path, snapshot: &SnapshotRef) -> Result<Snapsho
 /// the merge result with the stash content. This function instead uses
 /// `git merge-file` for proper 3-way merging:
 ///
-/// 1. Computes overlap between stash paths and resolved merge paths.
+/// 1. Computes the overlap: stash paths whose committed content changed
+///    between `anchor_epoch` and `epoch_after`.
 /// 2. If **no overlap**: delegates to [`replay_snapshot()`].
 /// 3. If **overlap exists**:
 ///    - Applies the stash for non-overlapping files (restores user edits).
@@ -735,7 +736,6 @@ pub fn replay_snapshot(ws_path: &Path, snapshot: &SnapshotRef) -> Result<Snapsho
 pub fn replay_snapshot_with_merge_protection(
     ws_path: &Path,
     snapshot: &SnapshotRef,
-    resolved_paths: &[PathBuf],
     anchor_epoch: &str,
     epoch_after: &str,
     source_workspace_names: &[String],
@@ -747,27 +747,28 @@ pub fn replay_snapshot_with_merge_protection(
     // Step 2: Compute overlap.
     //
     // A stash path "overlaps" the merge — and therefore needs a driver-aware
-    // 3-way merge rather than a bare `stash_apply` — when EITHER:
-    //   (a) the merge engine resolved it (`resolved_paths`), OR
-    //   (b) its committed content actually changed between the anchor epoch and
-    //       the post-merge epoch, even if no merged workspace touched it (e.g.
-    //       out-of-maw commits absorbed into trunk).
+    // 3-way merge rather than a bare `stash_apply` — when its committed
+    // content changed between the anchor epoch and the post-merge epoch,
+    // whether a merged workspace changed it or out-of-maw commits absorbed
+    // into trunk did (bn-1xmk: a dirty `merge=union` journal restored via
+    // `stash_apply` bypasses the driver and can silently drop the user's
+    // uncommitted appends).
     //
-    // Case (b) is the bn-1xmk data-loss class: a dirty trunk file such as an
-    // append-only `merge=union` journal, restored via `stash_apply`, bypasses
-    // the merge driver and can silently resolve to the committed side, dropping
-    // the user's uncommitted appends. Routing it through the driver-aware 3-way
-    // below (which honors `merge=union`) preserves both sides.
-    let resolved_set: std::collections::HashSet<&Path> = resolved_paths
-        .iter()
-        .map(std::path::PathBuf::as_path)
-        .collect();
+    // bn-28s78: this used to also include every path the merge engine
+    // resolved (`BuildPhaseOutput::resolved_paths`). That clause only ever
+    // added paths whose committed bytes the merge left UNCHANGED (all others
+    // are caught here already), where base == ours: the 3-way merge then
+    // returns the user's version for diff3/union/ours, and a spurious
+    // "conflict" for `merge=binary` or a user deletion — which
+    // `verify_trunk_replay_fidelity` then overwrote with the user's version
+    // anyway. Net effect: identical bytes on disk, plus a false conflict
+    // report. It was also unavailable to crash recovery (not journaled),
+    // so a recovered merge reported differently from an uninterrupted one.
+    // The replay now depends only on (anchor, epoch_after, snapshot), which
+    // every caller — live merge, crash recovery, promote — has.
     let overlapping: Vec<PathBuf> = stash_paths
         .iter()
-        .filter(|p| {
-            resolved_set.contains(p.as_path())
-                || committed_content_changed(ws_path, anchor_epoch, epoch_after, p)
-        })
+        .filter(|p| committed_content_changed(ws_path, anchor_epoch, epoch_after, p))
         .cloned()
         .collect();
 
@@ -1186,7 +1187,7 @@ fn read_file_at_commit(ws_path: &Path, commit: &str, path: &Path) -> Option<Vec<
 ///
 /// Used to decide whether a dirty stash path needs a driver-aware 3-way merge
 /// on replay: if the merge changed the file's committed content (even via
-/// absorbed out-of-maw commits, so it never appears in `resolved_paths`), a
+/// absorbed out-of-maw commits the merge engine never saw), a
 /// bare `stash_apply` would bypass merge drivers and can silently drop the
 /// user's uncommitted edits (bn-1xmk). On any read error we conservatively
 /// report "changed" so the safe 3-way path runs.
