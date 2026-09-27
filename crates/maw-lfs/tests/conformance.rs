@@ -177,7 +177,8 @@ fn pointer_bytes_match_git_lfs() {
             size: data.len() as u64,
             extensions: vec![],
         }
-        .write();
+        .write()
+        .expect("valid pointer");
 
         assert_eq!(
             maw_bytes,
@@ -376,7 +377,11 @@ fn store_interop_maw_to_lfs() {
         .expect("operation should succeed");
 
     // Commit a pointer blob that references it.
-    fs::write(dir.join("test.bin"), pointer.write()).expect("operation should succeed");
+    fs::write(
+        dir.join("test.bin"),
+        pointer.write().expect("valid pointer"),
+    )
+    .expect("operation should succeed");
     // Write .gitattributes THEN commit attrs+pointer in one shot — that way
     // git won't try to re-clean test.bin (it's already a pointer).
     git(&["add", ".gitattributes", "test.bin"], dir);

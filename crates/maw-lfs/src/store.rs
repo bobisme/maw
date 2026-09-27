@@ -50,20 +50,7 @@ fn io_err(path: impl Into<PathBuf>, source: io::Error) -> StoreError {
 }
 
 fn oid_hex(oid: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in oid {
-        s.push(hex_char(b >> 4));
-        s.push(hex_char(b & 0x0f));
-    }
-    s
-}
-
-const fn hex_char(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + n - 10) as char,
-        _ => unreachable!(),
-    }
+    crate::hex::encode_oid(oid)
 }
 
 impl Store {

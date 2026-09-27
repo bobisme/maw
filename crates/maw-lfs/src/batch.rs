@@ -9,7 +9,6 @@
 //! headers returned by the server.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Duration;
 
@@ -361,22 +360,13 @@ fn extract_host(url: &str) -> Result<String, BatchError> {
 }
 
 fn hex_to_oid(hex: &str) -> Result<[u8; 32], ()> {
-    if hex.len() != 64 {
-        return Err(());
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
-    }
-    Ok(out)
+    // Byte-based: a non-ASCII server response is rejected, not a panic on a
+    // char boundary. Uppercase is tolerated for server-supplied oids.
+    crate::hex::decode_oid(hex.as_bytes(), crate::hex::HexCase::AnyCase).ok_or(())
 }
 
 fn oid_hex(oid: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(64);
-    for b in oid {
-        write!(&mut out, "{b:02x}").expect("writing to a String cannot fail");
-    }
-    out
+    crate::hex::encode_oid(oid)
 }
 
 // ---- Wire types ----

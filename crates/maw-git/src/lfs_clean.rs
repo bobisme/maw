@@ -224,8 +224,12 @@ pub fn write_blob_with_attrs(
         return crate::objects_impl::write_blob(repo, data);
     }
 
-    // Already a pointer? Write as-is (don't double-wrap).
-    if maw_lfs::looks_like_pointer(data) {
+    // Already a pointer? Write as-is (don't double-wrap). Use the full
+    // parser, not the `looks_like_pointer` prefix sniff: git-lfs's clean
+    // filter only passes content through when it decodes as a pointer, and
+    // cleans everything else (bn-z9t3). A file that merely starts with the
+    // version line (docs about LFS, a truncated pointer) is real content.
+    if maw_lfs::Pointer::parse(data).is_ok() {
         return crate::objects_impl::write_blob(repo, data);
     }
 
@@ -249,7 +253,9 @@ pub fn write_blob_with_attrs(
             .map_err(|e| GitError::BackendError {
                 message: format!("lfs store insert: {e}"),
             })?;
-    let pointer_bytes = pointer.write();
+    let pointer_bytes = pointer.write().map_err(|e| GitError::BackendError {
+        message: format!("lfs pointer encode: {e}"),
+    })?;
     crate::objects_impl::write_blob(repo, &pointer_bytes)
 }
 
@@ -492,5 +498,26 @@ mod tests {
             "write_blob_with_path must not create a per-worktree lfs store at {}",
             per_worktree_lfs_dir.display()
         );
+    }
+
+    /// bn-z9t3: content that starts with the LFS version line but is not a
+    /// valid pointer must be cleaned into the LFS store (as git-lfs does),
+    /// not committed raw as if it were already a pointer. A valid pointer
+    /// is still passed through unchanged.
+    #[test]
+    fn near_pointer_content_is_cleaned_not_passed_through() {
+        let (_dir, repo) = repo_with_attrs("*.bin filter=lfs diff=lfs merge=lfs -text\n");
+
+        let near = b"version https://git-lfs.github.com/spec/v1\nThis file documents LFS.\n";
+        assert!(maw_lfs::looks_like_pointer(near), "test sanity");
+        let oid = repo.write_blob_with_path(near, "doc.bin").unwrap();
+        let stored = repo.read_blob(oid).unwrap();
+        assert_ne!(stored, near.to_vec(), "near-pointer content was stored raw");
+        let pointer = maw_lfs::Pointer::parse(&stored).expect("stored blob is a pointer");
+        assert_eq!(pointer.size, near.len() as u64);
+
+        // A real pointer passes through verbatim (no double wrap).
+        let oid2 = repo.write_blob_with_path(&stored, "again.bin").unwrap();
+        assert_eq!(repo.read_blob(oid2).unwrap(), stored);
     }
 }

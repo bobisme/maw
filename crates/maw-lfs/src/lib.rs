@@ -21,6 +21,9 @@ pub mod attrs;
 pub mod batch;
 pub mod creds;
 pub mod error;
+pub mod hex;
+#[cfg(kani)]
+mod kani_proofs;
 pub mod pointer;
 pub mod store;
 

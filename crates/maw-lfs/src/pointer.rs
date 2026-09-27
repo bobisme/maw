@@ -2,26 +2,60 @@
 //!
 //! Spec: <https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md>
 //!
-//! Canonical form:
+//! Canonical form (the only form [`Pointer::parse`] accepts and the only
+//! form [`Pointer::write`] produces):
 //!
 //! ```text
 //! version https://git-lfs.github.com/spec/v1
+//! ext-<digit>-<name> sha256:<64-char-lowercase-hex>     (0..=10 lines)
 //! oid sha256:<64-char-lowercase-hex>
 //! size <decimal-bytes>
 //! ```
 //!
-//! Rules enforced:
-//! - `version` line is always first.
-//! - All other keys are sorted alphabetically.
-//! - Each line ends with LF (0x0A), including the final line.
-//! - ASCII only; CRLF rejected.
-//! - Max pointer size: 1024 bytes (spec recommends rejecting larger inputs).
+//! # Acceptance policy
+//!
+//! A false positive (non-pointer content classified as a pointer) makes maw
+//! smudge or skip a file that git-lfs would treat as plain content. So the
+//! accept set is chosen to be:
+//!
+//! - a SUBSET of what `git lfs pointer --check` accepts (git-lfs 3.8), so
+//!   maw never classifies as a pointer something git-lfs would not; and
+//! - a SUPERSET of what git-lfs writes (`git lfs clean` / `git lfs pointer`),
+//!   so every real pointer is still recognised.
+//!
+//! Concretely:
+//! - `version` line first, with the exact `git-lfs.github.com/spec/v1` URL.
+//!   (git-lfs also accepts two legacy aliases; maw never has.)
+//! - Then extension lines, then `oid`, then `size`, then end of input. This
+//!   is the order git-lfs writes and the order the spec requires (`version`
+//!   first, the rest sorted). git-lfs rejects `size` before `oid` and any
+//!   line after `size`.
+//! - The only unknown keys git-lfs accepts are extensions: `ext-<digit>-<name>`
+//!   with a `sha256:<hex>` value and distinct priorities. Anything else
+//!   (for example `extra value`) is rejected, as git-lfs rejects it.
+//! - Extensions must be in strictly ascending priority (= key) order.
+//! - `size` is canonical decimal: digits only, no sign, no leading zero,
+//!   at most `i64::MAX` (git-lfs parses it as a signed 64-bit integer).
+//! - `oid` is exactly 64 lowercase hex digits.
+//! - Every line ends with LF, there are no empty lines, no CR, ASCII only.
+//! - At most 1024 bytes.
+//!
+//! These rules make the codec a bijection on its accept set:
+//! `parse(b) == Ok(p)` implies `p.write() == Ok(b)`, and for every `p` that
+//! [`Pointer::validate`] accepts, `parse(p.write()) == Ok(p)`.
 
 use thiserror::Error;
 
+use crate::hex::{HexCase, decode_oid, encode_oid};
+
 const VERSION_URL: &str = "https://git-lfs.github.com/spec/v1";
-const MAX_POINTER_BYTES: usize = 1024;
+/// Largest pointer blob, in bytes. git-lfs reads at most this many bytes
+/// when it decides whether a blob is a pointer.
+pub const MAX_POINTER_BYTES: usize = 1024;
 const VERSION_PREFIX: &[u8] = b"version https://git-lfs.github.com/spec/v1\n";
+const OID_VALUE_PREFIX: &str = "sha256:";
+/// git-lfs stores the size in an `int64`.
+const MAX_SIZE: u64 = i64::MAX as u64;
 
 /// A parsed LFS pointer. Represents the content of a git blob that stands in
 /// for a real binary file.
@@ -29,10 +63,10 @@ const VERSION_PREFIX: &[u8] = b"version https://git-lfs.github.com/spec/v1\n";
 pub struct Pointer {
     /// sha256 of the real file content.
     pub oid: [u8; 32],
-    /// Size of the real file, in bytes.
+    /// Size of the real file, in bytes. Must be at most `i64::MAX`.
     pub size: u64,
-    /// Unknown keys preserved for forward compatibility. Round-tripped on write.
-    /// Keys are stored lowercase; values as-parsed.
+    /// Pointer extension lines, as `(key, value)` in file order, for
+    /// example `("ext-0-foo", "sha256:<hex>")`. Preserved on write.
     pub extensions: Vec<(String, String)>,
 }
 
@@ -44,8 +78,10 @@ pub enum ParseError {
     TooLarge(usize),
     #[error("missing or invalid version line")]
     BadVersion,
-    #[error("unsupported pointer version: {found}")]
-    UnsupportedVersion { found: String },
+    /// `found` is the raw version value (ASCII; kept as bytes so the
+    /// envelope check stays cheap for Kani).
+    #[error("unsupported pointer version: {}", String::from_utf8_lossy(found))]
+    UnsupportedVersion { found: Vec<u8> },
     #[error("missing or invalid oid line")]
     BadOid,
     #[error("missing or invalid size line")]
@@ -56,92 +92,75 @@ pub enum ParseError {
     DuplicateKey(String),
     #[error("CRLF line endings not allowed")]
     CrlfLineEndings,
+    #[error("line is not of the form '<key> <value>'")]
+    MalformedLine,
+    #[error("empty line in pointer")]
+    EmptyLine,
+    #[error("unexpected key (not allowed here): {0}")]
+    UnexpectedKey(String),
+    #[error("invalid or out-of-order pointer extension: {0}")]
+    BadExtension(String),
 }
 
 impl Pointer {
     /// Parse an LFS pointer from canonical pointer bytes.
     ///
+    /// See the module docs for the exact grammar.
+    ///
     /// # Errors
-    /// Returns a [`ParseError`] if the bytes are too large, non-ASCII, use
-    /// unsupported line endings, or do not contain a valid version, oid, and
-    /// size.
+    /// Returns a [`ParseError`] if the bytes are not a canonical pointer.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        if bytes.is_empty() {
-            return Err(ParseError::Empty);
-        }
-        if bytes.len() > MAX_POINTER_BYTES {
-            return Err(ParseError::TooLarge(bytes.len()));
-        }
-        if !bytes.is_ascii() {
-            return Err(ParseError::NonAscii);
-        }
-        if bytes.contains(&b'\r') {
-            return Err(ParseError::CrlfLineEndings);
-        }
-        // Every line, including the last, must terminate in LF.
-        if !bytes.ends_with(b"\n") {
-            return Err(ParseError::BadVersion);
-        }
-
-        // SAFETY: we verified is_ascii() above.
-        let text = std::str::from_utf8(bytes).map_err(|_| ParseError::NonAscii)?;
-
-        let mut lines = text.split('\n');
-        // split on '\n' with trailing '\n' yields a trailing empty element.
-        let version_line = lines.next().ok_or(ParseError::BadVersion)?;
-
-        // Version line is exactly "version <URL>".
-        let version_value = version_line
-            .strip_prefix("version ")
-            .ok_or(ParseError::BadVersion)?;
-        if version_value != VERSION_URL {
-            return Err(ParseError::UnsupportedVersion {
-                found: version_value.to_owned(),
-            });
-        }
+        let rest = check_envelope(bytes)?;
 
         let mut oid: Option<[u8; 32]> = None;
         let mut size: Option<u64> = None;
         let mut extensions: Vec<(String, String)> = Vec::new();
-        let mut seen_keys: Vec<String> = Vec::new();
 
-        for line in lines {
+        // `rest` is empty when there are no lines after the version line.
+        let lines = (!rest.is_empty()).then(|| rest.split(|&b| b == b'\n'));
+        for line in lines.into_iter().flatten() {
             if line.is_empty() {
-                continue; // trailing empty from split
+                return Err(ParseError::EmptyLine);
             }
-            // "key value" — exactly one space separator.
-            let (key, value) = line.split_once(' ').ok_or(ParseError::BadVersion)?;
-            if seen_keys.iter().any(|k| k == key) {
-                return Err(ParseError::DuplicateKey(key.to_owned()));
+            // "key value" — split at the first space.
+            let split = line
+                .iter()
+                .position(|&b| b == b' ')
+                .ok_or(ParseError::MalformedLine)?;
+            let (key, value) = (&line[..split], &line[split + 1..]);
+
+            let duplicate = match key {
+                b"version" => true,
+                b"oid" => oid.is_some(),
+                b"size" => size.is_some(),
+                _ => extensions.iter().any(|(k, _)| k.as_bytes() == key),
+            };
+            if duplicate {
+                return Err(ParseError::DuplicateKey(ascii_string(key)));
             }
-            seen_keys.push(key.to_owned());
 
             match key {
-                "oid" => {
-                    let hex = value.strip_prefix("sha256:").ok_or(ParseError::BadOid)?;
-                    if hex.len() != 64 {
+                b"oid" => {
+                    oid = Some(parse_oid_value(value).ok_or(ParseError::BadOid)?);
+                }
+                b"size" => {
+                    if oid.is_none() {
+                        // `size` before `oid` (or no `oid` at all).
                         return Err(ParseError::BadOid);
                     }
-                    let mut bytes = [0u8; 32];
-                    for (i, byte) in bytes.iter_mut().enumerate() {
-                        let hi = hex_digit(hex.as_bytes()[i * 2]).ok_or(ParseError::BadOid)?;
-                        let lo = hex_digit(hex.as_bytes()[i * 2 + 1]).ok_or(ParseError::BadOid)?;
-                        // Reject uppercase hex (spec says lowercase).
-                        if hex.as_bytes()[i * 2].is_ascii_uppercase()
-                            || hex.as_bytes()[i * 2 + 1].is_ascii_uppercase()
-                        {
-                            return Err(ParseError::BadOid);
-                        }
-                        *byte = (hi << 4) | lo;
-                    }
-                    oid = Some(bytes);
-                }
-                "size" => {
-                    let n: u64 = value.parse().map_err(|_| ParseError::BadSize)?;
-                    size = Some(n);
+                    size = Some(parse_size(value).ok_or(ParseError::BadSize)?);
                 }
                 _ => {
-                    extensions.push((key.to_owned(), value.to_owned()));
+                    // Extensions must come before `oid`. This also rejects
+                    // any line after `size` (which requires `oid`): `oid`,
+                    // `size` and `version` there are duplicates.
+                    if oid.is_some() {
+                        return Err(ParseError::UnexpectedKey(ascii_string(key)));
+                    }
+                    let key = ascii_string(key);
+                    let value = ascii_string(value);
+                    check_extension(extensions.last().map(|(k, _)| k.as_str()), &key, &value)?;
+                    extensions.push((key, value));
                 }
             }
         }
@@ -156,69 +175,221 @@ impl Pointer {
         })
     }
 
-    /// Serialize this pointer in canonical Git LFS pointer format.
-    #[must_use]
-    pub fn write(&self) -> Vec<u8> {
-        // Version always first; all other keys sorted alphabetically.
-        // Known keys: oid, size. Unknown: extensions. Merge-sort them all.
-        let mut keyed: Vec<(String, String)> = Vec::with_capacity(2 + self.extensions.len());
-        keyed.push(("oid".to_owned(), format!("sha256:{}", self.oid_hex())));
-        keyed.push(("size".to_owned(), self.size.to_string()));
-        for (k, v) in &self.extensions {
-            keyed.push((k.clone(), v.clone()));
+    /// Check that this pointer can be written in canonical form, that is,
+    /// that [`Pointer::write`] will succeed and [`Pointer::parse`] will read
+    /// the result back as an equal pointer.
+    ///
+    /// # Errors
+    /// Returns [`ParseError::BadSize`] for a size above `i64::MAX`,
+    /// [`ParseError::BadExtension`] / [`ParseError::DuplicateKey`] for an
+    /// invalid or out-of-order extension, and [`ParseError::TooLarge`] if
+    /// the encoding would exceed [`MAX_POINTER_BYTES`].
+    pub fn validate(&self) -> Result<(), ParseError> {
+        if self.size > MAX_SIZE {
+            return Err(ParseError::BadSize);
         }
-        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut prev: Option<&str> = None;
+        for (key, value) in &self.extensions {
+            check_extension(prev, key, value)?;
+            prev = Some(key);
+        }
+        let len = self.encoded_len();
+        if len > MAX_POINTER_BYTES {
+            return Err(ParseError::TooLarge(len));
+        }
+        Ok(())
+    }
 
-        let mut out = String::with_capacity(
-            VERSION_PREFIX.len()
-                + keyed
-                    .iter()
-                    .map(|(k, v)| k.len() + v.len() + 2)
-                    .sum::<usize>(),
-        );
-        out.push_str("version ");
-        out.push_str(VERSION_URL);
-        out.push('\n');
-        for (k, v) in &keyed {
-            out.push_str(k);
-            out.push(' ');
-            out.push_str(v);
-            out.push('\n');
+    /// Serialize this pointer in canonical Git LFS pointer format.
+    ///
+    /// # Errors
+    /// Returns the [`Pointer::validate`] error if this pointer has no
+    /// canonical encoding. A pointer with no extensions and a size of at
+    /// most `i64::MAX` always encodes.
+    pub fn write(&self) -> Result<Vec<u8>, ParseError> {
+        self.validate()?;
+        let mut out = Vec::with_capacity(self.encoded_len());
+        out.extend_from_slice(VERSION_PREFIX);
+        for (k, v) in &self.extensions {
+            out.extend_from_slice(k.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(v.as_bytes());
+            out.push(b'\n');
         }
-        out.into_bytes()
+        out.extend_from_slice(b"oid ");
+        out.extend_from_slice(OID_VALUE_PREFIX.as_bytes());
+        out.extend_from_slice(encode_oid(&self.oid).as_bytes());
+        out.extend_from_slice(b"\nsize ");
+        push_decimal(&mut out, self.size);
+        out.push(b'\n');
+        Ok(out)
     }
 
     #[must_use]
     pub fn oid_hex(&self) -> String {
-        let mut s = String::with_capacity(64);
-        for byte in &self.oid {
-            s.push(hex_char(byte >> 4));
-            s.push(hex_char(byte & 0x0f));
+        encode_oid(&self.oid)
+    }
+
+    fn encoded_len(&self) -> usize {
+        let ext: usize = self
+            .extensions
+            .iter()
+            .map(|(k, v)| k.len() + v.len() + 2)
+            .sum();
+        // "oid sha256:<64>\n" + "size <digits>\n"
+        VERSION_PREFIX.len() + ext + 4 + 7 + 64 + 1 + 5 + decimal_len(self.size) + 1
+    }
+}
+
+const fn decimal_len(mut n: u64) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
+    }
+    len
+}
+
+/// Append the canonical decimal form of `n` (no sign, no leading zero).
+/// Inverse of [`parse_size`] on `0..=i64::MAX`.
+pub(crate) fn push_decimal(out: &mut Vec<u8>, mut n: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        // n % 10 < 10, so the cast cannot truncate.
+        #[allow(clippy::cast_possible_truncation)]
+        let digit = (n % 10) as u8;
+        buf[i] = b'0' + digit;
+        n /= 10;
+        if n == 0 {
+            break;
         }
-        s
     }
+    out.extend_from_slice(&buf[i..]);
 }
 
-const fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+/// The input is known to be ASCII, so this is lossless.
+fn ascii_string(bytes: &[u8]) -> String {
+    bytes.iter().copied().map(char::from).collect()
 }
 
-fn hex_char(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + n - 10) as char,
-        _ => unreachable!(),
+/// `sha256:<64 lowercase hex>`.
+fn parse_oid_value(value: &[u8]) -> Option<[u8; 32]> {
+    let hex = value.strip_prefix(OID_VALUE_PREFIX.as_bytes())?;
+    decode_oid(hex, HexCase::LowerOnly)
+}
+
+/// Checks shared by every pointer: size, ASCII, LF-only line endings, and
+/// the exact version line. On success returns the remaining lines (after the
+/// version line), without the final LF; empty if there are none.
+///
+/// `Pointer::parse` calls this first, so `parse(b).is_ok()` implies
+/// `check_envelope(b).is_ok()`, which (Kani-checked) implies
+/// `looks_like_pointer(b)`.
+pub(crate) fn check_envelope(bytes: &[u8]) -> Result<&[u8], ParseError> {
+    if bytes.is_empty() {
+        return Err(ParseError::Empty);
     }
+    if bytes.len() > MAX_POINTER_BYTES {
+        return Err(ParseError::TooLarge(bytes.len()));
+    }
+    // Plain byte loops rather than `is_ascii`/`contains`: same result, and
+    // tractable for Kani (the word-at-a-time std versions are not).
+    let mut has_cr = false;
+    for &b in bytes {
+        if b >= 0x80 {
+            return Err(ParseError::NonAscii);
+        }
+        has_cr |= b == b'\r';
+    }
+    if has_cr {
+        return Err(ParseError::CrlfLineEndings);
+    }
+    // Every line, including the last, must terminate in LF.
+    let Some(body) = bytes.strip_suffix(b"\n") else {
+        return Err(ParseError::BadVersion);
+    };
+    let (version_line, rest): (&[u8], &[u8]) = body
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or((body, &[]), |i| (&body[..i], &body[i + 1..]));
+    // Version line is exactly "version <URL>".
+    let version_value = version_line
+        .strip_prefix(b"version ")
+        .ok_or(ParseError::BadVersion)?;
+    if version_value != VERSION_URL.as_bytes() {
+        return Err(ParseError::UnsupportedVersion {
+            found: version_value.to_vec(),
+        });
+    }
+    Ok(rest)
+}
+
+/// Canonical decimal: no sign, no leading zero (except `0`), at most
+/// `i64::MAX`.
+pub(crate) fn parse_size(value: &[u8]) -> Option<u64> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if value.len() > 1 && value[0] == b'0' {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for &d in value {
+        n = n.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
+    }
+    (n <= MAX_SIZE).then_some(n)
+}
+
+/// Priority digit of an extension key `ext-<digit>-<name>`, where `<name>`
+/// is one or more of `[A-Za-z0-9_.-]` starting with `[A-Za-z0-9_]`.
+///
+/// git-lfs matches keys against `\Aext-\d{1}-\w+`; the name charset here is
+/// that, plus the `.` and `-` the spec allows in keys.
+fn extension_priority(key: &[u8]) -> Option<u8> {
+    let rest = key.strip_prefix(b"ext-")?;
+    let (&digit, rest) = rest.split_first()?;
+    if !digit.is_ascii_digit() {
+        return None;
+    }
+    let name = rest.strip_prefix(b"-")?;
+    let (&first, _) = name.split_first()?;
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    if !word(first) || !name.iter().all(|&b| word(b) || b == b'.' || b == b'-') {
+        return None;
+    }
+    Some(digit - b'0')
+}
+
+/// Validate one extension line given the previous extension key.
+fn check_extension(prev: Option<&str>, key: &str, value: &str) -> Result<(), ParseError> {
+    let bad = || ParseError::BadExtension(key.to_owned());
+    let Some(priority) = extension_priority(key.as_bytes()) else {
+        return Err(ParseError::UnexpectedKey(key.to_owned()));
+    };
+    if parse_oid_value(value.as_bytes()).is_none() {
+        return Err(bad());
+    }
+    if let Some(prev) = prev {
+        if prev == key {
+            return Err(ParseError::DuplicateKey(key.to_owned()));
+        }
+        // git-lfs rejects duplicate priorities; ascending order is the order
+        // git-lfs writes and the sorted order the spec requires.
+        let prev_priority = extension_priority(prev.as_bytes()).ok_or_else(bad)?;
+        if priority <= prev_priority {
+            return Err(bad());
+        }
+    }
+    Ok(())
 }
 
 /// Fast check: does this byte slice look like an LFS pointer?
 ///
-/// Used to short-circuit blob inspection before a full parse.
+/// Used to short-circuit blob inspection before a full parse. It is a
+/// necessary condition for [`Pointer::parse`] to succeed, not a sufficient
+/// one: `Pointer::parse(b).is_ok()` implies `looks_like_pointer(b)`.
 #[must_use]
 pub fn looks_like_pointer(bytes: &[u8]) -> bool {
     bytes.len() <= MAX_POINTER_BYTES && bytes.starts_with(VERSION_PREFIX)
@@ -232,14 +403,7 @@ mod tests {
     const SAMPLE_SIZE: u64 = 12345;
 
     fn sample_oid() -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for (i, byte) in out.iter_mut().enumerate() {
-            let hi = hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2]).expect("operation should succeed");
-            let lo =
-                hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2 + 1]).expect("operation should succeed");
-            *byte = (hi << 4) | lo;
-        }
-        out
+        decode_oid(SAMPLE_OID_HEX.as_bytes(), HexCase::LowerOnly).expect("valid hex")
     }
 
     fn sample_pointer_bytes() -> Vec<u8> {
@@ -257,23 +421,137 @@ mod tests {
         assert_eq!(p.size, SAMPLE_SIZE);
         assert!(p.extensions.is_empty());
         assert_eq!(p.oid_hex(), SAMPLE_OID_HEX);
-        assert_eq!(p.write(), bytes);
+        assert_eq!(p.write().expect("valid pointer"), bytes);
     }
 
     #[test]
-    fn parse_keys_in_any_order_after_version() {
+    fn size_before_oid_rejected() {
+        // git-lfs rejects this ("expected key oid, got size"); so does maw.
         let bytes = format!(
             "version https://git-lfs.github.com/spec/v1\nsize {SAMPLE_SIZE}\noid sha256:{SAMPLE_OID_HEX}\n"
         );
-        let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
-        assert_eq!(p.size, SAMPLE_SIZE);
-        // Write sorts alphabetically: oid before size.
-        let out = p.write();
-        let text = std::str::from_utf8(&out).expect("operation should succeed");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "version https://git-lfs.github.com/spec/v1");
-        assert!(lines[1].starts_with("oid "));
-        assert!(lines[2].starts_with("size "));
+        assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadOid));
+    }
+
+    #[test]
+    fn non_canonical_size_rejected() {
+        // git-lfs accepts some of these under --check but never writes them
+        // and --strict rejects them; maw rejects so parse/write stay a
+        // bijection.
+        for size in ["+5", "05", "-0", "-5", "5 ", " 5", "5_0", ""] {
+            let bytes = format!(
+                "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {size}\n"
+            );
+            assert_eq!(
+                Pointer::parse(bytes.as_bytes()),
+                Err(ParseError::BadSize),
+                "size {size:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_after_size_rejected() {
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize 1\nfoo bar\n"
+        );
+        assert_eq!(
+            Pointer::parse(bytes.as_bytes()),
+            Err(ParseError::UnexpectedKey("foo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn empty_line_rejected() {
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\n\noid sha256:{SAMPLE_OID_HEX}\nsize 1\n"
+        );
+        assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::EmptyLine));
+    }
+
+    #[test]
+    fn non_extension_unknown_key_rejected() {
+        // git-lfs only accepts unknown keys matching ext-<digit>-<name>.
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{SAMPLE_OID_HEX}\nsize 1\n"
+        );
+        assert_eq!(
+            Pointer::parse(bytes.as_bytes()),
+            Err(ParseError::UnexpectedKey("extra".to_owned()))
+        );
+    }
+
+    #[test]
+    fn extension_rules() {
+        let o = SAMPLE_OID_HEX;
+        let v = "version https://git-lfs.github.com/spec/v1";
+        let tail = format!("oid sha256:{o}\nsize 1\n");
+        let ok = [
+            format!("{v}\next-0-foo sha256:{o}\n{tail}"),
+            format!("{v}\next-0-Foo_x sha256:{o}\next-3-a.b-c sha256:{o}\n{tail}"),
+        ];
+        for bytes in &ok {
+            let p = Pointer::parse(bytes.as_bytes()).expect("valid extension pointer");
+            assert_eq!(p.write().expect("valid"), bytes.as_bytes());
+        }
+        let bad = [
+            // value is not an oid
+            format!("{v}\next-0-foo bar\n{tail}"),
+            // duplicate priority
+            format!("{v}\next-0-foo sha256:{o}\next-0-goo sha256:{o}\n{tail}"),
+            // descending priority
+            format!("{v}\next-1-foo sha256:{o}\next-0-goo sha256:{o}\n{tail}"),
+            // after oid
+            format!("{v}\noid sha256:{o}\next-0-foo sha256:{o}\nsize 1\n"),
+            // two-digit priority / missing name / bad first name char
+            format!("{v}\next-10-foo sha256:{o}\n{tail}"),
+            format!("{v}\next-1- sha256:{o}\n{tail}"),
+            format!("{v}\next-1-.x sha256:{o}\n{tail}"),
+        ];
+        for bytes in &bad {
+            assert!(Pointer::parse(bytes.as_bytes()).is_err(), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn write_refuses_malformed_pointers() {
+        let base = Pointer {
+            oid: sample_oid(),
+            size: 1,
+            extensions: vec![],
+        };
+        let ext = |k: &str, v: &str| Pointer {
+            extensions: vec![(k.to_owned(), v.to_owned())],
+            ..base.clone()
+        };
+        let good_val = format!("sha256:{SAMPLE_OID_HEX}");
+        for p in [
+            Pointer {
+                size: u64::MAX,
+                ..base.clone()
+            },
+            ext("oid", &good_val),
+            ext("size", &good_val),
+            ext("version", &good_val),
+            ext("ext-0-a b", &good_val),
+            ext("ext-0-a", "x\ny"),
+            ext("ext-0-a", "sha256:zz"),
+            Pointer {
+                extensions: vec![
+                    ("ext-1-a".to_owned(), good_val.clone()),
+                    ("ext-0-a".to_owned(), good_val.clone()),
+                ],
+                ..base.clone()
+            },
+            Pointer {
+                extensions: (0..10)
+                    .map(|i| (format!("ext-{i}-{}", "n".repeat(60)), good_val.clone()))
+                    .collect(),
+                ..base.clone()
+            },
+        ] {
+            assert!(p.write().is_err(), "{p:?}");
+        }
     }
 
     #[test]
@@ -378,20 +656,17 @@ mod tests {
 
     #[test]
     fn extensions_preserved_roundtrip() {
-        // Unknown keys must be preserved and sorted with known keys on write.
+        // Extension lines must be preserved and written before oid.
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
+            "version https://git-lfs.github.com/spec/v1\next-0-foo sha256:{SAMPLE_OID_HEX}\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
         );
         let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
         assert_eq!(
             p.extensions,
-            vec![("extra".to_owned(), "value-x".to_owned())]
+            vec![("ext-0-foo".to_owned(), format!("sha256:{SAMPLE_OID_HEX}"))]
         );
-        let out = p.write();
-        let expected = format!(
-            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
-        );
-        assert_eq!(out, expected.as_bytes());
+        let out = p.write().expect("valid pointer");
+        assert_eq!(out, bytes.as_bytes());
     }
 
     #[test]
@@ -430,8 +705,23 @@ mod tests {
     }
 
     #[test]
-    fn large_size_accepted() {
+    fn size_above_i64_max_rejected() {
+        // git-lfs stores size as int64 and rejects larger values.
         let big = u64::MAX;
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {big}\n"
+        );
+        assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadSize));
+        let over = MAX_SIZE + 1;
+        let bytes = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {over}\n"
+        );
+        assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadSize));
+    }
+
+    #[test]
+    fn large_size_accepted() {
+        let big = MAX_SIZE;
         let bytes = format!(
             "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {big}\n"
         );
@@ -448,18 +738,13 @@ mod interop_tests {
     fn matches_git_lfs_output() {
         // "hello world\n" is 12 bytes; sha256 matches git-lfs 3.7.1 output.
         let hex = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
-        let mut oid = [0u8; 32];
-        for (i, byte) in oid.iter_mut().enumerate() {
-            let hi = hex_digit(hex.as_bytes()[i * 2]).expect("operation should succeed");
-            let lo = hex_digit(hex.as_bytes()[i * 2 + 1]).expect("operation should succeed");
-            *byte = (hi << 4) | lo;
-        }
+        let oid = decode_oid(hex.as_bytes(), HexCase::LowerOnly).expect("valid hex");
         let p = Pointer {
             oid,
             size: 12,
             extensions: vec![],
         };
-        let out = p.write();
+        let out = p.write().expect("valid pointer");
         let expected = b"version https://git-lfs.github.com/spec/v1\noid sha256:a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447\nsize 12\n";
         assert_eq!(out, expected);
     }
