@@ -11,6 +11,7 @@ use maw_git::GitRepo as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::working_copy::DiskSide;
 use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, RewindWarning, run_build_phase};
@@ -7400,7 +7401,11 @@ pub fn update_default_workspace(
     let mut durable_recovery_ref: Option<String> = None;
 
     // Step 1: SNAPSHOT — capture dirty state if any.
-    let snapshot = match snapshot_working_copy(default_ws_path, repo_root, ws_name) {
+    // FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT (bn-3jqfk): `error` forces the
+    // snapshot-failed fallback below (pin from memory + force checkout).
+    let snapshot = match maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
+        .and_then(|()| snapshot_working_copy(default_ws_path, repo_root, ws_name))
+    {
         Ok(snap) => snap,
         Err(e) => {
             // Snapshot failed. The COMMIT already succeeded so we must not
@@ -7416,6 +7421,14 @@ pub fn update_default_workspace(
             force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
             lfs_post_checkout(default_ws_path, epoch_after);
             verify_trunk_replay_fidelity(
+                default_ws_path,
+                ws_name,
+                &pre_merge_dirty,
+                &anchor_epoch,
+                epoch_after,
+                durable_recovery_ref.as_deref(),
+            );
+            report_fallback_unreplayed(
                 default_ws_path,
                 ws_name,
                 &pre_merge_dirty,
@@ -7648,7 +7661,7 @@ fn report_replay_type_conflicts(
     let snapshot_name = recovery_ref.unwrap_or(snapshot_oid);
     eprintln!();
     eprintln!(
-        "  WARNING: {} path(s) in '{ws_name}' have a type conflict (symlink vs file, or two symlink targets).",
+        "  WARNING: {} path(s) in '{ws_name}' have a type conflict (symlink vs file, file vs directory, or two symlink targets).",
         conflicts.len()
     );
     eprintln!(
@@ -7666,6 +7679,23 @@ fn report_replay_type_conflicts(
         eprintln!("    {}", c.path);
         eprintln!("      merged ({source_label}): {}", tc.merged);
         eprintln!("      yours (uncommitted): {}", tc.local);
+        if c.conflict_type == "directory_change" {
+            // bn-3jqfk: a directory, or a file where a parent directory
+            // would go, is in the way of one side; neither `--restore-file`
+            // nor a single `rm` can swap them, so point at the user's copy.
+            eprintln!("      on disk now: the merged version");
+            match (&tc.local, recovery_ref) {
+                (EntryKind::Deleted | EntryKind::Directory, _) => {}
+                (_, Some(r)) => {
+                    eprintln!("      inspect yours: maw ws recover --ref {r} --show {quoted}");
+                }
+                (_, None) => eprintln!(
+                    "      inspect yours: git -C {} show {snapshot_oid}:{quoted}",
+                    shell_quote_path(ws_path)
+                ),
+            }
+            continue;
+        }
         match tc.kept {
             KeptSide::Merged => {
                 eprintln!("      on disk now: the merged version");
@@ -7738,13 +7768,24 @@ fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mod
 // bn-1xmk: durable trunk-snapshot + honest replay helpers
 // ---------------------------------------------------------------------------
 
-/// Capture the trunk's uncommitted content in memory (path -> bytes, or `None`
-/// for a path the user deleted). Read against the *current* HEAD, which the
-/// caller has already anchored at the workspace's base epoch, so this is the
-/// true set of user edits relative to that base. Best-effort: on any read
-/// failure the offending path is skipped rather than aborting the merge (the
-/// COMMIT has already succeeded).
-fn capture_pre_merge_dirty(ws_path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+/// One trunk path's uncommitted entry, captured in memory before the merge
+/// touches the tree: a regular file (bytes + mode), a symlink (its link
+/// text), or [`DiskSide::Absent`] for a path the user deleted (or replaced
+/// with a directory, whose files are captured as their own paths).
+///
+/// bn-3jqfk: captured with `symlink_metadata`, never through a symlink — a
+/// dirty symlink used to be recorded as its target's contents (and a dangling
+/// one as a deletion), so the fallback recovery pin and the fidelity repair
+/// replaced the user's link with a regular file.
+type PreMergeDirty = Vec<(PathBuf, DiskSide)>;
+
+/// Capture the trunk's uncommitted entries in memory (see [`PreMergeDirty`]).
+/// Read against the *current* HEAD, which the caller has already anchored at
+/// the workspace's base epoch, so this is the true set of user edits relative
+/// to that base. Best-effort: a path that cannot be read is skipped (never
+/// recorded as a deletion) rather than aborting the merge (the COMMIT has
+/// already succeeded).
+fn capture_pre_merge_dirty(ws_path: &Path) -> PreMergeDirty {
     let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
         return Vec::new();
     };
@@ -7763,13 +7804,13 @@ fn capture_pre_merge_dirty(ws_path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         {
             continue;
         }
-        let full = ws_path.join(&rel);
-        let bytes = if full.is_file() {
-            std::fs::read(&full).ok()
-        } else {
-            None
-        };
-        out.push((rel, bytes));
+        match DiskSide::capture(&ws_path.join(&rel)) {
+            Ok(entry) => out.push((rel, entry)),
+            Err(e) => tracing::warn!(
+                "bn-1xmk: could not capture uncommitted '{}' before merge: {e:#}",
+                rel.display()
+            ),
+        }
     }
     out
 }
@@ -7817,7 +7858,7 @@ fn pin_pre_merge_recovery_ref(
     repo_root: &Path,
     ws_name: &str,
     anchor_epoch: &str,
-    pre_merge_dirty: &[(PathBuf, Option<Vec<u8>>)],
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
 ) -> Option<String> {
     if pre_merge_dirty.is_empty() {
         return None;
@@ -7829,22 +7870,43 @@ fn pin_pre_merge_recovery_ref(
         .and_then(|c| repo.read_commit(c).ok())
         .map(|c| c.tree_oid)?;
 
+    // Removals first: a file the user replaced with a directory (or a
+    // directory replaced with a file) must be out of the way before the new
+    // entries go in. (bn-3jqfk)
+    let mut removals: Vec<maw_git::TreeEdit> = Vec::new();
     let mut edits: Vec<maw_git::TreeEdit> = Vec::new();
-    for (path, bytes) in pre_merge_dirty {
+    for (path, entry) in pre_merge_dirty {
         let path_str = path.to_string_lossy().replace('\\', "/");
-        match bytes {
-            Some(bytes) => {
-                if let Ok(blob) = repo.write_blob(bytes) {
-                    edits.push(maw_git::TreeEdit::Upsert {
-                        path: path_str,
-                        mode: maw_git::EntryMode::Blob,
-                        oid: blob,
-                    });
-                }
+        // bn-3jqfk: a symlink is pinned as a symlink (mode 120000, blob = the
+        // link text), a file keeps its executable bit.
+        let (mode, blob) = match entry {
+            DiskSide::Absent => {
+                removals.push(maw_git::TreeEdit::Remove { path: path_str });
+                continue;
             }
-            None => edits.push(maw_git::TreeEdit::Remove { path: path_str }),
+            DiskSide::Symlink(target) => (
+                maw_git::EntryMode::Link,
+                repo.write_blob(&symlink_target_bytes(target)),
+            ),
+            DiskSide::File { bytes, mode } => (
+                if mode & 0o111 == 0 {
+                    maw_git::EntryMode::Blob
+                } else {
+                    maw_git::EntryMode::BlobExecutable
+                },
+                repo.write_blob(bytes),
+            ),
+        };
+        if let Ok(oid) = blob {
+            edits.push(maw_git::TreeEdit::Upsert {
+                path: path_str,
+                mode,
+                oid,
+            });
         }
     }
+    removals.append(&mut edits);
+    let edits = removals;
     if edits.is_empty() {
         return None;
     }
@@ -7854,6 +7916,28 @@ fn pin_pre_merge_recovery_ref(
         .create_commit(tree, &[anchor_oid], PRE_MERGE_SNAPSHOT_MESSAGE, None)
         .ok()?;
     pin_recovery_ref_from_oid(repo_root, ws_name, &commit.to_string())
+}
+
+/// A symlink's target as the raw bytes git stores for it.
+#[cfg(unix)]
+fn symlink_target_bytes(target: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    target.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn symlink_target_bytes(target: &Path) -> Vec<u8> {
+    target.to_string_lossy().replace('\\', "/").into_bytes()
+}
+
+/// Describe a captured pre-merge entry for a report (bn-3jqfk).
+fn describe_pre_merge_entry(entry: &DiskSide) -> String {
+    match entry {
+        DiskSide::Absent => "deleted".to_owned(),
+        DiskSide::Symlink(target) => format!("symlink -> {}", target.display()),
+        DiskSide::File { mode, .. } if mode & 0o111 != 0 => "executable regular file".to_owned(),
+        DiskSide::File { .. } => "regular file".to_owned(),
+    }
 }
 
 /// Filter-aware equality check for [`verify_trunk_replay_fidelity`] (bn-1ero).
@@ -7904,6 +7988,24 @@ fn trunk_replay_content_matches(
     }
 }
 
+/// Whether the merge changed `path` itself, so the dirty replay (not the
+/// fidelity repair) owns it: its committed bytes changed, it turned from a
+/// symlink into a file or back (bn-2ygs0), or the merged tree has a directory
+/// there or a file where one of its parent directories would go (bn-3jqfk).
+fn merge_changed_path(
+    repo: &maw_git::GixRepo,
+    anchor_epoch: &str,
+    epoch_after: &str,
+    path: &Path,
+) -> bool {
+    let committed_anchor = repo.read_file_at_commit(anchor_epoch, path).ok().flatten();
+    let committed_after = repo.read_file_at_commit(epoch_after, path).ok().flatten();
+    committed_anchor != committed_after
+        || super::working_copy::is_symlink_at(repo, anchor_epoch, path)
+            != super::working_copy::is_symlink_at(repo, epoch_after, path)
+        || super::working_copy::is_directory_blocked_at(repo, epoch_after, path) != Some(false)
+}
+
 /// Post-replay fidelity check: every pre-merge-dirty trunk path whose committed
 /// content the merge did NOT change must end up with exactly the user's
 /// uncommitted bytes on disk. Any raw-byte mismatch is repaired from the
@@ -7916,7 +8018,7 @@ fn trunk_replay_content_matches(
 fn verify_trunk_replay_fidelity(
     ws_path: &Path,
     ws_name: &str,
-    pre_merge_dirty: &[(PathBuf, Option<Vec<u8>>)],
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
     anchor_epoch: &str,
     epoch_after: &str,
     recovery_ref: Option<&str>,
@@ -7924,42 +8026,41 @@ fn verify_trunk_replay_fidelity(
     let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
         return;
     };
-    for (path, pre_bytes) in pre_merge_dirty {
+    for (path, pre_entry) in pre_merge_dirty {
         // Only files the merge left committed-unchanged are unambiguously owned
         // by the user's uncommitted edits. If the merge changed the committed
         // content, the driver-aware 3-way replay owns the outcome.
-        let committed_anchor = repo.read_file_at_commit(anchor_epoch, path).ok().flatten();
-        let committed_after = repo.read_file_at_commit(epoch_after, path).ok().flatten();
-        if committed_anchor != committed_after {
-            continue;
-        }
-        // bn-2ygs0: equal bytes but a symlink <-> file type change is still a
-        // merge change (a symlink's blob is its target text); the replay owns
-        // that outcome.
-        if super::working_copy::is_symlink_at(&repo, anchor_epoch, path)
-            != super::working_copy::is_symlink_at(&repo, epoch_after, path)
-        {
+        if merge_changed_path(&repo, anchor_epoch, epoch_after, path) {
             continue;
         }
 
         let full = ws_path.join(path);
-        // bn-2ygs0: the byte comparison and repair below follow symlinks, so
-        // they would compare (and could overwrite) the link's TARGET. A
-        // symlink on disk came from the snapshot replay verbatim.
-        if full
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-        {
-            continue;
-        }
-        let final_bytes = if full.is_file() {
-            std::fs::read(&full).ok()
-        } else {
-            None
+        // bn-3jqfk: compare whole entries without following a symlink (a
+        // symlink is its link text, not its target's bytes).
+        let final_entry = match DiskSide::capture(&full) {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(
+                    "bn-1xmk: could not read '{}' after replay: {e:#}",
+                    path.display()
+                );
+                continue;
+            }
         };
-        if pre_bytes.as_deref() == final_bytes.as_deref() {
+        if *pre_entry == final_entry {
             continue;
         }
+        let (pre_bytes, final_bytes) = match (pre_entry, &final_entry) {
+            (DiskSide::File { bytes: a, .. }, DiskSide::File { bytes: b, .. }) => {
+                if a == b {
+                    // Only the mode differs; the replay's exec-bit
+                    // reconciliation (bn-3fcbu) owns that.
+                    continue;
+                }
+                (Some(a.as_slice()), Some(b.as_slice()))
+            }
+            _ => (None, None),
+        };
 
         // bn-1ero: the raw bytes differ, but for an LFS-tracked path that can
         // simply be a representation mismatch — replay may have written the
@@ -7969,9 +8070,9 @@ fn verify_trunk_replay_fidelity(
         // on disk. `trunk_replay_content_matches` normalizes both sides
         // through the same clean filter `write_blob_with_path` uses and
         // compares the resulting OIDs, so it reports true only when the
-        // underlying content truly is the same.
-        let logically_equal =
-            trunk_replay_content_matches(&repo, path, pre_bytes.as_deref(), final_bytes.as_deref());
+        // underlying content truly is the same. Only file-vs-file can match.
+        let logically_equal = pre_bytes.is_some()
+            && trunk_replay_content_matches(&repo, path, pre_bytes, final_bytes);
 
         // Repair from the authoritative in-memory content either way: even a
         // "logically equal" mismatch means the worktree ended up holding the
@@ -7979,15 +8080,19 @@ fn verify_trunk_replay_fidelity(
         // had), and every other maw materialization path promises real
         // content on disk for a resolvable LFS object. Only the ALARM below
         // is conditional on this being a genuine, unexplained mismatch.
-        let repaired = pre_bytes.as_ref().map_or_else(
-            || !full.is_file() || std::fs::remove_file(&full).is_ok(),
-            |bytes| {
-                if let Some(parent) = full.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+        // A file-over-file repair keeps the on-disk mode; anything else
+        // (a symlink, a deletion, a type change) replaces the entry without
+        // following a link (bn-3jqfk).
+        let repaired = match (pre_entry, &final_entry) {
+            (DiskSide::File { bytes, .. }, DiskSide::File { .. }) => {
                 std::fs::write(&full, bytes).is_ok()
-            },
-        );
+            }
+            _ => super::working_copy::write_worktree_entry(ws_path, path, pre_entry)
+                .inspect_err(|e| {
+                    tracing::warn!("bn-1xmk: repair of '{}' failed: {e:#}", path.display());
+                })
+                .is_ok(),
+        };
 
         if logically_equal {
             // Same underlying content, just needed to be re-materialized in
@@ -8024,6 +8129,70 @@ fn verify_trunk_replay_fidelity(
             }
             None => {
                 eprintln!("  Inspect recovery snapshots: maw ws recover {ws_name}");
+            }
+        }
+    }
+}
+
+/// After the snapshot-failed fallback (force checkout + repair from memory):
+/// name every uncommitted trunk path the merge itself changed, whose user
+/// version therefore could not be put back, with the command that restores
+/// it from the in-memory recovery pin. Before bn-3jqfk the fallback said
+/// nothing about these paths — the user's version was only in the pin.
+fn report_fallback_unreplayed(
+    ws_path: &Path,
+    ws_name: &str,
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
+    anchor_epoch: &str,
+    epoch_after: &str,
+    recovery_ref: Option<&str>,
+) {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return;
+    };
+    let unreplayed: Vec<&(PathBuf, DiskSide)> = pre_merge_dirty
+        .iter()
+        .filter(|(path, entry)| {
+            merge_changed_path(&repo, anchor_epoch, epoch_after, path)
+                && DiskSide::capture(&ws_path.join(path)).ok().as_ref() != Some(entry)
+        })
+        .collect();
+    if unreplayed.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "  WARNING: {} uncommitted path(s) in '{ws_name}' were also changed by the merge and could not be replayed (the snapshot failed).",
+        unreplayed.len()
+    );
+    eprintln!("  The merged version is on disk. Your version is in the recovery pin:");
+    for (path, entry) in unreplayed {
+        let quoted = shell_quote_path(path);
+        let blocked =
+            super::working_copy::is_directory_blocked_at(&repo, epoch_after, path) != Some(false);
+        eprintln!("    {}", path.display());
+        eprintln!(
+            "      yours (uncommitted): {}",
+            describe_pre_merge_entry(entry)
+        );
+        match (entry, recovery_ref) {
+            (DiskSide::Absent, _) if !blocked => {
+                eprintln!("      restore yours: maw exec {ws_name} -- rm -f -- {quoted}");
+            }
+            (DiskSide::Absent, _) => {}
+            (_, Some(r)) if blocked => {
+                // A directory (or a file where a parent directory would go)
+                // is in the way; `--restore-file` cannot replace it.
+                eprintln!("      inspect yours: maw ws recover --ref {r} --show {quoted}");
+            }
+            (_, Some(r)) if ws_name == "default" => {
+                eprintln!("      restore yours: maw ws recover --ref {r} --restore-file {quoted}");
+            }
+            (_, Some(r)) => {
+                eprintln!("      inspect yours: maw ws recover --ref {r} --show {quoted}");
+            }
+            (_, None) => {
+                eprintln!("      the recovery pin FAILED; your version was not preserved by maw");
             }
         }
     }

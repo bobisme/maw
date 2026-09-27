@@ -167,6 +167,13 @@ Use uppercase IDs with stable namespace prefixes:
 
 - `FP_DESTROY_BEFORE_DELETE`
 
+### Default-workspace update (dirty-trunk replay)
+
+- `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` (implemented in `crates/maw-cli/src/workspace/merge.rs`,
+  `update_default_workspace`): `error` makes the dirty-trunk snapshot fail so the merge
+  takes the fallback (pin the in-memory capture, force checkout, repair from memory).
+  Used by `crates/maw-cli/tests/pre_merge_capture_symlink_bn_3jqfk.rs` (bn-3jqfk).
+
 ### RECOVER/search paths
 
 - `FP_RECOVER_BEFORE_RESTORE` (implemented in recover.rs)

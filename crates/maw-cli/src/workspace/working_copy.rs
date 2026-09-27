@@ -148,6 +148,8 @@ pub enum EntryKind {
         /// The link target (lossy UTF-8).
         target: String,
     },
+    /// A directory (bn-3jqfk: a file <-> directory change).
+    Directory,
 }
 
 impl std::fmt::Display for EntryKind {
@@ -157,6 +159,7 @@ impl std::fmt::Display for EntryKind {
             Self::File { executable: false } => f.write_str("regular file"),
             Self::File { executable: true } => f.write_str("executable regular file"),
             Self::Symlink { target } => write!(f, "symlink -> {target}"),
+            Self::Directory => f.write_str("directory"),
         }
     }
 }
@@ -836,8 +839,19 @@ pub fn replay_snapshot_with_merge_protection(
     // so a recovered merge reported differently from an uninterrupted one.
     // The replay now depends only on (anchor, epoch_after, snapshot), which
     // every caller — live merge, crash recovery, promote — has.
+    //
+    // bn-3jqfk: file <-> directory collisions are split out first; they are
+    // reported as conflicts and replayed from `apply_snapshot`, which leaves
+    // them out.
+    let (directory_conflicts, apply_snapshot) =
+        split_directory_collisions(ws_path, snapshot, epoch_after, &stash_paths)?;
     let overlapping: Vec<PathBuf> = stash_paths
         .iter()
+        .filter(|p| {
+            !directory_conflicts
+                .iter()
+                .any(|c| Path::new(&c.path) == p.as_path())
+        })
         .filter(|p| committed_content_changed(ws_path, anchor_epoch, epoch_after, p))
         .cloned()
         .collect();
@@ -846,9 +860,9 @@ pub fn replay_snapshot_with_merge_protection(
         // No overlap — safe to use normal replay. The executable bits are
         // reconciled against the merged commit, not whatever HEAD is (the
         // force-checkout fallback may have left HEAD elsewhere). (bn-3fcbu)
-        let result = replay_snapshot_raw(ws_path, snapshot);
-        reconcile_replayed_exec_bits(ws_path, snapshot, epoch_after);
-        return result;
+        let result = replay_snapshot_raw(ws_path, &apply_snapshot);
+        reconcile_replayed_exec_bits(ws_path, &apply_snapshot, epoch_after);
+        return with_conflicts(result, directory_conflicts);
     }
 
     tracing::info!(
@@ -929,10 +943,10 @@ pub fn replay_snapshot_with_merge_protection(
     // version — we fix those up in step 5 with a proper 3-way merge.
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let oid: maw_git::GitOid = snapshot
+    let oid: maw_git::GitOid = apply_snapshot
         .oid
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
+        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", apply_snapshot.oid))?;
     // If stash_apply fails, user edits to non-overlapping files are NOT
     // restored — they aren't tracked in `merge_versions` (built only from
     // `overlapping`), so step 5's 3-way merge cannot rescue them. Treat this
@@ -956,6 +970,7 @@ pub fn replay_snapshot_with_merge_protection(
     // pinned snapshot, and the conflict record names both so the caller can
     // print how to restore the user's side.
     let mut conflicts = settle_symlink_overlaps(ws_path, &typed_paths)?;
+    conflicts.extend(directory_conflicts);
 
     // Step 5: For each overlapping file, run a proper 3-way merge using
     // `git merge-file`. This cleanly merges non-overlapping edits and only
@@ -1126,7 +1141,7 @@ pub fn replay_snapshot_with_merge_protection(
     // `chmod +x` would be silently reverted in the worktree (and by the next
     // trunk commit). Reconcile the executable bits against the merged
     // commit. (bn-3fcbu)
-    reconcile_replayed_exec_bits(ws_path, snapshot, epoch_after);
+    reconcile_replayed_exec_bits(ws_path, &apply_snapshot, epoch_after);
 
     // Step 6: Also detect any conflicts from non-overlapping files (normal
     // stash apply conflicts).
@@ -1184,15 +1199,18 @@ impl TreeSide {
 }
 
 /// A worktree entry captured from disk (never through a symlink).
+///
+/// Shared with the merge's in-memory pre-merge capture (bn-3jqfk), which must
+/// record a symlink as a symlink, never as its target's contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum DiskSide {
+pub(super) enum DiskSide {
     Absent,
     Symlink(PathBuf),
     File { bytes: Vec<u8>, mode: u32 },
 }
 
 impl DiskSide {
-    fn capture(full: &Path) -> Result<Self> {
+    pub(super) fn capture(full: &Path) -> Result<Self> {
         let meta = match full.symlink_metadata() {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
@@ -1393,7 +1411,7 @@ fn settle_symlink_overlaps(
 /// symlink: parent components inside the workspace must be real directories
 /// (missing ones are created), and an existing final entry is unlinked, not
 /// written through.
-fn write_worktree_entry(ws_path: &Path, rel: &Path, entry: &DiskSide) -> Result<()> {
+pub(super) fn write_worktree_entry(ws_path: &Path, rel: &Path, entry: &DiskSide) -> Result<()> {
     let components: Vec<_> = rel.components().collect();
     let Some((_, parents)) = components.split_last() else {
         bail!("refusing to write an empty path in {}", ws_path.display());
@@ -1472,6 +1490,244 @@ fn set_file_mode(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn set_file_mode(_file: &std::fs::File, _mode: u32) -> std::io::Result<()> {
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bn-3jqfk: file <-> directory changes in the dirty-trunk replay
+// ---------------------------------------------------------------------------
+
+/// How a tree holds one path, for the file/directory collision check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathShape {
+    /// Neither the path nor any ancestor that would block it exists.
+    Absent,
+    /// A proper ancestor of the path is a file, symlink or gitlink, so the
+    /// path cannot exist.
+    Blocked,
+    /// The path is a directory.
+    Tree,
+    /// The path is a file, symlink or gitlink.
+    Entry,
+}
+
+/// The shape of `rel` (slash-separated) in the tree of `commit`.
+fn tree_path_shape(
+    repo: &maw_git::GixRepo,
+    commit: maw_git::GitOid,
+    rel: &str,
+) -> Result<PathShape> {
+    let lookup = |path: &str| {
+        repo.find_entry_at_path(commit, path)
+            .map_err(|e| anyhow::anyhow!("read '{path}' at {commit}: {e}"))
+    };
+    let components: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+    for end in 1..components.len() {
+        match lookup(&components[..end].join("/"))? {
+            None => return Ok(PathShape::Absent),
+            Some((maw_git::EntryMode::Tree, _)) => {}
+            Some(_) => return Ok(PathShape::Blocked),
+        }
+    }
+    Ok(match lookup(rel)? {
+        None => PathShape::Absent,
+        Some((maw_git::EntryMode::Tree, _)) => PathShape::Tree,
+        Some(_) => PathShape::Entry,
+    })
+}
+
+/// The [`EntryKind`] of `rel` in `commit`, for a conflict report.
+fn tree_path_kind(
+    repo: &maw_git::GixRepo,
+    commit: maw_git::GitOid,
+    rel: &str,
+    shape: PathShape,
+) -> Result<EntryKind> {
+    Ok(match shape {
+        PathShape::Absent | PathShape::Blocked => EntryKind::Deleted,
+        PathShape::Tree => EntryKind::Directory,
+        PathShape::Entry => TreeSide::kind(read_tree_side(repo, commit, rel)?.as_ref()),
+    })
+}
+
+/// Whether `path` in `rev` is a directory or sits under a file — i.e. a
+/// regular file or symlink the user had at `path` cannot be put back there.
+/// `None` if the tree cannot be read. (bn-3jqfk)
+pub fn is_directory_blocked_at(repo: &maw_git::GixRepo, rev: &str, path: &Path) -> Option<bool> {
+    let commit = repo.rev_parse(rev).ok()?;
+    let rel = path.to_str()?.replace('\\', "/");
+    let shape = tree_path_shape(repo, commit, &rel).ok()?;
+    Some(matches!(shape, PathShape::Tree | PathShape::Blocked))
+}
+
+/// Split the file <-> directory collisions out of a dirty-trunk replay.
+///
+/// A path the user has as a file or symlink collides with the merged tree
+/// when the merged tree has a directory there, or a file where one of its
+/// parent directories would go. `stash_apply` cannot write either (it fails
+/// with "Is a directory" / "File exists" and the whole replay used to abort),
+/// and no merge of the two exists. Every changed snapshot path at, under or
+/// above a colliding path is part of the same change (e.g. the deletion of
+/// file `p` that made room for the user's `p/x`), so all of them are left
+/// out of the replay: the merged side stays on disk, the user's side stays
+/// in the pinned snapshot, and each one is reported as a `directory_change`
+/// conflict naming both sides.
+///
+/// Returns the conflicts, and the snapshot to apply instead: `snapshot`
+/// itself when nothing collides, else a commit on the snapshot's base whose
+/// tree has those paths put back to the base. The original snapshot is not
+/// changed; it remains the recovery source for the user's side.
+fn split_directory_collisions(
+    ws_path: &Path,
+    snapshot: &SnapshotRef,
+    epoch_after: &str,
+    stash_paths: &[PathBuf],
+) -> Result<(Vec<WorkingCopyConflict>, SnapshotRef)> {
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let resolve = |spec: &str| {
+        repo.rev_parse(spec)
+            .map_err(|e| anyhow::anyhow!("resolve '{spec}': {e}"))
+    };
+    let ours_oid = resolve(epoch_after)?;
+    let theirs_oid = resolve(&snapshot.oid)?;
+
+    let rel_of = |path: &Path| path.to_str().map(|p| p.replace('\\', "/"));
+    let mut colliding: Vec<&PathBuf> = Vec::new();
+    for path in stash_paths {
+        let Some(rel) = rel_of(path) else {
+            continue;
+        };
+        if tree_path_shape(&repo, theirs_oid, &rel)? == PathShape::Entry
+            && matches!(
+                tree_path_shape(&repo, ours_oid, &rel)?,
+                PathShape::Tree | PathShape::Blocked
+            )
+        {
+            colliding.push(path);
+        }
+    }
+    if colliding.is_empty() {
+        return Ok((Vec::new(), snapshot.clone()));
+    }
+
+    let dropped: Vec<&PathBuf> = stash_paths
+        .iter()
+        .filter(|p| {
+            colliding
+                .iter()
+                .any(|c| p.starts_with(c.as_path()) || c.starts_with(p.as_path()))
+        })
+        .collect();
+
+    let mut conflicts = Vec::new();
+    for path in &dropped {
+        let Some(rel) = rel_of(path) else {
+            continue;
+        };
+        let merged = tree_path_kind(
+            &repo,
+            ours_oid,
+            &rel,
+            tree_path_shape(&repo, ours_oid, &rel)?,
+        )?;
+        let local = tree_path_kind(
+            &repo,
+            theirs_oid,
+            &rel,
+            tree_path_shape(&repo, theirs_oid, &rel)?,
+        )?;
+        tracing::info!(
+            path = %path.display(),
+            %merged,
+            %local,
+            "dirty replay: file/directory conflict"
+        );
+        conflicts.push(WorkingCopyConflict {
+            path: path.display().to_string(),
+            conflict_type: "directory_change".to_owned(),
+            type_conflict: Some(TypeConflict {
+                merged,
+                local,
+                kept: KeptSide::Merged,
+            }),
+        });
+    }
+
+    let filtered = snapshot_without_paths(&repo, snapshot, theirs_oid, &dropped)?;
+    Ok((conflicts, filtered))
+}
+
+/// `snapshot` minus `dropped`: a commit on the snapshot's base whose tree puts
+/// the top-most dropped path of each group back to the base (a whole subtree
+/// if the base has a directory there). (bn-3jqfk)
+fn snapshot_without_paths(
+    repo: &maw_git::GixRepo,
+    snapshot: &SnapshotRef,
+    theirs_oid: maw_git::GitOid,
+    dropped: &[&PathBuf],
+) -> Result<SnapshotRef> {
+    let stash = repo
+        .read_commit(theirs_oid)
+        .map_err(|e| anyhow::anyhow!("read snapshot commit: {e}"))?;
+    let base_oid = *stash
+        .parents
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("snapshot {} has no parent", snapshot.oid))?;
+    let mut edits = Vec::new();
+    for path in dropped {
+        if dropped
+            .iter()
+            .any(|other| other != path && path.starts_with(other.as_path()))
+        {
+            continue;
+        }
+        let Some(rel) = path.to_str().map(|p| p.replace('\\', "/")) else {
+            continue;
+        };
+        match repo
+            .find_entry_at_path(base_oid, &rel)
+            .map_err(|e| anyhow::anyhow!("read '{rel}' at {base_oid}: {e}"))?
+        {
+            Some((mode, oid)) => edits.push(maw_git::TreeEdit::Upsert {
+                path: rel,
+                mode,
+                oid,
+            }),
+            None => edits.push(maw_git::TreeEdit::Remove { path: rel }),
+        }
+    }
+    let tree = repo
+        .edit_tree(stash.tree_oid, &edits)
+        .map_err(|e| anyhow::anyhow!("build replay tree without directory conflicts: {e}"))?;
+    let filtered = repo
+        .create_commit(
+            tree,
+            &[base_oid],
+            "bn-3jqfk: dirty replay without file/directory conflicts",
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("commit replay tree without directory conflicts: {e}"))?;
+    Ok(SnapshotRef {
+        oid: filtered.to_string(),
+        ref_name: snapshot.ref_name.clone(),
+    })
+}
+
+/// Add `extra` conflicts to a replay result.
+fn with_conflicts(
+    result: Result<SnapshotReplayResult>,
+    extra: Vec<WorkingCopyConflict>,
+) -> Result<SnapshotReplayResult> {
+    if extra.is_empty() {
+        return result;
+    }
+    match result? {
+        SnapshotReplayResult::Clean => Ok(SnapshotReplayResult::Conflicts(extra)),
+        SnapshotReplayResult::Conflicts(mut conflicts) => {
+            conflicts.extend(extra);
+            Ok(SnapshotReplayResult::Conflicts(conflicts))
+        }
+    }
 }
 
 /// Reconcile the executable bit of every file a snapshot replay wrote.
