@@ -545,6 +545,43 @@ counter resets.
 > regression seed first — i.e. the same instrument the cron jobs use.
 > It contributes 64 032 op-steps toward the 1e8 / 1e9 totals.
 
+### 8.1 Local campaign on harness `6e5006f6` (pre.6): ABANDONED, not evidence
+
+The local systemd campaign (`scripts/sg1-soak/`, state
+`~/.local/state/maw-sg1-soak`, harness pinned 2026-06-18) reached
+95 999 616 op-steps and then halted on 2026-07-06. It does **not** count
+toward §7.1, for three reasons found on 2026-09-27:
+
+1. **The two halts were infrastructure, not verdicts.** Both logs are
+   `Disk quota exceeded` on `/tmp` (a per-user-quota tmpfs): one in
+   `git init`, one in `git hash-object`. `slot.sh` counted every non-zero
+   exit as an Oracle violation (fixed in bn-30v6e: infra exits 75 and is
+   retried, and `TMPDIR` is now `/var/tmp`).
+2. **The driver failed open (bn-25pac).** `check_oracles` returned Clean
+   when `capture_state` failed, ignored Oracle A tooling errors, and
+   skipped workspaces whose state ref could not be read. A seed could be
+   counted clean without being judged.
+3. **Destroy never ran in the in-proc driver (bn-25pac).** Its recovery
+   ref name was `dst-<secs> +0000`; git rejects the space, `do_destroy`
+   returned before removing anything, and the error was ignored. So the
+   campaign never exercised destroy, merge-with-destroy cleanup, recover
+   or the gc recovery drain.
+
+The state directory is kept as-is as an archive. Its op-steps are not
+carried forward (stop condition 3: the harness surface changed).
+
+### 8.2 Local campaign on harness `e526f7d1`: running
+
+Started 2026-09-27 22:06 UTC on trunk `e526f7d1` (v1.0.0-pre.16 plus the
+bn-1ijl, bn-hcbc8, bn-30v6e, bn-1fcox, bn-28s78, bn-qi5br, bn-2eszz and
+bn-25pac fixes). State `~/.local/state/maw-sg1-soak-pre16`, selected by the
+systemd drop-in `sg1-soak@.service.d/state.conf` (`SG1_SOAK_STATE`).
+`SLOT_SEEDS=500`, `STEPS=64`, `PARALLEL=2`. The driver now fails closed
+(`HarnessError`), runs a vacuity guard per seed, and records
+`oracle_a_checks`, `witnesses` and `harness_errors` in each ledger row.
+Check progress with
+`SG1_SOAK_STATE=~/.local/state/maw-sg1-soak-pre16 scripts/sg1-soak/status.sh`.
+
 ---
 
 ## 9. Out of scope (deliberately deferred)
