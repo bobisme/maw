@@ -296,6 +296,177 @@ fn clean_filter_equivalence() {
     }
 }
 
+/// `git-lfs clean` with `data` on stdin; returns what git-lfs hands to git.
+fn git_lfs_clean_stdin(dir: &Path, name: &str, data: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut child = Command::new("git-lfs")
+        .args(["clean", name])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn git-lfs clean");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(data)
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("git-lfs clean");
+    assert!(
+        out.status.success(),
+        "git-lfs clean: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// bn-ggo5: maw's clean must pass pointer-shaped content through verbatim
+/// exactly when git-lfs does, and clean it exactly when git-lfs does.
+///
+/// git-lfs passes content through iff its lenient `DecodeFrom` accepts it
+/// (whitespace-trimmed, blank lines and trailing CRs ignored, legacy
+/// `hawser` / `git-media` version URLs, `size 012`, extensions after the
+/// oid line). bn-z9t3 replaced maw's prefix sniff with the STRICT canonical
+/// parser, so a non-canonical pointer that git-lfs keeps as-is was wrapped
+/// into a new LFS object by maw — a pointer to a pointer, and the real
+/// object reference silently disappears from the committed tree.
+const PTR_OID: &str = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
+const PTR_OID2: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+/// Pointer-shaped inputs for [`pointer_shaped_clean_passthrough_matches_git_lfs`].
+fn pointer_shaped_cases() -> Vec<(&'static str, String)> {
+    let v = "version https://git-lfs.github.com/spec/v1";
+    vec![
+        ("canonical", format!("{v}\noid sha256:{PTR_OID}\nsize 12\n")),
+        (
+            "no_final_newline",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 12"),
+        ),
+        (
+            "extra_blank_line",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 12\n\n"),
+        ),
+        (
+            "leading_blank_line",
+            format!("\n{v}\noid sha256:{PTR_OID}\nsize 12\n"),
+        ),
+        (
+            "interior_blank_line",
+            format!("{v}\n\noid sha256:{PTR_OID}\n\nsize 12\n"),
+        ),
+        (
+            "crlf",
+            format!("{v}\r\noid sha256:{PTR_OID}\r\nsize 12\r\n"),
+        ),
+        (
+            "hawser",
+            format!("version https://hawser.github.com/spec/v1\noid sha256:{PTR_OID}\nsize 12\n"),
+        ),
+        (
+            "git_media",
+            format!("version http://git-media.io/v/2\noid sha256:{PTR_OID}\nsize 12\n"),
+        ),
+        (
+            "size_leading_zero",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 012\n"),
+        ),
+        (
+            "size_plus",
+            format!("{v}\noid sha256:{PTR_OID}\nsize +12\n"),
+        ),
+        (
+            "size_trailing_space",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 12 \n"),
+        ),
+        (
+            "ext_before_oid",
+            format!("{v}\next-0-foo sha256:{PTR_OID2}\noid sha256:{PTR_OID}\nsize 12\n"),
+        ),
+        (
+            "ext_after_oid",
+            format!("{v}\noid sha256:{PTR_OID}\next-0-foo sha256:{PTR_OID2}\nsize 12\n"),
+        ),
+        (
+            "ext_dup_priority",
+            format!(
+                "{v}\next-0-a sha256:{PTR_OID2}\next-0-b sha256:{PTR_OID2}\noid sha256:{PTR_OID}\nsize 12\n"
+            ),
+        ),
+        // Content git-lfs cleans (stores as a new object):
+        (
+            "upper_hex",
+            format!("{v}\noid sha256:{}\nsize 12\n", PTR_OID.to_uppercase()),
+        ),
+        (
+            "size_first",
+            format!("{v}\nsize 12\noid sha256:{PTR_OID}\n"),
+        ),
+        (
+            "trailing_unknown_key",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 12\nfoo bar\n"),
+        ),
+        (
+            "oid_too_long",
+            format!("{v}\noid sha256:{PTR_OID}0\nsize 12\n"),
+        ),
+        (
+            "negative_size",
+            format!("{v}\noid sha256:{PTR_OID}\nsize -1\n"),
+        ),
+        ("missing_size", format!("{v}\noid sha256:{PTR_OID}\n")),
+        ("doc_about_lfs", format!("{v}\nThis file documents LFS.\n")),
+        (
+            "bad_version",
+            format!("version https://example.com/v9\noid sha256:{PTR_OID}\nsize 12\n"),
+        ),
+        (
+            "big_padding",
+            format!("{v}\noid sha256:{PTR_OID}\nsize 12\n{}", "\n".repeat(1100)),
+        ),
+    ]
+}
+
+#[test]
+fn pointer_shaped_clean_passthrough_matches_git_lfs() {
+    skip_if_no_lfs!();
+    let cases = pointer_shaped_cases();
+
+    let tmp_a = tempfile::tempdir().expect("tempdir");
+    init_test_repo(tmp_a.path());
+    write_gitattributes(tmp_a.path(), "*.bin");
+    let tmp_b = tempfile::tempdir().expect("tempdir");
+    init_test_repo(tmp_b.path());
+    write_gitattributes(tmp_b.path(), "*.bin");
+    let repo_b = maw_git::GixRepo::open(tmp_b.path()).expect("open");
+
+    let mut mismatches = Vec::new();
+    for (name, data) in &cases {
+        let lfs = git_lfs_clean_stdin(tmp_a.path(), "x.bin", data.as_bytes());
+        let oid = repo_b
+            .write_blob_with_path(data.as_bytes(), "x.bin")
+            .expect("maw clean");
+        let maw = repo_b.read_blob(oid).expect("read blob");
+        if lfs != maw {
+            mismatches.push(format!(
+                "[{name}] git-lfs {} but maw {}",
+                if lfs == data.as_bytes() {
+                    "passes through"
+                } else {
+                    "cleans"
+                },
+                if maw == data.as_bytes() {
+                    "passes through"
+                } else {
+                    "cleans"
+                },
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 3: smudge filter equivalence
 // ---------------------------------------------------------------------------

@@ -814,6 +814,11 @@ impl ManifoldConfig {
 /// to the `.maw.toml`-fallback role of that file.
 const LEGACY_ADOPTED_SECTIONS: &[&str] = &["merge", "workspace"];
 
+/// `[merge]` keys of the legacy `.maw/config.toml` that belong to its
+/// `.maw.toml`-fallback role (read by `MawConfig`), not to the manifold
+/// config: never adopted, never warned about (bn-ggo5).
+const LEGACY_MAW_TOML_ONLY_MERGE_KEYS: &[&str] = &["auto_resolve_from_main"];
+
 /// Result of [`ManifoldConfig::load_with_legacy`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedConfig {
@@ -907,6 +912,9 @@ impl ManifoldConfig {
                 continue; // canonical parse would have failed already
             };
             for (key, value) in legacy_section {
+                if *section == "merge" && LEGACY_MAW_TOML_ONLY_MERGE_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
                 match target.get(key) {
                     Some(existing) if existing != value => resolved.warnings.push(format!(
                         "{legacy_shown}: [{section}] {key} is ignored (shadowed by \
@@ -1751,6 +1759,34 @@ languages = ["cobol"]
         assert!(r.adopted_legacy_keys.is_empty());
         assert!(
             r.warnings.iter().any(|w| w.contains("ignoring")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// bn-ggo5: in the consolidated layout `.maw/config.toml` is also the
+    /// `.maw.toml` fallback, so it may legitimately hold `[merge]
+    /// auto_resolve_from_main` (a `.maw.toml` key the manifold schema does
+    /// not have). That key must not poison the legacy adoption of real
+    /// manifold keys next to it, and must not be reported as something to
+    /// move into the manifold config (doing so would make that file fail to
+    /// parse and every merge fail).
+    #[test]
+    fn load_for_root_legacy_maw_toml_only_key_does_not_block_adoption() {
+        let dir = consolidated_root();
+        let root = dir.path();
+        write(
+            &root.join(".maw"),
+            "config.toml",
+            "[repo]\nbranch = \"main\"\n[merge]\nauto_resolve_from_main = [\".beads/**\"]\nauto_absorb_ff = false\n",
+        );
+        let r = ManifoldConfig::load_for_root(root).expect("load");
+        assert!(!r.config.merge.auto_absorb_ff, "legacy key must be adopted");
+        assert_eq!(r.adopted_legacy_keys, vec!["merge.auto_absorb_ff"]);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("auto_resolve_from_main")),
             "{:?}",
             r.warnings
         );

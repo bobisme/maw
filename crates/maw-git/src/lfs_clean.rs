@@ -224,12 +224,15 @@ pub fn write_blob_with_attrs(
         return crate::objects_impl::write_blob(repo, data);
     }
 
-    // Already a pointer? Write as-is (don't double-wrap). Use the full
-    // parser, not the `looks_like_pointer` prefix sniff: git-lfs's clean
-    // filter only passes content through when it decodes as a pointer, and
-    // cleans everything else (bn-z9t3). A file that merely starts with the
-    // version line (docs about LFS, a truncated pointer) is real content.
-    if maw_lfs::Pointer::parse(data).is_ok() {
+    // Already a pointer? Write as-is (don't double-wrap) — exactly when
+    // git-lfs's clean filter would: it passes content through only when it
+    // decodes as a pointer and cleans everything else (bn-z9t3), so a file
+    // that merely starts with the version line (docs about LFS, a truncated
+    // pointer) is real content. Its decoder is more lenient than the
+    // canonical `Pointer::parse` (blank lines, CRLF, `size 012`, legacy
+    // version URLs); using the strict parser here wrapped such pointers into
+    // a pointer-to-a-pointer (bn-ggo5).
+    if maw_lfs::git_lfs_clean_passes_through(data) {
         return crate::objects_impl::write_blob(repo, data);
     }
 

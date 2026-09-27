@@ -345,7 +345,8 @@ impl WorkspaceId {
     /// attached as a new tracked workspace).
     ///
     /// This is [`Self::new`] plus a reservation check: names the merge engine
-    /// uses for synthetic sides (currently only [`Self::EPOCH_DELTA`]) are
+    /// uses for synthetic sides ([`Self::EPOCH_DELTA`]) and names starting
+    /// with the merge-quarantine prefix (`merge-quarantine-`, bn-ggo5) are
     /// refused. A real workspace named `epoch-delta` would be
     /// indistinguishable from the synthetic epoch-delta `PatchSet` injected
     /// for stale workspaces (bn-7phd): both sides of a conflict would carry
@@ -422,7 +423,8 @@ impl WorkspaceId {
     }
 
     /// Byte-level core of [`Self::new_for_create`]: [`Self::check_name_bytes`]
-    /// plus refusal of reserved synthetic ids ([`Self::EPOCH_DELTA`]).
+    /// plus refusal of reserved synthetic ids ([`Self::EPOCH_DELTA`]) and of
+    /// the `merge-quarantine-` prefix.
     ///
     /// # Errors
     /// Returns the first violated [`WorkspaceNameRule`].
@@ -430,6 +432,12 @@ impl WorkspaceId {
         Self::check_name_bytes(b)?;
         if b == Self::EPOCH_DELTA.as_bytes() {
             return Err(WorkspaceNameRule::Reserved);
+        }
+        // bn-ggo5: `merge-quarantine-<id>` names are what `maw ws merge`
+        // gives validation-failure quarantines; `ws sync` / `ws merge` refuse
+        // them and `maw merge abandon <id>` targets them.
+        if b.starts_with(crate::merge::quarantine_id::QUARANTINE_NAME_PREFIX.as_bytes()) {
+            return Err(WorkspaceNameRule::ReservedQuarantinePrefix);
         }
         Ok(())
     }
@@ -451,6 +459,8 @@ pub enum WorkspaceNameRule {
     ConsecutiveHyphens,
     /// Reserved for a synthetic merge-engine workspace id (creation only).
     Reserved,
+    /// Starts with the merge-quarantine prefix (creation only).
+    ReservedQuarantinePrefix,
 }
 
 impl WorkspaceNameRule {
@@ -470,6 +480,11 @@ impl WorkspaceNameRule {
             Self::Reserved => format!(
                 "'{s}' is reserved: the merge engine uses it for the synthetic \
                  epoch-delta side of stale-workspace conflicts; choose another name"
+            ),
+            Self::ReservedQuarantinePrefix => format!(
+                "'{s}' is reserved: names starting with '{}' belong to merge \
+                 quarantines (see `maw merge list`); choose another name",
+                crate::merge::quarantine_id::QUARANTINE_NAME_PREFIX
             ),
         };
         ValidationError {
@@ -1121,6 +1136,14 @@ mod tests {
         assert!(WorkspaceId::new_for_create("epoch-delta-2").is_ok());
         assert!(WorkspaceId::new_for_create("agent-1").is_ok());
         assert!(WorkspaceId::new_for_create("Bad").is_err());
+        // bn-ggo5: the quarantine prefix is reserved at creation too, but
+        // existing quarantine names still parse.
+        let err = WorkspaceId::new_for_create("merge-quarantine-foo")
+            .expect_err("quarantine prefix must be refused at creation");
+        assert!(err.to_string().contains("reserved"), "{err}");
+        assert!(WorkspaceId::new_for_create("merge-quarantine").is_ok());
+        assert!(WorkspaceId::new_for_create("my-merge-quarantine-x").is_ok());
+        assert!(WorkspaceId::new("merge-quarantine-abc123def456").is_ok());
 
         let parsed = WorkspaceId::new(WorkspaceId::EPOCH_DELTA).expect("parses");
         assert!(parsed.is_epoch_delta());
@@ -1155,7 +1178,9 @@ mod kani_proofs {
 
     /// The synthetic epoch-delta id is outside the set of names accepted for
     /// workspace creation, and the reservation removes nothing else: over
-    /// every name of <= 12 bytes drawn from the letters of `epoch-delta`,
+    /// every name of <= 12 bytes drawn from the letters of `epoch-delta`
+    /// (a domain that cannot reach the 17-byte `merge-quarantine-` prefix
+    /// reservation, which is covered by unit tests instead),
     /// the creation check accepts exactly what the parse check accepts
     /// minus `epoch-delta` itself, which the parse check does accept (so
     /// conflict sides / `--resolve <path>=epoch-delta` keep parsing).

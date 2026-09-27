@@ -385,6 +385,141 @@ fn check_extension(prev: Option<&str>, key: &str, value: &str) -> Result<(), Par
     Ok(())
 }
 
+/// Would git-lfs's clean filter hand `bytes` to git unchanged (because it
+/// already decodes as a pointer) instead of storing it as a new object?
+///
+/// Mirrors git-lfs 3.x `copyToTemp` + `DecodeFrom` + `decodeKV`
+/// (`lfs/gitfilter_clean.go`, `lfs/pointer.go`), which is deliberately more
+/// lenient than [`Pointer::parse`]: surrounding whitespace, blank lines and a
+/// trailing `\r` per line are ignored; the legacy `hawser` / `git-media`
+/// version URLs are accepted; `size` is any non-negative `i64` Go's
+/// `ParseInt` accepts (`012`, `+12`); `ext-<d>-<name>` lines may appear
+/// anywhere before `size`. Content must be shorter than
+/// [`MAX_POINTER_BYTES`]. Empty content is git-lfs's empty pointer.
+///
+/// Callers that decide "already a pointer, write as-is" must use this, not
+/// the canonical parser: wrapping a pointer git-lfs keeps would commit a
+/// pointer to a pointer (bn-ggo5).
+#[must_use]
+pub fn git_lfs_clean_passes_through(bytes: &[u8]) -> bool {
+    const KEYS: [&[u8]; 3] = [b"version", b"oid", b"size"];
+    if bytes.is_empty() {
+        return true;
+    }
+    if bytes.len() >= MAX_POINTER_BYTES {
+        return false;
+    }
+    let data = go_trim_ascii_space(bytes);
+    let contains = |needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
+    if !(contains(b"git-media") || contains(b"hawser") || contains(b"git-lfs")) {
+        return false;
+    }
+    let mut values: [Option<&[u8]>; 3] = [None; 3];
+    let mut exts: Vec<(&[u8], &[u8])> = Vec::new();
+    let mut line = 0;
+    for raw in data.split(|&b| b == b'\n') {
+        let text = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if text.is_empty() {
+            continue;
+        }
+        let Some(sp) = text.iter().position(|&b| b == b' ') else {
+            return false;
+        };
+        let (key, value) = (&text[..sp], &text[sp + 1..]);
+        if line >= KEYS.len() {
+            return false;
+        }
+        if key == KEYS[line] {
+            values[line] = Some(value);
+            line += 1;
+            continue;
+        }
+        // extRE `\Aext-\d{1}-\w+` (prefix match); git-lfs keeps extensions
+        // in a map, so a repeated key overwrites.
+        let ext_key = matches!(
+            key,
+            [b'e', b'x', b't', b'-', d, b'-', w, ..]
+                if d.is_ascii_digit() && (w.is_ascii_alphanumeric() || *w == b'_')
+        );
+        if !ext_key {
+            return false;
+        }
+        match exts.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => exts.push((key, value)),
+        }
+    }
+    // parsePointerExtension + validatePointerExtensions.
+    let mut priorities = [false; 10];
+    for (key, value) in &exts {
+        let p = usize::from(key[4] - b'0');
+        if git_lfs_oid(value).is_none() || priorities[p] {
+            return false;
+        }
+        priorities[p] = true;
+    }
+    let version_ok = values[0].is_some_and(|v| {
+        [
+            b"http://git-media.io/v/2".as_slice(),
+            b"https://hawser.github.com/spec/v1",
+            VERSION_URL.as_bytes(),
+        ]
+        .contains(&v)
+    });
+    version_ok
+        && values[1].and_then(git_lfs_oid).is_some()
+        && values[2].is_some_and(go_parse_nonneg_i64)
+}
+
+/// Go `bytes.TrimSpace` restricted to ASCII (adds `\v`, which Rust's
+/// `trim_ascii` keeps).
+fn go_trim_ascii_space(mut b: &[u8]) -> &[u8] {
+    let space = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r');
+    while let Some((first, rest)) = b.split_first()
+        && space(first)
+    {
+        b = rest;
+    }
+    while let Some((last, rest)) = b.split_last()
+        && space(last)
+    {
+        b = rest;
+    }
+    b
+}
+
+/// git-lfs `parseOid`: `sha256:` followed by exactly 64 lowercase hex digits.
+fn git_lfs_oid(value: &[u8]) -> Option<[u8; 32]> {
+    let (kind, hex) = value.split_at(value.iter().position(|&b| b == b':')?);
+    if kind != b"sha256" {
+        return None;
+    }
+    decode_oid(&hex[1..], HexCase::LowerOnly)
+}
+
+/// Go `strconv.ParseInt(s, 10, 64)` succeeding with a non-negative result.
+fn go_parse_nonneg_i64(value: &[u8]) -> bool {
+    let (negative, digits) = match value.split_first() {
+        Some((b'+', rest)) => (false, rest),
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, value),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let mut n: u64 = 0;
+    for &d in digits {
+        match n
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(u64::from(d - b'0')))
+        {
+            Some(v) => n = v,
+            None => return false,
+        }
+    }
+    if negative { n == 0 } else { n <= MAX_SIZE }
+}
+
 /// Fast check: does this byte slice look like an LFS pointer?
 ///
 /// Used to short-circuit blob inspection before a full parse. It is a
@@ -431,6 +566,83 @@ mod tests {
             "version https://git-lfs.github.com/spec/v1\nsize {SAMPLE_SIZE}\noid sha256:{SAMPLE_OID_HEX}\n"
         );
         assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadOid));
+    }
+
+    /// bn-ggo5: pass-through decision table, observed against real
+    /// git-lfs 3.8 `git lfs clean` (the conformance test re-checks it live
+    /// when git-lfs is installed).
+    #[test]
+    fn git_lfs_clean_passes_through_matches_observed_git_lfs() {
+        let o = SAMPLE_OID_HEX;
+        let v = "version https://git-lfs.github.com/spec/v1";
+        let cases: &[(&str, String, bool)] = &[
+            ("empty", String::new(), true),
+            ("canonical", format!("{v}\noid sha256:{o}\nsize 12\n"), true),
+            (
+                "no final newline",
+                format!("{v}\noid sha256:{o}\nsize 12"),
+                true,
+            ),
+            (
+                "interior blank",
+                format!("{v}\n\noid sha256:{o}\nsize 12\n"),
+                true,
+            ),
+            (
+                "crlf",
+                format!("{v}\r\noid sha256:{o}\r\nsize 12\r\n"),
+                true,
+            ),
+            (
+                "hawser",
+                format!("version https://hawser.github.com/spec/v1\noid sha256:{o}\nsize 12\n"),
+                true,
+            ),
+            (
+                "leading zero",
+                format!("{v}\noid sha256:{o}\nsize 012\n"),
+                true,
+            ),
+            (
+                "ext after oid",
+                format!("{v}\noid sha256:{o}\next-0-x sha256:{o}\nsize 12\n"),
+                true,
+            ),
+            (
+                "upper hex",
+                format!("{v}\noid sha256:{}\nsize 12\n", o.to_uppercase()),
+                false,
+            ),
+            (
+                "size first",
+                format!("{v}\nsize 12\noid sha256:{o}\n"),
+                false,
+            ),
+            (
+                "extra key",
+                format!("{v}\noid sha256:{o}\nsize 12\nfoo bar\n"),
+                false,
+            ),
+            ("negative", format!("{v}\noid sha256:{o}\nsize -1\n"), false),
+            ("prose", format!("{v}\nThis file documents LFS.\n"), false),
+            (
+                "dup priority",
+                format!("{v}\next-0-a sha256:{o}\next-0-b sha256:{o}\noid sha256:{o}\nsize 1\n"),
+                false,
+            ),
+            (
+                "too big",
+                format!("{v}\noid sha256:{o}\nsize 12\n{}", "\n".repeat(1100)),
+                false,
+            ),
+        ];
+        for (name, data, expected) in cases {
+            assert_eq!(
+                git_lfs_clean_passes_through(data.as_bytes()),
+                *expected,
+                "{name}: {data:?}"
+            );
+        }
     }
 
     #[test]

@@ -407,11 +407,21 @@ fn abandon(merge_id: &str) -> Result<()> {
             );
         }
         Err(QuarantineError::NotFound { .. }) => {
-            // Check if workspace still exists (partial cleanup)
             if !ws_path.exists() {
                 println!("  Quarantine '{merge_id}' already abandoned.");
                 return Ok(());
             }
+            // bn-ggo5: no quarantine is recorded for this id, so nothing
+            // proves the directory is a quarantine — it may be a user
+            // workspace that merely carries the `merge-quarantine-` prefix.
+            // Never delete it here; `ws destroy` snapshots before removing.
+            let name = maw::merge::quarantine::quarantine_workspace_name(merge_id);
+            bail!(
+                "No quarantine is recorded for id '{merge_id}', but {} exists.\n  \
+                 Refusing to delete it: it may be a regular workspace.\n  \
+                 To remove it (a recovery snapshot is kept): maw ws destroy {name}",
+                ws_path.display()
+            );
         }
         Err(e) => {
             eprintln!("  WARNING: Could not read quarantine state: {e}");
