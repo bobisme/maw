@@ -60,33 +60,77 @@ impl FileId {
     /// # Errors
     /// Returns an error if the string is not exactly 32 lowercase hex digits.
     pub fn from_hex(s: &str) -> Result<Self, FileIdError> {
-        if s.len() != 32 {
-            return Err(FileIdError {
+        match Self::decode_hex_bytes(s.as_bytes()) {
+            Ok(n) => Ok(Self(n)),
+            Err(FileIdHexError::Length) => Err(FileIdError {
                 value: s.to_owned(),
                 reason: format!("expected 32 hex characters, got {}", s.len()),
-            });
-        }
-        if !s
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        {
-            return Err(FileIdError {
+            }),
+            Err(FileIdHexError::Digit) => Err(FileIdError {
                 value: s.to_owned(),
                 reason: "must contain only lowercase hex characters (0-9, a-f)".to_owned(),
-            });
+            }),
         }
-        let n = u128::from_str_radix(s, 16).map_err(|e| FileIdError {
-            value: s.to_owned(),
-            reason: e.to_string(),
-        })?;
-        Ok(Self(n))
     }
 
     /// Return a 32-character lowercase hex representation of this `FileId`.
     #[must_use]
     pub fn to_hex(self) -> String {
-        format!("{:032x}", self.0)
+        let bytes = Self::encode_hex_bytes(self.0);
+        bytes.iter().map(|&b| char::from(b)).collect()
     }
+
+    /// Allocation-free core of [`Self::to_hex`]: the 32 lowercase hex digits
+    /// of `n`, most significant first (bn-2l63: kept byte-level so Kani can
+    /// prove the codec over all 2^128 ids).
+    #[must_use]
+    pub const fn encode_hex_bytes(n: u128) -> [u8; 32] {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut out = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            let shift = 4 * (31 - i);
+            // Masked to 0..=15, so the cast is lossless.
+            #[allow(clippy::cast_possible_truncation)]
+            let nibble = ((n >> shift) & 0xf) as usize;
+            out[i] = DIGITS[nibble];
+            i += 1;
+        }
+        out
+    }
+
+    /// Allocation-free core of [`Self::from_hex`]: accepts exactly 32
+    /// lowercase hex digits.
+    ///
+    /// # Errors
+    /// [`FileIdHexError::Length`] unless `b.len() == 32`, else
+    /// [`FileIdHexError::Digit`] on any byte outside `[0-9a-f]`.
+    pub fn decode_hex_bytes(b: &[u8]) -> Result<u128, FileIdHexError> {
+        if b.len() != 32 {
+            return Err(FileIdHexError::Length);
+        }
+        let mut n: u128 = 0;
+        let mut i = 0;
+        while i < 32 {
+            let d = match b[i] {
+                c @ b'0'..=b'9' => c - b'0',
+                c @ b'a'..=b'f' => c - b'a' + 10,
+                _ => return Err(FileIdHexError::Digit),
+            };
+            n = (n << 4) | u128::from(d);
+            i += 1;
+        }
+        Ok(n)
+    }
+}
+
+/// Why [`FileId::decode_hex_bytes`] rejected its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileIdHexError {
+    /// Input is not exactly 32 bytes.
+    Length,
+    /// A byte is not a lowercase hex digit.
+    Digit,
 }
 
 impl fmt::Display for FileId {
@@ -224,6 +268,29 @@ pub enum PatchValue {
 #[cfg(test)]
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
+    // bn-2l63: the hand-written codec matches the previous format!/radix one.
+    #[test]
+    fn file_id_hex_codec_matches_std_formatting() {
+        for n in [
+            0u128,
+            1,
+            0xf,
+            0xabc,
+            u128::MAX,
+            u128::MAX - 1,
+            1 << 127,
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+        ] {
+            let id = FileId::new(n);
+            assert_eq!(id.to_hex(), format!("{n:032x}"));
+            assert_eq!(FileId::from_hex(&id.to_hex()), Ok(id));
+        }
+        assert!(FileId::from_hex(&"A".repeat(32)).is_err());
+        assert!(FileId::from_hex(&"0".repeat(31)).is_err());
+        assert!(FileId::from_hex(&"0".repeat(33)).is_err());
+        assert!(FileId::from_hex(&format!("+{}", "0".repeat(31))).is_err());
+    }
+
     use super::*;
 
     // Helper: build a valid 40-char hex OID string.
@@ -525,5 +592,45 @@ mod tests {
         let json1 = serde_json::to_string(&make()).expect("operation should succeed");
         let json2 = serde_json::to_string(&make()).expect("operation should succeed");
         assert_eq!(json1, json2);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// The hex codec round-trips every one of the 2^128 ids: `encode` then
+    /// `decode` is the identity (hence `to_hex` is injective).
+    #[kani::proof]
+    #[kani::unwind(33)]
+    fn file_id_hex_round_trip_all_u128() {
+        let n: u128 = kani::any();
+        let hex = FileId::encode_hex_bytes(n);
+        assert_eq!(FileId::decode_hex_bytes(&hex), Ok(n));
+    }
+
+    /// `decode` accepts only canonical encodings: for every string of
+    /// <= 33 bytes over `0`, `9`, `a`, `f`, `A`, `g`, `/`, `:` and a backtick (range edges,
+    /// uppercase, and the bytes just outside each digit range), an accepted string is
+    /// exactly `encode` of the decoded value. Hence `from_hex` is injective:
+    /// two distinct strings never parse to the same `FileId`.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn file_id_decode_accepts_only_canonical_hex_le_33_bytes() {
+        const ALPHABET: [u8; 9] = *b"09afAg/:`";
+        let mut buf = [0u8; 33];
+        let len: usize = kani::any();
+        kani::assume(len <= buf.len());
+        let mut i = 0;
+        while i < buf.len() {
+            let k: usize = kani::any();
+            kani::assume(k < ALPHABET.len());
+            buf[i] = ALPHABET[k];
+            i += 1;
+        }
+        let b = &buf[..len];
+        if let Ok(n) = FileId::decode_hex_bytes(b) {
+            assert!(FileId::encode_hex_bytes(n).as_slice() == b);
+        }
     }
 }

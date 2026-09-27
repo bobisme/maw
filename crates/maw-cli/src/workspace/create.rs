@@ -66,6 +66,10 @@ fn create_with_output(
     // `workspace_path` validates the name; do this before locking so an
     // invalid name fails fast without touching the lock directory.
     let path = workspace_path(name)?;
+    // bn-2l63: refuse names reserved for synthetic merge-engine sides
+    // (`epoch-delta`) before any lock or directory is touched.
+    WorkspaceId::new_for_create(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
     // Make create atomic for this workspace *name* (bn-3bbc). Without this
     // lock, concurrent `maw ws create <same-name>` is a TOCTOU race: every
@@ -163,8 +167,8 @@ fn create_with_output(
     }
 
     // Create workspace ID
-    let ws_id =
-        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let ws_id = WorkspaceId::new_for_create(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
     // Create the workspace via backend
     let info = backend.create(&ws_id, &epoch)
@@ -1062,8 +1066,8 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
     // Check if workspace is already tracked by git worktree
     let backend = get_backend()?;
-    let ws_id =
-        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let ws_id = WorkspaceId::new_for_create(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
     if backend.exists(&ws_id) {
         bail!(

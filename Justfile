@@ -117,7 +117,7 @@ incident-replay:
   cargo test --features assurance --test dst_harness -- --ignored incident_replay
 
 # kani-fast: every Kani harness except the kani-slow resolve_entries proofs
-# (~1 min total). Root crate: classify_shared_path merge-algebra proofs (needs
+# (root crate ~1 min; maw-core ~2 min as of bn-2l63). Root crate: classify_shared_path merge-algebra proofs (needs
 # --no-default-features: tree-sitter/otel C deps do not build under Kani).
 # maw-core / maw-lfs: path-predicate and codec harnesses (bn-2ws4 children).
 # A crate with zero #[kani::proof] harnesses exits 0 ("No proof harnesses"),

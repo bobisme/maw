@@ -104,15 +104,17 @@ impl fmt::Display for OrderingKey {
 /// Per-workspace sequence and wall-clock generator.
 ///
 /// Guarantees:
-/// - `seq` is strictly monotonically increasing (starts at 1).
-/// - `wall_clock_ms` is non-decreasing: `max(now_ms, last_seen + 1)`.
+/// - `seq` is strictly monotonically increasing (starts at 1); generation
+///   stops (returns `None`) rather than wrapping at `u64::MAX`.
+/// - `wall_clock_ms` is non-decreasing: `max(now_ms, last_seen + 1)`,
+///   saturating at `u64::MAX`.
 ///
 /// # Usage
 ///
 /// ```rust,ignore
 /// let mut seq_gen = SequenceGenerator::new();
-/// let (seq, wall_ms) = seq_gen.next(); // (1, now_ms)
-/// let (seq, wall_ms) = seq_gen.next(); // (2, max(now_ms, prev+1))
+/// let (seq, wall_ms) = seq_gen.next().unwrap(); // (1, now_ms)
+/// let (seq, wall_ms) = seq_gen.next().unwrap(); // (2, max(now_ms, prev+1))
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SequenceGenerator {
@@ -143,21 +145,30 @@ impl SequenceGenerator {
     ///
     /// Wall clock is clamped: if the system clock went backward (NTP step,
     /// VM resume), we use `last_seen + 1` instead of going backward.
+    ///
+    /// Returns `None` (leaving the generator unchanged) once `seq` has
+    /// reached `u64::MAX`: no strictly larger sequence number exists, and
+    /// wrapping would silently break causal ordering (bn-2l63).
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> (u64, u64) {
-        self.last_seq += 1;
-        let now_ms = current_time_ms();
-        self.last_wall_clock_ms = now_ms.max(self.last_wall_clock_ms + 1);
-        (self.last_seq, self.last_wall_clock_ms)
+    pub fn next(&mut self) -> Option<(u64, u64)> {
+        self.next_with_clock(current_time_ms())
     }
 
     /// Generate the next `(seq, wall_clock_ms)` pair using a provided wall clock.
     ///
     /// This is primarily for testing — in production use [`Self::next()`].
-    pub fn next_with_clock(&mut self, now_ms: u64) -> (u64, u64) {
-        self.last_seq += 1;
-        self.last_wall_clock_ms = now_ms.max(self.last_wall_clock_ms + 1);
-        (self.last_seq, self.last_wall_clock_ms)
+    ///
+    /// Guarantees (proved by Kani in `kani_proofs`):
+    /// - `seq` is strictly increasing across successful calls; the call
+    ///   returns `None` without mutating state iff `seq` is exhausted.
+    /// - `wall_clock_ms` is non-decreasing, and strictly increasing until
+    ///   it saturates at `u64::MAX` (it is informational only).
+    /// - never panics or wraps.
+    pub fn next_with_clock(&mut self, now_ms: u64) -> Option<(u64, u64)> {
+        let seq = self.last_seq.checked_add(1)?;
+        self.last_seq = seq;
+        self.last_wall_clock_ms = now_ms.max(self.last_wall_clock_ms.saturating_add(1));
+        Some((self.last_seq, self.last_wall_clock_ms))
     }
 
     /// The last sequence number generated (0 if none yet).
@@ -311,16 +322,16 @@ mod tests {
     #[test]
     fn seq_gen_first_call_returns_1() {
         let mut seq_gen = SequenceGenerator::new();
-        let (seq, _) = seq_gen.next_with_clock(1000);
+        let (seq, _) = seq_gen.next_with_clock(1000).expect("seq not exhausted");
         assert_eq!(seq, 1);
     }
 
     #[test]
     fn seq_gen_monotonic_sequence() {
         let mut seq_gen = SequenceGenerator::new();
-        let (s1, _) = seq_gen.next_with_clock(100);
-        let (s2, _) = seq_gen.next_with_clock(200);
-        let (s3, _) = seq_gen.next_with_clock(300);
+        let (s1, _) = seq_gen.next_with_clock(100).expect("seq not exhausted");
+        let (s2, _) = seq_gen.next_with_clock(200).expect("seq not exhausted");
+        let (s3, _) = seq_gen.next_with_clock(300).expect("seq not exhausted");
         assert_eq!(s1, 1);
         assert_eq!(s2, 2);
         assert_eq!(s3, 3);
@@ -329,8 +340,8 @@ mod tests {
     #[test]
     fn seq_gen_wall_clock_forward() {
         let mut seq_gen = SequenceGenerator::new();
-        let (_, w1) = seq_gen.next_with_clock(1000);
-        let (_, w2) = seq_gen.next_with_clock(2000);
+        let (_, w1) = seq_gen.next_with_clock(1000).expect("seq not exhausted");
+        let (_, w2) = seq_gen.next_with_clock(2000).expect("seq not exhausted");
         assert_eq!(w1, 1000);
         assert_eq!(w2, 2000);
     }
@@ -338,23 +349,23 @@ mod tests {
     #[test]
     fn seq_gen_wall_clock_backward_clamped() {
         let mut seq_gen = SequenceGenerator::new();
-        let (_, w1) = seq_gen.next_with_clock(5000);
+        let (_, w1) = seq_gen.next_with_clock(5000).expect("seq not exhausted");
         assert_eq!(w1, 5000);
 
         // Clock goes backward — should clamp to last+1
-        let (_, w2) = seq_gen.next_with_clock(3000);
+        let (_, w2) = seq_gen.next_with_clock(3000).expect("seq not exhausted");
         assert_eq!(w2, 5001, "backward clock should clamp to last+1");
 
         // Clock goes even further backward
-        let (_, w3) = seq_gen.next_with_clock(1000);
+        let (_, w3) = seq_gen.next_with_clock(1000).expect("seq not exhausted");
         assert_eq!(w3, 5002, "still clamped");
     }
 
     #[test]
     fn seq_gen_wall_clock_same_time_clamped() {
         let mut seq_gen = SequenceGenerator::new();
-        let (_, w1) = seq_gen.next_with_clock(1000);
-        let (_, w2) = seq_gen.next_with_clock(1000);
+        let (_, w1) = seq_gen.next_with_clock(1000).expect("seq not exhausted");
+        let (_, w2) = seq_gen.next_with_clock(1000).expect("seq not exhausted");
         assert_eq!(w1, 1000);
         assert_eq!(w2, 1001, "same time should advance by 1");
     }
@@ -365,7 +376,7 @@ mod tests {
         assert_eq!(seq_gen.last_seq(), 10);
         assert_eq!(seq_gen.last_wall_clock_ms(), 5000);
 
-        let (seq, wall) = seq_gen.next_with_clock(6000);
+        let (seq, wall) = seq_gen.next_with_clock(6000).expect("seq not exhausted");
         assert_eq!(seq, 11, "should continue from last_seq");
         assert_eq!(wall, 6000);
     }
@@ -375,7 +386,7 @@ mod tests {
         let mut seq_gen = SequenceGenerator::resume(5, 10000);
 
         // Clock went backward (VM resume scenario)
-        let (seq, wall) = seq_gen.next_with_clock(8000);
+        let (seq, wall) = seq_gen.next_with_clock(8000).expect("seq not exhausted");
         assert_eq!(seq, 6);
         assert_eq!(wall, 10001, "should clamp: max(8000, 10000+1)");
     }
@@ -383,7 +394,7 @@ mod tests {
     #[test]
     fn seq_gen_next_uses_real_clock() {
         let mut seq_gen = SequenceGenerator::new();
-        let (seq, wall) = seq_gen.next();
+        let (seq, wall) = seq_gen.next().expect("seq not exhausted");
         assert_eq!(seq, 1);
         assert!(wall > 0, "wall clock should be positive from system time");
         // Sanity: wall clock should be after 2024-01-01 (1704067200000 ms)
@@ -408,11 +419,21 @@ mod tests {
         assert_eq!(parsed.wall_clock_ms, k.wall_clock_ms);
     }
 
+    // bn-2l63: at u64::MAX the generator stops instead of wrapping.
+    #[test]
+    fn seq_gen_exhaustion_returns_none_without_wrapping() {
+        let mut seq_gen = SequenceGenerator::resume(u64::MAX - 1, u64::MAX);
+        assert_eq!(seq_gen.next_with_clock(0), Some((u64::MAX, u64::MAX)));
+        assert_eq!(seq_gen.next_with_clock(0), None);
+        assert_eq!(seq_gen.last_seq(), u64::MAX);
+        assert_eq!(seq_gen.last_wall_clock_ms(), u64::MAX);
+    }
+
     #[test]
     fn seq_gen_serde_roundtrip() {
         let mut seq_gen = SequenceGenerator::new();
-        seq_gen.next_with_clock(5000);
-        seq_gen.next_with_clock(6000);
+        seq_gen.next_with_clock(5000).expect("seq not exhausted");
+        seq_gen.next_with_clock(6000).expect("seq not exhausted");
 
         let json = serde_json::to_string(&seq_gen).expect("operation should succeed");
         let restored: SequenceGenerator =
@@ -434,7 +455,7 @@ mod tests {
 
         let mut keys = Vec::new();
         for clock in [100, 200, 300, 400, 500] {
-            let (seq, wall) = seq_gen.next_with_clock(clock);
+            let (seq, wall) = seq_gen.next_with_clock(clock).expect("seq not exhausted");
             keys.push(OrderingKey::new(e.clone(), w.clone(), seq, wall));
         }
 
@@ -459,7 +480,7 @@ mod tests {
         let clocks = [1000, 2000, 500, 300, 4000]; // backward at index 2,3
         let mut keys = Vec::new();
         for &clock in &clocks {
-            let (seq, wall) = seq_gen.next_with_clock(clock);
+            let (seq, wall) = seq_gen.next_with_clock(clock).expect("seq not exhausted");
             keys.push(OrderingKey::new(e.clone(), w.clone(), seq, wall));
         }
 
@@ -500,5 +521,109 @@ mod tests {
         assert_eq!(sorted[2].seq, 1);
         assert_eq!(sorted[3].workspace_id, ws("beta"));
         assert_eq!(sorted[3].seq, 2);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Two concrete epochs differing only in the last hex digit, so the
+    /// string comparison runs to the end.
+    const EPOCHS: [&str; 2] = [
+        "0000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000f",
+    ];
+    /// Workspace ids including a strict prefix pair (`a` < `ab`).
+    const WORKSPACES: [&str; 3] = ["a", "ab", "b"];
+
+    fn key(i: usize, j: usize) -> OrderingKey {
+        let Ok(e) = EpochId::new(EPOCHS[i]) else {
+            unreachable!("valid epoch")
+        };
+        let Ok(w) = WorkspaceId::new(WORKSPACES[j]) else {
+            unreachable!("valid name")
+        };
+        OrderingKey::new(e, w, kani::any(), kani::any())
+    }
+
+    fn check_eq_ord(a: &OrderingKey, b: &OrderingKey) {
+        let ord = a.cmp(b);
+        assert_eq!(a == b, ord == Ordering::Equal);
+        assert_eq!(b.cmp(a), ord.reverse());
+        assert_eq!(a.partial_cmp(b), Some(ord));
+    }
+
+    /// `Eq` and `Ord` agree, `Ord` is antisymmetric and `partial_cmp` is
+    /// `Some(cmp)`, over all u64 seq and wall-clock values (wall clock is
+    /// symbolic on both sides and must not matter), for four id shapes:
+    /// identical ids (decided by seq), same epoch with a strict-prefix
+    /// workspace pair, different epochs with the same workspace, and
+    /// epoch and workspace ordered in opposite directions. (Concrete ids:
+    /// symbolic 40-byte ids make CBMC blow up.)
+    #[kani::proof]
+    #[kani::unwind(45)]
+    fn ordering_key_eq_ord_consistent_4_id_shapes() {
+        check_eq_ord(&key(0, 0), &key(0, 0));
+        check_eq_ord(&key(0, 0), &key(0, 1));
+        check_eq_ord(&key(0, 2), &key(1, 2));
+        check_eq_ord(&key(0, 1), &key(1, 0));
+    }
+
+    /// Two successive `next_with_clock` calls from ANY resumed state and ANY
+    /// clock readings never panic or wrap; seq strictly increases, wall
+    /// clock never goes backward (strictly increases until it saturates),
+    /// and exhaustion is reported as `None` with state unchanged.
+    #[kani::proof]
+    fn seq_gen_successive_seqs_strictly_increase_any_state() {
+        let last_seq: u64 = kani::any();
+        let last_wall: u64 = kani::any();
+        let mut g = SequenceGenerator::resume(last_seq, last_wall);
+
+        match g.next_with_clock(kani::any()) {
+            None => {
+                assert_eq!(last_seq, u64::MAX);
+                assert_eq!(g.last_seq(), last_seq);
+                assert_eq!(g.last_wall_clock_ms(), last_wall);
+            }
+            Some((s1, w1)) => {
+                assert!(s1 > last_seq);
+                assert!(w1 >= last_wall);
+                assert!(w1 > last_wall || last_wall == u64::MAX);
+                assert_eq!((g.last_seq(), g.last_wall_clock_ms()), (s1, w1));
+                match g.next_with_clock(kani::any()) {
+                    Some((s2, w2)) => {
+                        assert!(s2 > s1);
+                        assert!(w2 >= w1);
+                    }
+                    None => assert_eq!(s1, u64::MAX),
+                }
+            }
+        }
+    }
+
+    /// Successive generator outputs, placed in keys of one epoch and one
+    /// workspace, are strictly increasing under `OrderingKey`'s `Ord`
+    /// (fixed ids; seq/wall from any resumed generator state).
+    #[kani::proof]
+    #[kani::unwind(45)]
+    fn seq_gen_successive_keys_strictly_increase_fixed_ids() {
+        let mut g = SequenceGenerator::resume(kani::any(), kani::any());
+        let Some((s1, w1)) = g.next_with_clock(kani::any()) else {
+            return;
+        };
+        let Some((s2, w2)) = g.next_with_clock(kani::any()) else {
+            return;
+        };
+        let Ok(e) = EpochId::new("0000000000000000000000000000000000000000") else {
+            unreachable!("valid epoch")
+        };
+        let Ok(w) = WorkspaceId::new("a") else {
+            unreachable!("valid name")
+        };
+        let k1 = OrderingKey::new(e.clone(), w.clone(), s1, w1);
+        let k2 = OrderingKey::new(e, w, s2, w2);
+        assert!(k1 < k2);
+        assert!(k1 != k2);
     }
 }

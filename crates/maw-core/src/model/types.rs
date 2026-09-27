@@ -341,6 +341,32 @@ impl WorkspaceId {
         Ok(Self(s.to_owned()))
     }
 
+    /// Validate a name for a workspace that is about to be **created** (or
+    /// attached as a new tracked workspace).
+    ///
+    /// This is [`Self::new`] plus a reservation check: names the merge engine
+    /// uses for synthetic sides (currently only [`Self::EPOCH_DELTA`]) are
+    /// refused. A real workspace named `epoch-delta` would be
+    /// indistinguishable from the synthetic epoch-delta `PatchSet` injected
+    /// for stale workspaces (bn-7phd): both sides of a conflict would carry
+    /// the same id, `--resolve <path>=epoch-delta` would be ambiguous, and
+    /// the real workspace would be displayed as "epoch (previous merge)"
+    /// (bn-2l63).
+    ///
+    /// [`Self::new`] / `FromStr` / serde deliberately still accept the
+    /// reserved name: they parse ids that already exist, including the
+    /// synthetic id itself (conflict sides, AST edit attribution, resolution
+    /// targets) and any pre-existing legacy workspace, which must stay
+    /// listable and destroyable.
+    ///
+    /// # Errors
+    /// Returns an error if the name fails [`Self::new`] validation or is a
+    /// reserved synthetic workspace id.
+    pub fn new_for_create(s: &str) -> Result<Self, ValidationError> {
+        Self::check_create_name_bytes(s.as_bytes()).map_err(|rule| rule.to_error(s))?;
+        Ok(Self(s.to_owned()))
+    }
+
     /// Create the reserved epoch-delta workspace ID.
     ///
     /// This bypasses the normal validation since the constant is known-valid.
@@ -362,49 +388,95 @@ impl WorkspaceId {
     }
 
     fn validate(s: &str) -> Result<(), ValidationError> {
-        if s.is_empty() {
-            return Err(ValidationError {
-                kind: ErrorKind::WorkspaceId,
-                value: s.to_owned(),
-                reason: "workspace name must not be empty".to_owned(),
-            });
+        Self::check_name_bytes(s.as_bytes()).map_err(|rule| rule.to_error(s))
+    }
+
+    /// Byte-level core of [`Self::new`] validation (kept allocation- and
+    /// UTF-8-free so bounded model checking can cover it exhaustively).
+    ///
+    /// Accepted names are 1..=[`Self::MAX_LEN`] bytes of `[a-z0-9-]`, not
+    /// starting or ending with `-`, without `--`.
+    ///
+    /// # Errors
+    /// Returns the first violated [`WorkspaceNameRule`].
+    pub fn check_name_bytes(b: &[u8]) -> Result<(), WorkspaceNameRule> {
+        if b.is_empty() {
+            return Err(WorkspaceNameRule::Empty);
         }
-        if s.len() > Self::MAX_LEN {
-            return Err(ValidationError {
-                kind: ErrorKind::WorkspaceId,
-                value: s.to_owned(),
-                reason: format!(
-                    "workspace name must be at most {} characters, got {}",
-                    Self::MAX_LEN,
-                    s.len()
-                ),
-            });
+        if b.len() > Self::MAX_LEN {
+            return Err(WorkspaceNameRule::TooLong);
         }
-        if s.starts_with('-') || s.ends_with('-') {
-            return Err(ValidationError {
-                kind: ErrorKind::WorkspaceId,
-                value: s.to_owned(),
-                reason: "workspace name must not start or end with a hyphen".to_owned(),
-            });
+        if b[0] == b'-' || b[b.len() - 1] == b'-' {
+            return Err(WorkspaceNameRule::EdgeHyphen);
         }
-        if !s
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        if !b
+            .iter()
+            .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
         {
-            return Err(ValidationError {
-                kind: ErrorKind::WorkspaceId,
-                value: s.to_owned(),
-                reason: "workspace name must contain only lowercase letters (a-z), digits (0-9), and hyphens (-)".to_owned(),
-            });
+            return Err(WorkspaceNameRule::InvalidChar);
         }
-        if s.contains("--") {
-            return Err(ValidationError {
-                kind: ErrorKind::WorkspaceId,
-                value: s.to_owned(),
-                reason: "workspace name must not contain consecutive hyphens".to_owned(),
-            });
+        if b.windows(2).any(|w| w == b"--") {
+            return Err(WorkspaceNameRule::ConsecutiveHyphens);
         }
         Ok(())
+    }
+
+    /// Byte-level core of [`Self::new_for_create`]: [`Self::check_name_bytes`]
+    /// plus refusal of reserved synthetic ids ([`Self::EPOCH_DELTA`]).
+    ///
+    /// # Errors
+    /// Returns the first violated [`WorkspaceNameRule`].
+    pub fn check_create_name_bytes(b: &[u8]) -> Result<(), WorkspaceNameRule> {
+        Self::check_name_bytes(b)?;
+        if b == Self::EPOCH_DELTA.as_bytes() {
+            return Err(WorkspaceNameRule::Reserved);
+        }
+        Ok(())
+    }
+}
+
+/// The workspace-name rule a candidate name violated (see
+/// [`WorkspaceId::check_name_bytes`] / [`WorkspaceId::check_create_name_bytes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceNameRule {
+    /// Empty name.
+    Empty,
+    /// Longer than [`WorkspaceId::MAX_LEN`] bytes.
+    TooLong,
+    /// Starts or ends with `-`.
+    EdgeHyphen,
+    /// Contains a byte outside `[a-z0-9-]`.
+    InvalidChar,
+    /// Contains `--`.
+    ConsecutiveHyphens,
+    /// Reserved for a synthetic merge-engine workspace id (creation only).
+    Reserved,
+}
+
+impl WorkspaceNameRule {
+    fn to_error(self, s: &str) -> ValidationError {
+        let reason = match self {
+            Self::Empty => "workspace name must not be empty".to_owned(),
+            Self::TooLong => format!(
+                "workspace name must be at most {} characters, got {}",
+                WorkspaceId::MAX_LEN,
+                s.len()
+            ),
+            Self::EdgeHyphen => "workspace name must not start or end with a hyphen".to_owned(),
+            Self::InvalidChar => "workspace name must contain only lowercase letters (a-z), digits (0-9), and hyphens (-)".to_owned(),
+            Self::ConsecutiveHyphens => {
+                "workspace name must not contain consecutive hyphens".to_owned()
+            }
+            Self::Reserved => format!(
+                "'{s}' is reserved: the merge engine uses it for the synthetic \
+                 epoch-delta side of stale-workspace conflicts; choose another name"
+            ),
+        };
+        ValidationError {
+            kind: ErrorKind::WorkspaceId,
+            value: s.to_owned(),
+            reason,
+        }
     }
 }
 
@@ -1037,5 +1109,69 @@ mod tests {
         assert!(msg.contains("WorkspaceId"));
         assert!(msg.contains("BAD"));
         assert!(msg.contains("must be lowercase"));
+    }
+
+    // bn-2l63: the synthetic epoch-delta id is reserved at creation time
+    // but still parses everywhere else.
+    #[test]
+    fn epoch_delta_reserved_for_create_only() {
+        let err = WorkspaceId::new_for_create(WorkspaceId::EPOCH_DELTA)
+            .expect_err("epoch-delta must be refused at creation");
+        assert!(err.to_string().contains("reserved"), "{err}");
+        assert!(WorkspaceId::new_for_create("epoch-delta-2").is_ok());
+        assert!(WorkspaceId::new_for_create("agent-1").is_ok());
+        assert!(WorkspaceId::new_for_create("Bad").is_err());
+
+        let parsed = WorkspaceId::new(WorkspaceId::EPOCH_DELTA).expect("parses");
+        assert!(parsed.is_epoch_delta());
+        assert_eq!(parsed, WorkspaceId::epoch_delta());
+        let via_str: WorkspaceId = "epoch-delta".parse().expect("FromStr parses");
+        assert!(via_str.is_epoch_delta());
+        let via_serde: WorkspaceId = serde_json::from_str("\"epoch-delta\"").expect("serde parses");
+        assert!(via_serde.is_epoch_delta());
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Exactly the distinct bytes of `epoch-delta`, so symbolic names cover
+    /// the reserved id, its prefixes, extensions and one-byte near misses.
+    const ALPHABET: [u8; 10] = *b"epochdlta-";
+
+    fn any_name_bytes<const N: usize>(buf: &mut [u8; N]) -> usize {
+        let len: usize = kani::any();
+        kani::assume(len <= N);
+        let mut i = 0;
+        while i < N {
+            let k: usize = kani::any();
+            kani::assume(k < ALPHABET.len());
+            buf[i] = ALPHABET[k];
+            i += 1;
+        }
+        len
+    }
+
+    /// The synthetic epoch-delta id is outside the set of names accepted for
+    /// workspace creation, and the reservation removes nothing else: over
+    /// every name of <= 12 bytes drawn from the letters of `epoch-delta`,
+    /// the creation check accepts exactly what the parse check accepts
+    /// minus `epoch-delta` itself, which the parse check does accept (so
+    /// conflict sides / `--resolve <path>=epoch-delta` keep parsing).
+    #[kani::proof]
+    #[kani::unwind(14)]
+    fn create_rejects_exactly_epoch_delta_names_le_12_bytes() {
+        let mut buf = [0u8; 12];
+        let len = any_name_bytes(&mut buf);
+        let b = &buf[..len];
+        let is_synthetic = b == WorkspaceId::EPOCH_DELTA.as_bytes();
+        let parse_ok = WorkspaceId::check_name_bytes(b).is_ok();
+        let create_ok = WorkspaceId::check_create_name_bytes(b).is_ok();
+        if is_synthetic {
+            assert!(parse_ok);
+            assert!(!create_ok);
+        }
+        assert_eq!(create_ok, parse_ok && !is_synthetic);
     }
 }

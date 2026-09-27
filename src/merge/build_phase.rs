@@ -257,6 +257,10 @@ pub enum BuildPhaseError {
     ReadBase { path: PathBuf, detail: String },
     /// Merge driver error (invalid config, unsupported shape, or failed command).
     Driver(String),
+    /// A source workspace carries a reserved synthetic workspace id
+    /// (`epoch-delta`) while the merge needs to inject that synthetic side,
+    /// so the two would be indistinguishable (bn-2l63).
+    ReservedWorkspaceId(String),
 }
 
 impl fmt::Display for BuildPhaseError {
@@ -281,6 +285,13 @@ impl fmt::Display for BuildPhaseError {
                 )
             }
             Self::Driver(detail) => write!(f, "BUILD: merge driver failed: {detail}"),
+            Self::ReservedWorkspaceId(name) => write!(
+                f,
+                "BUILD: source workspace '{name}' uses the reserved id of the synthetic \
+                 epoch-delta side; this merge includes a stale workspace, so the two sides \
+                 would be indistinguishable. Recreate the workspace under another name \
+                 (e.g. `maw ws recover {name} --to <new-name>` after destroying it) and merge that"
+            ),
         }
     }
 }
@@ -697,6 +708,19 @@ fn inject_epoch_delta(
         return Ok(EpochDeltaResult {
             base_overrides: BTreeMap::new(),
         });
+    }
+
+    // bn-2l63: `epoch-delta` is reserved at creation time, but a legacy
+    // workspace could still carry it. Injecting the synthetic side next to a
+    // real source with the same id would make them indistinguishable in
+    // partition/resolve, so refuse instead of guessing.
+    if let Some(ps) = patch_sets
+        .iter()
+        .find(|ps| ps.workspace_id.is_epoch_delta())
+    {
+        return Err(BuildPhaseError::ReservedWorkspaceId(
+            ps.workspace_id.as_str().to_owned(),
+        ));
     }
 
     // Compute the union of epoch-delta paths across all distinct stale base epochs.
@@ -3080,6 +3104,61 @@ required = false
     /// (the caller decides when to update it).
     fn advance_epoch(root: &Path, path: &str, content: &str, msg: &str) -> EpochId {
         commit_epoch_file(root, path, content, msg)
+    }
+
+    /// bn-2l63: a (legacy) source workspace literally named `epoch-delta`
+    /// must not be merged alongside the synthetic epoch-delta side — the two
+    /// would share one id. BUILD refuses with a typed error instead.
+    #[test]
+    fn stale_merge_refuses_source_named_epoch_delta() {
+        let dir = TempDir::new().expect("operation should succeed");
+        let root = dir.path();
+
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@test.com"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(root.join("README.md"), "line 1\n").expect("operation should succeed");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "epoch: initial"]);
+        let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
+        let initial_epoch = EpochId::new(&initial_hex).expect("operation should succeed");
+        run_git(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/epoch/current",
+                initial_epoch.as_str(),
+            ],
+        );
+        let current_epoch =
+            advance_epoch(root, "README.md", "line 1 (merged)\n", "epoch: merge ws-a");
+
+        let (ws_path, snapshot) = make_workspace_with_modified_file(
+            root,
+            WorkspaceId::EPOCH_DELTA,
+            "README.md",
+            b"line 1 (stale edit)\n",
+        );
+        let mut backend = MockBackend::new();
+        backend.add_workspace(
+            WorkspaceId::EPOCH_DELTA,
+            initial_epoch.clone(),
+            snapshot,
+            ws_path,
+        );
+
+        let manifold_dir = root.join(".manifold");
+        let sources = vec![WorkspaceId::epoch_delta()];
+        write_prepare_state(&manifold_dir, &sources, &current_epoch);
+
+        let err = run_build_phase(root, &manifold_dir, &backend)
+            .expect_err("a source named epoch-delta must be refused when injecting");
+        assert!(
+            matches!(err, BuildPhaseError::ReservedWorkspaceId(ref n) if n == "epoch-delta"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Stale workspace modifies a file that was ALSO changed in the epoch

@@ -70,6 +70,19 @@ impl MergePhase {
             Self::Prepare => &[Self::Build, Self::Aborted],
             Self::Build => &[Self::Validate, Self::Aborted],
             Self::Validate => &[Self::Commit, Self::Aborted],
+            // `Commit -> Aborted` is deliberate even though COMMIT is "the
+            // point of no return" (bn-2l63). The phase is persisted as
+            // `commit` BEFORE the ref CAS (maw-cli merge: advance to Commit,
+            // then record `epoch_after`, then the branch-divergence
+            // pre-flight, then the CAS). Every abort from this phase happens
+            // while the refs are provably NOT at the candidate: the
+            // pre-flight refusal, a failed CAS, and
+            // `recover_partial_commit*` returning `NotCommitted`. Crash
+            // recovery likewise maps Commit to `CheckCommit`, whose
+            // not-committed branch is exactly this edge. The point of no
+            // return is the successful CAS, not entry into the phase; once
+            // refs have moved, `abort_merge_state` refuses to clear the
+            // state (Prime-Invariant gate) and the merge converges forward.
             Self::Commit => &[Self::Cleanup, Self::Aborted],
             Self::Cleanup => &[Self::Complete, Self::Aborted],
             Self::Complete | Self::Aborted => &[],
@@ -456,6 +469,9 @@ impl MergeStateFile {
                     .map_err(|e| MergeStateError::Io(format!("write {}: {e}", path.display())))?;
                 file.sync_all()
                     .map_err(|e| MergeStateError::Io(format!("fsync {}: {e}", path.display())))?;
+                // bn-2l63: the new directory entry is only durable once the
+                // parent directory is fsynced too.
+                fsync_parent_dir(path)?;
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -472,6 +488,7 @@ impl MergeStateFile {
     /// 2. Write to a temporary file in the same directory.
     /// 3. fsync the temporary file.
     /// 4. Rename (atomic on POSIX) over the target path.
+    /// 5. fsync the parent directory so the rename is durable.
     ///
     /// # Errors
     /// Returns [`MergeStateError`] on I/O or serialization failure.
@@ -500,6 +517,12 @@ impl MergeStateFile {
                 path.display()
             ))
         })?;
+
+        // fsync the parent directory so the rename itself is durable across
+        // power loss (bn-2l63; same as src/merge/commit.rs write_merge_state).
+        // Without this a crash can resurrect the previous phase even though
+        // the caller already acted on the new one.
+        fsync_parent_dir(path)?;
 
         Ok(())
     }
@@ -803,6 +826,18 @@ pub fn abort_merge_state(
 
     remove_merge_state_if_exists(merge_state_path)?;
     Ok(AbortOutcome::Cleared { from: state.phase })
+}
+
+/// fsync the directory containing `path`, making a just-created or
+/// just-renamed directory entry durable (bn-2l63).
+fn fsync_parent_dir(path: &Path) -> Result<(), MergeStateError> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| MergeStateError::Io(format!("fsync dir {}: {e}", dir.display())))
 }
 
 fn remove_merge_state_if_exists(path: &Path) -> Result<(), MergeStateError> {
@@ -1962,5 +1997,166 @@ mod tests {
         assert!(decoded.owner_pid.is_none());
         assert!(decoded.owner_host.is_none());
         assert_eq!(decoded.owner_liveness(), Liveness::Unknown);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    const ALL: [MergePhase; 7] = [
+        MergePhase::Prepare,
+        MergePhase::Build,
+        MergePhase::Validate,
+        MergePhase::Commit,
+        MergePhase::Cleanup,
+        MergePhase::Complete,
+        MergePhase::Aborted,
+    ];
+
+    fn any_phase() -> MergePhase {
+        let i: usize = kani::any();
+        kani::assume(i < ALL.len());
+        ALL[i].clone()
+    }
+
+    /// Spec-side position in the documented lifecycle
+    /// `Prepare → Build → Validate → Commit → Cleanup → Complete`, with the
+    /// `Aborted` sink last. Independent of the production table.
+    const fn rank(p: &MergePhase) -> usize {
+        match p {
+            MergePhase::Prepare => 0,
+            MergePhase::Build => 1,
+            MergePhase::Validate => 2,
+            MergePhase::Commit => 3,
+            MergePhase::Cleanup => 4,
+            MergePhase::Complete => 5,
+            MergePhase::Aborted => 6,
+        }
+    }
+
+    /// Over all 7x7 phase pairs: terminal phases have no successors, every
+    /// non-terminal phase may abort, every edge moves strictly forward in
+    /// the lifecycle (so the table is acyclic, no self-loops), and the only
+    /// non-abort edge from a live phase is to the next lifecycle phase.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn merge_phase_table_terminal_sinks_forward_edges_all_pairs() {
+        let p = any_phase();
+        let q = any_phase();
+        if p.is_terminal() {
+            assert!(p.valid_transitions().is_empty());
+            assert!(!p.can_transition_to(&q));
+        } else {
+            assert!(p.can_transition_to(&MergePhase::Aborted));
+        }
+        if p.can_transition_to(&q) {
+            assert!(rank(&q) > rank(&p));
+            assert!(q == MergePhase::Aborted || rank(&q) == rank(&p) + 1);
+        }
+    }
+
+    /// Every non-terminal phase reaches both `Complete` and `Aborted`
+    /// through the production table (reachability by fixpoint over all 7
+    /// phases, using `can_transition_to` for every edge).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn merge_phase_every_live_phase_reaches_complete_and_aborted() {
+        let start = any_phase();
+        kani::assume(!start.is_terminal());
+        let mut reach = [false; 7];
+        reach[rank(&start)] = true;
+        // 5 relaxation rounds (paths of <= 5 edges; Prepare..Complete is 5).
+        // Bounding rounds can only under-approximate `reach`, so a pass is
+        // sound for the real table.
+        let mut round = 0;
+        while round < 5 {
+            let mut a = 0;
+            while a < ALL.len() {
+                if reach[a] {
+                    let mut b = 0;
+                    while b < ALL.len() {
+                        if ALL[a].can_transition_to(&ALL[b]) {
+                            reach[b] = true;
+                        }
+                        b += 1;
+                    }
+                }
+                a += 1;
+            }
+            round += 1;
+        }
+        assert!(reach[rank(&MergePhase::Complete)]);
+        assert!(reach[rank(&MergePhase::Aborted)]);
+    }
+
+    /// Crash-recovery dispatch agrees with the transition table:
+    /// terminal outcome iff terminal phase; pre-commit abort only before
+    /// COMMIT and only where `Aborted` is a legal edge; VALIDATE may go on to
+    /// COMMIT or abort; `CheckCommit` needs BOTH finalize (`Cleanup`) and
+    /// abort (`Aborted`) to be legal edges — this is what the
+    /// `Commit -> Aborted` edge exists for; `RetryCleanup` can complete.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn recovery_outcome_consistent_with_transition_table_all_phases() {
+        let p = any_phase();
+        let outcome = recovery_outcome_for_phase(&p);
+        assert_eq!(
+            matches!(outcome, RecoveryOutcome::Terminal { .. }),
+            p.is_terminal()
+        );
+        match outcome {
+            RecoveryOutcome::NoMergeInProgress => panic!("phase-derived outcome"),
+            RecoveryOutcome::Terminal { phase } => assert!(phase == p),
+            RecoveryOutcome::AbortedPreCommit { from } => {
+                assert!(from == p);
+                assert!(rank(&p) < rank(&MergePhase::Commit));
+                assert!(p.can_transition_to(&MergePhase::Aborted));
+            }
+            RecoveryOutcome::RetryValidate => {
+                assert!(p.can_transition_to(&MergePhase::Commit));
+                assert!(p.can_transition_to(&MergePhase::Aborted));
+            }
+            RecoveryOutcome::CheckCommit => {
+                assert!(p.can_transition_to(&MergePhase::Cleanup));
+                assert!(p.can_transition_to(&MergePhase::Aborted));
+            }
+            RecoveryOutcome::RetryCleanup => {
+                assert!(p.can_transition_to(&MergePhase::Complete));
+            }
+        }
+    }
+
+    /// `MergeStateFile::advance` and `abort` enforce exactly the table:
+    /// `advance(q)` succeeds iff `can_transition_to(q)` (and then lands in
+    /// `q`), `abort` succeeds iff `Aborted` is a legal edge; a refused call
+    /// leaves the phase unchanged.
+    #[kani::proof]
+    #[kani::unwind(42)]
+    fn merge_state_advance_and_abort_follow_table_all_pairs() {
+        let Ok(epoch) = EpochId::new("0000000000000000000000000000000000000000") else {
+            unreachable!("valid epoch")
+        };
+        let p = any_phase();
+        let q = any_phase();
+
+        let mut st = MergeStateFile::new(Vec::new(), epoch, 0);
+        st.phase = p.clone();
+        let adv = st.advance(q.clone(), 1);
+        assert_eq!(adv.is_ok(), p.can_transition_to(&q));
+        assert!(if adv.is_ok() {
+            st.phase == q
+        } else {
+            st.phase == p
+        });
+
+        st.phase = p.clone();
+        let ab = st.abort("kani", 2);
+        assert_eq!(ab.is_ok(), p.can_transition_to(&MergePhase::Aborted));
+        assert!(if ab.is_ok() {
+            st.phase == MergePhase::Aborted
+        } else {
+            st.phase == p
+        });
     }
 }
