@@ -677,6 +677,16 @@ pub fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str>) -> R
 ///   in the working tree. The conflicts are left as markers (working-copy-preserving —
 ///   conflicts are data, not errors).
 pub fn replay_snapshot(ws_path: &Path, snapshot: &SnapshotRef) -> Result<SnapshotReplayResult> {
+    let result = replay_snapshot_raw(ws_path, snapshot);
+    // bn-3fcbu: whatever `stash_apply` wrote, the executable bit of each
+    // replayed file must be the 3-way result, not the snapshot's stale mode.
+    reconcile_replayed_exec_bits(ws_path, snapshot, "HEAD");
+    result
+}
+
+/// [`replay_snapshot`] without the bn-3fcbu mode reconciliation; callers
+/// must run [`reconcile_replayed_exec_bits`] against the right "ours" commit.
+fn replay_snapshot_raw(ws_path: &Path, snapshot: &SnapshotRef) -> Result<SnapshotReplayResult> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let oid: maw_git::GitOid = snapshot
@@ -773,8 +783,12 @@ pub fn replay_snapshot_with_merge_protection(
         .collect();
 
     if overlapping.is_empty() {
-        // No overlap — safe to use normal replay.
-        return replay_snapshot(ws_path, snapshot);
+        // No overlap — safe to use normal replay. The executable bits are
+        // reconciled against the merged commit, not whatever HEAD is (the
+        // force-checkout fallback may have left HEAD elsewhere). (bn-3fcbu)
+        let result = replay_snapshot_raw(ws_path, snapshot);
+        reconcile_replayed_exec_bits(ws_path, snapshot, epoch_after);
+        return result;
     }
 
     tracing::info!(
@@ -1024,6 +1038,13 @@ pub fn replay_snapshot_with_merge_protection(
         }
     }
 
+    // Step 5b: `stash_apply` recreated every replayed file with the
+    // snapshot's mode — the mode the file had BEFORE the merge — so a merged
+    // `chmod +x` would be silently reverted in the worktree (and by the next
+    // trunk commit). Reconcile the executable bits against the merged
+    // commit. (bn-3fcbu)
+    reconcile_replayed_exec_bits(ws_path, snapshot, epoch_after);
+
     // Step 6: Also detect any conflicts from non-overlapping files (normal
     // stash apply conflicts).
     let git_conflicts = detect_conflicts_in_worktree(ws_path)?;
@@ -1039,6 +1060,146 @@ pub fn replay_snapshot_with_merge_protection(
     } else {
         Ok(SnapshotReplayResult::Conflicts(conflicts))
     }
+}
+
+/// Reconcile the executable bit of every file a snapshot replay wrote.
+///
+/// `stash_apply` recreates each replayed file with the mode recorded in the
+/// snapshot tree, which is the mode the file had when the snapshot was taken
+/// unless the user changed it. When the checkout between snapshot and replay
+/// changed a file's mode (e.g. a merged workspace committed `chmod +x`), the
+/// replayed file would silently revert that change. This runs a 3-way merge
+/// on the executable bit per replayed regular file:
+///
+/// - BASE: the snapshot's first parent (HEAD when the snapshot was taken),
+/// - THEIRS: the snapshot tree (the user's worktree state),
+/// - OURS: `ours_rev` (the commit that was checked out before the replay).
+///
+/// If the user changed the path's mode (THEIRS != BASE), the user's mode
+/// wins; otherwise OURS's executable bit is applied. Only the executable bit
+/// of regular files is touched, never through a symlink (neither the file
+/// itself nor any parent component inside the workspace). Best effort: a
+/// failure is logged and leaves the file as the replay wrote it. (bn-3fcbu)
+fn reconcile_replayed_exec_bits(ws_path: &Path, snapshot: &SnapshotRef, ours_rev: &str) {
+    if let Err(e) = try_reconcile_replayed_exec_bits(ws_path, snapshot, ours_rev) {
+        tracing::warn!("failed to reconcile file modes after snapshot replay: {e:#}");
+    }
+}
+
+fn try_reconcile_replayed_exec_bits(
+    ws_path: &Path,
+    snapshot: &SnapshotRef,
+    ours_rev: &str,
+) -> Result<()> {
+    use maw_git::EntryMode;
+
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let stash_oid: maw_git::GitOid = snapshot
+        .oid
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
+    let stash = repo
+        .read_commit(stash_oid)
+        .map_err(|e| anyhow::anyhow!("read snapshot commit: {e}"))?;
+    let Some(base_commit) = stash.parents.first().copied() else {
+        return Ok(());
+    };
+    let base_tree = repo
+        .read_commit(base_commit)
+        .map_err(|e| anyhow::anyhow!("read snapshot parent: {e}"))?
+        .tree_oid;
+    let ours_commit = repo
+        .rev_parse(ours_rev)
+        .map_err(|e| anyhow::anyhow!("resolve '{ours_rev}': {e}"))?;
+    let ours_tree = repo
+        .read_commit(ours_commit)
+        .map_err(|e| anyhow::anyhow!("read '{ours_rev}': {e}"))?
+        .tree_oid;
+    if ours_tree == base_tree {
+        // Nothing was checked out in between — the snapshot's modes are
+        // already the right answer.
+        return Ok(());
+    }
+
+    let user_changes = repo
+        .diff_trees(Some(base_tree), stash.tree_oid)
+        .map_err(|e| anyhow::anyhow!("diff snapshot against its parent: {e}"))?;
+    let merged_modes: std::collections::HashMap<String, Option<EntryMode>> = repo
+        .diff_trees(Some(base_tree), ours_tree)
+        .map_err(|e| anyhow::anyhow!("diff '{ours_rev}' against the snapshot parent: {e}"))?
+        .into_iter()
+        .map(|d| (d.path, d.new_mode))
+        .collect();
+
+    for change in user_changes {
+        let is_regular =
+            |m: Option<EntryMode>| matches!(m, Some(EntryMode::Blob | EntryMode::BlobExecutable));
+        if !is_regular(change.new_mode) {
+            // Deleted, a symlink, or a gitlink in the snapshot: no exec bit.
+            continue;
+        }
+        if change.old_mode != change.new_mode {
+            // The user's own mode change (or addition) wins; `stash_apply`
+            // already wrote the snapshot's mode.
+            continue;
+        }
+        let Some(&ours_mode) = merged_modes.get(&change.path) else {
+            // The merge did not touch this path: ours == base == theirs.
+            continue;
+        };
+        if !is_regular(ours_mode) {
+            // Type change on the merged side (e.g. file -> symlink) vs a user
+            // edit: that is a content conflict the replay reports; do not
+            // guess an exec bit.
+            continue;
+        }
+        let want_exec = ours_mode == Some(EntryMode::BlobExecutable);
+        set_worktree_exec_bit(ws_path, Path::new(&change.path), want_exec)?;
+    }
+    Ok(())
+}
+
+/// Set or clear the executable bit of the regular file `rel` inside
+/// `ws_path`, without following symlinks (the file or any parent component
+/// inside the workspace). Non-regular paths are left alone.
+#[cfg(unix)]
+fn set_worktree_exec_bit(ws_path: &Path, rel: &Path, exec: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut current = ws_path.to_path_buf();
+    for component in rel.components() {
+        current.push(component);
+        let Ok(meta) = current.symlink_metadata() else {
+            return Ok(());
+        };
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+    }
+    let meta = current
+        .symlink_metadata()
+        .with_context(|| format!("stat {}", current.display()))?;
+    if !meta.is_file() {
+        return Ok(());
+    }
+    let mode = meta.permissions().mode();
+    let new_mode = if exec {
+        // Grant execute wherever read is granted, like git checkout does.
+        mode | ((mode & 0o444) >> 2)
+    } else {
+        mode & !0o111
+    };
+    if new_mode != mode {
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(new_mode))
+            .with_context(|| format!("chmod {}", current.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_worktree_exec_bit(_ws_path: &Path, _rel: &Path, _exec: bool) -> Result<()> {
+    Ok(())
 }
 
 /// Write one replay result and preserve the error as part of the replay
@@ -2172,5 +2333,47 @@ mod tests {
             .expect_err("replay must not follow a symlink");
         assert!(error.to_string().contains("symlink"));
         assert_eq!(fs::read(&outside).expect("read outside file"), b"protected");
+    }
+
+    // bn-3fcbu: the exec-bit repair touches only regular files and never
+    // follows a symlink — neither the file itself nor a parent directory.
+    #[cfg(unix)]
+    #[test]
+    fn set_worktree_exec_bit_never_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "x").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o640)).unwrap();
+        let victim_dir = outside.path().join("d");
+        fs::create_dir(&victim_dir).unwrap();
+        let inner = victim_dir.join("f.sh");
+        fs::write(&inner, "x").unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let ws = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(&victim, ws.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(&victim_dir, ws.path().join("dirlink")).unwrap();
+        let real = ws.path().join("real.sh");
+        fs::write(&real, "x").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o640)).unwrap();
+
+        set_worktree_exec_bit(ws.path(), Path::new("link"), true).unwrap();
+        set_worktree_exec_bit(ws.path(), Path::new("dirlink/f.sh"), true).unwrap();
+        set_worktree_exec_bit(ws.path(), Path::new("missing.sh"), true).unwrap();
+        assert_eq!(mode(&victim), 0o640, "must not chmod through a symlink");
+        assert_eq!(
+            mode(&inner),
+            0o640,
+            "must not chmod through a symlinked dir"
+        );
+
+        // Regular file: execute follows read, other bits preserved.
+        set_worktree_exec_bit(ws.path(), Path::new("real.sh"), true).unwrap();
+        assert_eq!(mode(&real), 0o750);
+        set_worktree_exec_bit(ws.path(), Path::new("real.sh"), false).unwrap();
+        assert_eq!(mode(&real), 0o640);
     }
 }
