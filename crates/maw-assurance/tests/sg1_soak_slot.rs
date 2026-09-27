@@ -49,6 +49,17 @@ case "${STUB_MODE:?}" in
     echo "[sg1] nightly soak begin: seeds=$SG1_NIGHTLY_SEEDS"
     echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s"
     exit 0 ;;
+  clean_evidence)
+    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 harness_errors=0"
+    exit 0 ;;
+  harness_error)
+    echo "[sg1] HARNESS-ERROR seed=3 (oracles did not judge this seed; counted as a violation): HarnessError(..)"
+    echo "SG1 nightly soak FAILED (release-blocking; §7 acceptance gate):"
+    exit 101 ;;
+  harness_error_with_marker)
+    echo "[sg1] HARNESS-ERROR seed=3 (oracles did not judge this seed; counted as a violation): HarnessError(..)"
+    echo "[sg1] INFRA-FAILURE: EDQUOT: Disk quota exceeded"
+    exit 75 ;;
   infra)
     echo "[infra] host resource failure: EDQUOT: in-proc driver init: git init failed"
     echo '[sg1] INFRA-FAILURE: EDQUOT: in-proc driver init: "git" init: Disk quota exceeded (seed=5, after 3 clean seeds; run is NOT counted)'
@@ -246,6 +257,8 @@ fn every_non_infra_failure_shape_is_still_a_violation() {
         "marker_rc1",
         "marker_with_violation",
         "indented_marker",
+        "harness_error",
+        "harness_error_with_marker",
     ] {
         let c = Campaign::new();
         let (code, text) = c.slot(mode);
@@ -279,4 +292,29 @@ fn a_bare_stop_file_is_not_reported_as_infra() {
     let status = c.status();
     assert!(status.contains("manual pause or violation"), "{status}");
     assert!(!status.contains("INFRA-HALT"), "{status}");
+}
+
+/// bn-25pac: clean ledger rows record the evidence totals from the summary
+/// line (JSON null when the pinned binary predates them).
+#[test]
+fn clean_rows_record_evidence_totals() {
+    if !tools_available() {
+        return;
+    }
+    let c = Campaign::new();
+    let (code, text) = c.slot("clean_evidence");
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = c.slot("clean");
+    assert_eq!(code, 0, "{text}");
+    let ledger = c.ledger();
+    assert_eq!(ledger.len(), 2);
+    let new: serde_json::Value = serde_json::from_str(&ledger[0]).expect("JSON");
+    assert_eq!(new["status"], "clean");
+    assert_eq!(new["oracle_a_checks"], 55);
+    assert_eq!(new["witnesses"], 17);
+    assert_eq!(new["harness_errors"], 0);
+    let old: serde_json::Value = serde_json::from_str(&ledger[1]).expect("JSON");
+    assert_eq!(old["status"], "clean");
+    assert!(old["oracle_a_checks"].is_null(), "{old}");
+    assert!(old["witnesses"].is_null(), "{old}");
 }

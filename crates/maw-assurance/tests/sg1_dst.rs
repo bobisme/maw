@@ -98,7 +98,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use maw_assurance::in_proc::{InProcDriver, PlantedDefect, StepVerdict};
+use maw_assurance::in_proc::{DriveStats, InProcDriver, PlantedDefect, StepVerdict};
 use maw_assurance::infra::{self, INFRA_EXIT_CODE, INFRA_MARKER, InfraFailure};
 use maw_assurance::scenario::{
     CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
@@ -173,6 +173,9 @@ fn plant_violation() -> bool {
 /// In contrast, `SG1_PLANT_VIOLATION=1` (alone) inverts the assertion —
 /// it's the CI self-test that proves the gate IS wired correctly. Both
 /// modes plant the same defect; they differ only in the final assert.
+/// Generator workspace slots the planted-violation smoke plants on.
+const PLANT_SLOTS: usize = 8;
+
 fn plant_and_fail() -> bool {
     env_bool("SG1_PLANT_AND_FAIL")
 }
@@ -308,6 +311,22 @@ struct SeedOutcome {
     steps: usize,
     verdict: StepVerdict,
     elapsed: Duration,
+    /// bn-25pac evidence counters (what the oracles actually judged).
+    stats: DriveStats,
+}
+
+/// One summary fragment with the bn-25pac evidence totals, appended to the
+/// `[sg1] ... end:` lines so soak ledgers can record them.
+fn evidence_summary(totals: &DriveStats, harness_errors: usize) -> String {
+    format!(
+        "oracle_a_checks={} oracle_b_checks={} witnesses={} workspaces_observed={} \
+         commits_observed={} harness_errors={harness_errors}",
+        totals.oracle_a_checks,
+        totals.oracle_b_checks,
+        totals.witnesses,
+        totals.workspaces_observed,
+        totals.commits_observed,
+    )
 }
 
 fn new_driver() -> InProcDriver {
@@ -329,6 +348,7 @@ fn drive_one(seed: u64, n_steps: usize, planted: &[PlantedDefect]) -> SeedOutcom
         steps: out.steps_replayed,
         verdict: out.verdict,
         elapsed: started.elapsed(),
+        stats: out.stats,
     }
 }
 
@@ -340,6 +360,7 @@ fn drive_corpus_scenario_plan(entry: &ShrinkerCorpusEntry) -> SeedOutcome {
         steps: out.steps_replayed,
         verdict: out.verdict,
         elapsed: started.elapsed(),
+        stats: out.stats,
     }
 }
 
@@ -468,11 +489,7 @@ fn write_sg1_failure_bundle(
         .join(harness)
         .join(format!("seed-{seed}-{}", timestamp_millis()));
     fs::create_dir_all(&dir).expect("create SG1 DST artifact directory");
-    let (kind, entity) = match verdict {
-        StepVerdict::Clean => ("Clean", String::new()),
-        StepVerdict::OracleA(a) => (a.kind, a.oid.clone()),
-        StepVerdict::OracleB(b) => (b.kind, b.entity.clone()),
-    };
+    let (kind, entity) = verdict.signature();
     let bundle = Sg1Bundle {
         harness,
         seed,
@@ -600,8 +617,17 @@ fn sg1_per_commit_random_budget() {
     let wall_cap = per_commit_wall_cap();
     let steps = per_commit_steps();
     let planted: Vec<PlantedDefect> = if plant_violation() {
-        // The default generator's pre-seeded workspace is "ws-0".
-        vec![PlantedDefect::WorkLoss { ws: "ws-0".into() }]
+        // Plant a WorkLoss on EVERY generator slot. A plant on a workspace
+        // that no longer exists at plan end is a no-op, so this lands on
+        // whichever workspaces survive. (bn-25pac: planting only on the
+        // pre-seeded "ws-0" relied on in-proc destroys being silent
+        // no-ops; once destroys really destroy, ws-0 is often gone by the
+        // tail and the single plant never fires.)
+        (0..PLANT_SLOTS)
+            .map(|n| PlantedDefect::WorkLoss {
+                ws: format!("ws-{n}"),
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -617,6 +643,8 @@ fn sg1_per_commit_random_budget() {
     let mut violations = Vec::new();
     let mut clean = 0usize;
     let mut elapsed_total = Duration::ZERO;
+    let mut totals = DriveStats::default();
+    let mut harness_errors = 0usize;
 
     for (index, seed) in seeds.iter().enumerate() {
         assert!(
@@ -637,6 +665,15 @@ fn sg1_per_commit_random_budget() {
             }
         };
         elapsed_total += outcome.elapsed;
+        totals.accumulate(&outcome.stats);
+        if outcome.verdict.is_harness_error() {
+            harness_errors += 1;
+            eprintln!(
+                "[sg1] HARNESS-ERROR seed={seed} (oracles did not judge this seed; \
+                 counted as a violation): {:?}",
+                outcome.verdict
+            );
+        }
         if outcome.verdict.is_violation() {
             // Shrink and emit a minimal bundle.
             let original_plan = generate_plan(*seed, &ConditionProfile::default(), steps);
@@ -660,19 +697,30 @@ fn sg1_per_commit_random_budget() {
 
     eprintln!(
         "[sg1] per-commit budget: seeds={} clean={} violations={} \
-         driver_total={:?} wall={:?}",
+         driver_total={:?} wall={:?} {}",
         seeds.len(),
         clean,
         violations.len(),
         elapsed_total,
-        started.elapsed()
+        started.elapsed(),
+        evidence_summary(&totals, harness_errors)
     );
 
     if plant_violation() && !plant_and_fail() {
         // CI self-test mode: invert the assertion. The plant MUST trip
-        // the gate; if it didn't, the smoke is broken.
+        // the gate; if it didn't, the smoke is broken. bn-25pac: only a
+        // real ORACLE verdict proves the gate works — a HarnessError means
+        // the oracles never judged the seed, so it fails the smoke outright
+        // instead of satisfying it.
+        assert_eq!(
+            harness_errors, 0,
+            "SG1 planted-violation smoke FAILED: {harness_errors} seed(s) hit a harness error \
+             (the oracles did not judge them): {violations:?}"
+        );
         assert!(
-            !violations.is_empty(),
+            violations
+                .iter()
+                .any(|(_, v, _)| matches!(v, StepVerdict::OracleA(_))),
             "SG1 planted-violation smoke FAILED: planted WorkLoss did not trip any oracle \
              across {} seeds; the gate is BROKEN — investigate before relying on green CI",
             seeds.len()
@@ -727,6 +775,8 @@ fn sg1_nightly_soak() {
     let mut violations = Vec::new();
     let mut clean = 0u64;
     let mut elapsed_total = Duration::ZERO;
+    let mut totals = DriveStats::default();
+    let mut harness_errors = 0usize;
     let progress_every = (n / 20).max(1);
 
     // Always include the canonical bn-cm63 seed first.
@@ -755,6 +805,15 @@ fn sg1_nightly_soak() {
             }
         };
         elapsed_total += outcome.elapsed;
+        totals.accumulate(&outcome.stats);
+        if outcome.verdict.is_harness_error() {
+            harness_errors += 1;
+            eprintln!(
+                "[sg1] HARNESS-ERROR seed={seed} (oracles did not judge this seed; \
+                 counted as a violation): {:?}",
+                outcome.verdict
+            );
+        }
         if outcome.verdict.is_violation() {
             let original_plan = generate_plan(*seed, &ConditionProfile::default(), steps);
             let report = shrink(&original_plan, &[], outcome.verdict.clone());
@@ -777,12 +836,13 @@ fn sg1_nightly_soak() {
 
     eprintln!(
         "[sg1] nightly soak end: seeds={} clean={} violations={} \
-         driver_total={:?} wall={:?}",
+         driver_total={:?} wall={:?} {}",
         seeds.len(),
         clean,
         violations.len(),
         elapsed_total,
-        started.elapsed()
+        started.elapsed(),
+        evidence_summary(&totals, harness_errors)
     );
 
     assert!(
@@ -994,13 +1054,54 @@ fn sg1_infra_real_git_failures_classify_both_directions() {
     assert_ne!(code, Some(INFRA_EXIT_CODE), "{text}");
     assert!(!has_marker_line(&text), "{text}");
 
-    // 4. A non-infra step failure keeps the old best-effort semantics: never
-    //    classified as infra.
+    // 4. A non-infra step failure is never classified as infra — and
+    //    (bn-25pac) it is no longer swallowed as "best effort" either: the
+    //    seed fails as a HarnessError, exactly like an oracle violation.
     let (code, text) = run_nightly_child_with_git_shim(
         "update-ref refs/manifold/ws/",
         "fatal: cannot lock ref 'refs/manifold/ws/ws-0'",
         "8",
     );
+    assert_harness_failure(code, &text, "apply_op:");
+}
+
+/// bn-25pac: the run failed (non-zero, not infra, no marker, no accrual
+/// line claiming clean seeds) and names a HarnessError at `site_prefix`.
+fn assert_harness_failure(code: Option<i32>, text: &str, site_prefix: &str) {
+    assert_ne!(code, Some(0), "harness error must fail the run:\n{text}");
     assert_ne!(code, Some(INFRA_EXIT_CODE), "{text}");
-    assert!(!has_marker_line(&text), "{text}");
+    assert!(!has_marker_line(text), "{text}");
+    assert!(
+        text.contains(&format!("site: \"{site_prefix}")),
+        "expected a HarnessError at {site_prefix}:\n{text}"
+    );
+    assert!(
+        !text.contains("nightly soak end: seeds=2 clean=2"),
+        "a harness error must not count as clean:\n{text}"
+    );
+}
+
+/// bn-25pac: an unreadable post-step state (capture_state's
+/// `git for-each-ref` failing for a non-infra reason) used to read as a
+/// CLEAN step; now the seed fails as a HarnessError.
+#[cfg(unix)]
+#[test]
+fn sg1_capture_state_failure_fails_closed() {
+    let (code, text) = run_nightly_child_with_git_shim(
+        "for-each-ref --format=%(refname) %(objectname)",
+        "fatal: bad object refs/manifold/whatever",
+        "8",
+    );
+    assert_harness_failure(code, &text, "capture_state");
+}
+
+/// bn-25pac: an Oracle A tooling error (`git diff --raw` failing for a
+/// non-infra reason) used to be ignored (`Err(_) => {}`) and the step read
+/// as clean; now the seed fails as a HarnessError.
+#[cfg(unix)]
+#[test]
+fn sg1_oracle_a_tooling_failure_fails_closed() {
+    let (code, text) =
+        run_nightly_child_with_git_shim("diff --raw", "fatal: unable to read tree deadbeef", "24");
+    assert_harness_failure(code, &text, "oracle_a_check");
 }

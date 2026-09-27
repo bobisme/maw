@@ -16,6 +16,11 @@
 # an "INFRA-HALT" message so a full disk still gets human attention.
 # Anything else non-zero — including exit 75 WITHOUT the marker, or the marker
 # with any other exit code — is still a violation (fail closed).
+#
+# bn-25pac: a seed the oracles could not actually judge (plan step failed to
+# apply, unreadable state, oracle tooling error, vacuous evidence) is a
+# HarnessError and fails the run like a violation. Clean rows record the
+# evidence totals (oracle_a_checks, witnesses, harness_errors).
 set -uo pipefail
 
 INFRA_EXIT_CODE=75
@@ -61,11 +66,22 @@ out=$(SG1_BASE_SEED="$base" SG1_NIGHTLY_SEEDS="$SLOT_SEEDS" SG1_NIGHTLY_STEPS="$
 rc=$?
 end_ts=$(date -uIs)
 clean=$(grep -oP 'nightly soak end: seeds=[0-9]+ clean=\K[0-9]+' <<<"$out" | head -1)
+# bn-25pac evidence totals from the same summary line (JSON null when the
+# pinned binary predates them). Recorded in the ledger so a campaign's
+# accrual can be audited against what the oracles actually judged.
+evidence() {
+  local v
+  v=$(grep -m1 'nightly soak end:' <<<"$out" | grep -oP "\b$1=\K[0-9]+" | head -1)
+  printf '%s' "${v:-null}"
+}
+ev_checks=$(evidence oracle_a_checks)
+ev_witnesses=$(evidence witnesses)
+ev_harness=$(evidence harness_errors)
 infra_line=$(grep -m1 '^\[sg1\] INFRA-FAILURE:' <<<"$out" || true)
 # Belt and braces: any sign of an oracle violation in the output vetoes the
 # infra path (the harness already refuses to exit 75 after a violation).
 viol_seen=""
-grep -qE 'violations=[1-9]|soak FAILED|random budget FAILED' <<<"$out" && viol_seen=1
+grep -qE 'violations=[1-9]|harness_errors=[1-9]|HARNESS-ERROR|soak FAILED|random budget FAILED' <<<"$out" && viol_seen=1
 
 # --- infrastructure failure: record, do not accrue, do not halt (bounded) ---
 # Requires the dedicated exit code AND the marker line AND no violation sign
@@ -110,8 +126,8 @@ if [ "$rc" -ne 0 ] || [ -z "$clean" ]; then
 fi
 
 op=$(( clean * STEPS ))
-printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"op_steps":%s,"status":"clean"}\n' \
-  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$op" >> "$STATE/ledger.jsonl"
+printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"status":"clean"}\n' \
+  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" >> "$STATE/ledger.jsonl"
 
 exec {tf}>"$STATE/total.lock"; flock "$tf"
 cum=$(( $(cat "$STATE/cumulative") + op )); echo "$cum" > "$STATE/cumulative"

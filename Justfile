@@ -247,10 +247,14 @@ sg1-per-commit:
 # CI runs this once per workflow as a self-test to prove "the gate
 # actually turns red when something is wrong". If this ever passes
 # silently, the gate is broken and v1.0 cannot ship.
+# bn-25pac: 8 seeds x 24 steps (was 4 x 12). Once in-proc destroys really
+# destroy (with recovery pins), most short plans leave no surviving
+# unpinned work for the WorkLoss plant to lose; 8 x 24 trips 3 of 8 seeds.
+# Only ORACLE verdicts satisfy the smoke — a HarnessError fails it.
 sg1-per-commit-smoke:
   #!/usr/bin/env bash
   set -u
-  SG1_PLANT_VIOLATION=1 SG1_PER_COMMIT_SEEDS=4 SG1_PER_COMMIT_STEPS=12 \
+  SG1_PLANT_VIOLATION=1 SG1_PER_COMMIT_SEEDS=8 SG1_PER_COMMIT_STEPS=24 \
     cargo test -p maw-assurance --features oracles --test sg1_dst \
     sg1_per_commit_random_budget -- --exact --nocapture
   rc=$?

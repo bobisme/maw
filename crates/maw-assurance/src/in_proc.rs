@@ -107,7 +107,7 @@ use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 use crate::infra::{self, InfraFailure};
-use crate::oracle::{AssuranceViolation, WorkspaceStatus, capture_state};
+use crate::oracle::{AssuranceState, AssuranceViolation, WorkspaceStatus, capture_state};
 use crate::oracle_a::{OracleA, StepReport};
 use crate::oracle_b::{self, OracleBViolation};
 use crate::scenario::{
@@ -133,6 +133,43 @@ pub enum StepVerdict {
     /// Oracle B tripped. Carries the first violation (deterministic
     /// B1→B2→B3→B4 order) reduced to its class signature.
     OracleB(OracleBClass),
+    /// The harness itself malfunctioned (bn-25pac): a plan step could not
+    /// be applied, the post-step state could not be read, an oracle
+    /// returned a tooling error, or the seed ended with vacuous oracle
+    /// evidence. The oracles did NOT judge this seed, so it must never be
+    /// counted as clean — it fails the seed exactly like an oracle
+    /// violation. Positively classified host-resource failures
+    /// (`crate::infra`) never reach this variant: they abort the seed as
+    /// INFRA before a verdict is formed.
+    HarnessError(HarnessErrorClass),
+}
+
+/// Class signature for a harness malfunction (bn-25pac).
+#[derive(Clone, Debug)]
+pub struct HarnessErrorClass {
+    /// Stable identifier of the failing harness site (e.g.
+    /// `"capture_state"`, `"oracle_a_check"`, `"apply_op:Commit"`,
+    /// `"vacuous_witnesses"`). This is the equivalence key.
+    pub site: &'static str,
+    /// Human-readable detail (error text; may embed temp paths, so it is
+    /// NOT part of the equivalence key).
+    pub detail: String,
+}
+
+impl PartialEq for HarnessErrorClass {
+    fn eq(&self, other: &Self) -> bool {
+        self.site == other.site
+    }
+}
+impl Eq for HarnessErrorClass {}
+
+impl HarnessErrorClass {
+    fn new(site: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            site,
+            detail: detail.into(),
+        }
+    }
 }
 
 /// Class signature for an Oracle A violation — enum-variant + offending
@@ -176,8 +213,26 @@ impl StepVerdict {
             (Self::Clean, Self::Clean) => true,
             (Self::OracleA(a), Self::OracleA(b)) => a == b,
             (Self::OracleB(a), Self::OracleB(b)) => a == b,
+            (Self::HarnessError(a), Self::HarnessError(b)) => a == b,
             _ => false,
         }
+    }
+
+    /// `(kind, entity)` signature for bundles / corpus entries.
+    #[must_use]
+    pub fn signature(&self) -> (&'static str, String) {
+        match self {
+            Self::Clean => ("Clean", String::new()),
+            Self::OracleA(a) => (a.kind, a.oid.clone()),
+            Self::OracleB(b) => (b.kind, b.entity.clone()),
+            Self::HarnessError(h) => ("HarnessError", format!("{}: {}", h.site, h.detail)),
+        }
+    }
+
+    /// `true` iff this is a harness malfunction (not an oracle finding).
+    #[must_use]
+    pub const fn is_harness_error(&self) -> bool {
+        matches!(self, Self::HarnessError(_))
     }
 }
 
@@ -290,6 +345,86 @@ pub struct InProcDriver {
     planted: Vec<PlantedDefect>,
     /// Reusable Oracle A across steps (incremental design).
     oracle_a: OracleA,
+    /// Evidence counters for the vacuity guard (bn-25pac).
+    stats: DriveStats,
+    /// Workspaces with evidence (a create and/or new commits) that no
+    /// observation has handed to Oracle A yet: `ws -> (creates, commits)`.
+    pending_evidence: std::collections::BTreeMap<String, (usize, usize)>,
+    /// Test-only fault knob: pretend the per-step workspace observation
+    /// saw no workspaces (the historical `unwrap_or_default` fail-open
+    /// class), so the vacuity guard can be proven to fire.
+    #[cfg(test)]
+    test_blind_ws_observation: bool,
+}
+
+/// Per-drive evidence counters (bn-25pac). A seed only counts as clean
+/// when these prove the oracles actually judged it; see
+/// [`DriveStats::vacuity`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DriveStats {
+    /// Oracle A `check_step` calls that returned `Ok` (harvest + judge).
+    pub oracle_a_checks: usize,
+    /// Oracle B `check` calls that completed.
+    pub oracle_b_checks: usize,
+    /// Final `|W|` (Oracle A witness blobs harvested over the whole drive).
+    pub witnesses: usize,
+    /// `WsCreate`/`Recover` ops that materialised a workspace.
+    pub workspaces_created: usize,
+    /// Created workspaces that a later observation handed to Oracle A.
+    pub workspaces_observed: usize,
+    /// `Commit` ops that produced a new workspace commit (any).
+    pub commits_made: usize,
+    /// New workspace commits that a later Oracle A harvest observed while
+    /// the workspace was still extant (a plant that removes the workspace
+    /// before any observation legitimately leaves a commit unobserved).
+    pub commits_observed: usize,
+}
+
+impl DriveStats {
+    /// The end-of-seed vacuity guard (bn-25pac). `Some` iff the counters
+    /// prove the oracles did not actually judge the seed.
+    #[must_use]
+    pub fn vacuity(&self) -> Option<HarnessErrorClass> {
+        if self.oracle_a_checks == 0 || self.oracle_b_checks == 0 {
+            return Some(HarnessErrorClass::new(
+                "vacuous_checks",
+                format!(
+                    "seed ended with oracle_a_checks={} oracle_b_checks={}",
+                    self.oracle_a_checks, self.oracle_b_checks
+                ),
+            ));
+        }
+        if self.workspaces_created > 0 && self.workspaces_observed == 0 {
+            return Some(HarnessErrorClass::new(
+                "vacuous_workspaces",
+                format!(
+                    "plan created {} workspace(s) but Oracle A never observed one",
+                    self.workspaces_created
+                ),
+            ));
+        }
+        if self.commits_observed > 0 && self.witnesses == 0 {
+            return Some(HarnessErrorClass::new(
+                "vacuous_witnesses",
+                format!(
+                    "Oracle A observed {} workspace commit(s) but harvested 0 witnesses",
+                    self.commits_observed
+                ),
+            ));
+        }
+        None
+    }
+
+    /// Fold another drive's counters into this one (soak totals).
+    pub fn accumulate(&mut self, other: &Self) {
+        self.oracle_a_checks += other.oracle_a_checks;
+        self.oracle_b_checks += other.oracle_b_checks;
+        self.witnesses += other.witnesses;
+        self.workspaces_created += other.workspaces_created;
+        self.workspaces_observed += other.workspaces_observed;
+        self.commits_made += other.commits_made;
+        self.commits_observed += other.commits_observed;
+    }
 }
 
 impl InProcDriver {
@@ -298,7 +433,7 @@ impl InProcDriver {
         let repo = TempDir::new()?;
         let root = repo.path().to_path_buf();
         Self::init_repo(&root)?;
-        let root_oid = git_capture(&root, &["rev-parse", "HEAD"]);
+        let root_oid = git_capture(&root, &["rev-parse", "HEAD"])?;
         std::fs::create_dir_all(root.join("ws"))?;
         let oracle_a = OracleA::new(&root);
         Ok(Self {
@@ -306,6 +441,10 @@ impl InProcDriver {
             root_oid,
             planted: Vec::new(),
             oracle_a,
+            stats: DriveStats::default(),
+            pending_evidence: std::collections::BTreeMap::new(),
+            #[cfg(test)]
+            test_blind_ws_observation: false,
         })
     }
 
@@ -351,13 +490,28 @@ impl InProcDriver {
         let last_idx = plan.steps.len().saturating_sub(1);
         for (i, step) in plan.steps.iter().enumerate() {
             steps_replayed = i + 1;
-            // Apply is best-effort (a faulted step may legitimately fail),
-            // but a host resource failure (EDQUOT/ENOSPC/EMFILE/ENFILE)
-            // means the repo no longer reflects the plan: abort the seed as
-            // INFRA rather than let the oracles judge a half-applied step
-            // (bn-30v6e). Non-infra errors keep the old best-effort path.
+            // Plan-step application FAILS CLOSED (bn-25pac). The in-proc
+            // model expresses every *expected* outcome of an op under the
+            // plan — a merge whose source has no tip, an edit/commit to a
+            // workspace destroyed in flight, a recover with no recovery ref,
+            // a faulted merge skipping cleanup — as an `Ok(())` no-op or a
+            // modelled ref shape inside `apply_op`, never as an `Err`. So
+            // an `Err` here always means the harness could not make the repo
+            // reflect the plan. A positively classified host resource
+            // failure (EDQUOT/ENOSPC/EMFILE/ENFILE) aborts the seed as INFRA
+            // (bn-30v6e); anything else is a HarnessError that fails the
+            // seed like an oracle violation — the oracles must never judge
+            // a half-applied step and call it clean.
             if let Err(err) = self.apply_op(step) {
                 infra::raise_if_infra_io(&err, &format!("in-proc apply step {i}"));
+                return DriveOutcome {
+                    verdict: StepVerdict::HarnessError(HarnessErrorClass::new(
+                        op_site(&step.op),
+                        format!("step {i}: {err}"),
+                    )),
+                    steps_replayed,
+                    stats: self.final_stats(),
+                };
             }
 
             // Per-step Oracle A harvest is REQUIRED even in fast mode:
@@ -383,67 +537,176 @@ impl InProcDriver {
                     return DriveOutcome {
                         verdict,
                         steps_replayed,
+                        stats: self.final_stats(),
                     };
                 }
             } else if i < last_idx {
                 // Fast mode: per-step Oracle A harvest only (no Oracle B).
-                self.harvest_only(i);
+                if let Some(err) = self.harvest_only(i) {
+                    return DriveOutcome {
+                        verdict: StepVerdict::HarnessError(err),
+                        steps_replayed,
+                        stats: self.final_stats(),
+                    };
+                }
             }
         }
         // Final oracle check (always — catches plants at tail and is the
         // only check done in fast mode).
-        let final_verdict = self.check_oracles(last_idx);
+        let mut final_verdict = self.check_oracles(last_idx);
+        let stats = self.final_stats();
+        // Vacuity guard (bn-25pac): a seed only counts as clean when the
+        // evidence counters prove the oracles actually judged it.
+        if !final_verdict.is_violation()
+            && let Some(err) = stats.vacuity()
+        {
+            final_verdict = StepVerdict::HarnessError(err);
+        }
         DriveOutcome {
             verdict: final_verdict,
             steps_replayed,
+            stats,
+        }
+    }
+
+    fn final_stats(&self) -> DriveStats {
+        DriveStats {
+            witnesses: self.oracle_a.witness_count(),
+            ..self.stats
         }
     }
 
     /// Fast-mode-only helper: run **just** Oracle A's incremental harvest
-    /// on the current state and discard the result. Keeps `W` accreting
-    /// across steps without paying the full `check_oracles` cost.
-    fn harvest_only(&mut self, step_index: usize) {
-        let root = self.repo.path();
-        let mut state = match capture_state(root) {
+    /// on the current state and discard a finding (the final check judges).
+    /// Keeps `W` accreting across steps without paying the full
+    /// `check_oracles` cost. Returns `Some` iff the harness malfunctioned
+    /// (fail closed, bn-25pac).
+    fn harvest_only(&mut self, step_index: usize) -> Option<HarnessErrorClass> {
+        let state = match self.observe_state() {
             Ok(s) => s,
-            Err(err) => {
-                infra::raise_if_infra_text(&err.to_string(), "capture_state");
-                return;
-            }
+            Err(e) => return Some(e),
         };
-        state.workspaces.clear();
-        if let Ok(entries) = std::fs::read_dir(root.join("ws")) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !entry.path().is_dir() {
-                    continue;
-                }
-                let head_oid = git_capture_opt(
-                    root,
-                    &["rev-parse", "--verify", &refs_workspace_state(&name)],
-                )
-                .unwrap_or_default();
-                state.workspaces.insert(
-                    name,
-                    WorkspaceStatus {
-                        head_oid,
-                        is_dirty: false,
-                        exists: true,
-                    },
-                );
-            }
-        }
         match self.oracle_a.check_step(&state, step_index) {
-            Err(err) => infra::raise_if_infra_text(&err.to_string(), "oracle A harvest"),
+            Err(err) => {
+                infra::raise_if_infra_text(&err.to_string(), "oracle A harvest");
+                Some(HarnessErrorClass::new("oracle_a_check", err.to_string()))
+            }
             Ok(StepReport {
                 violation: Some(v), ..
             }) => {
                 if let Some(f) = oracle_a_infra(&v) {
                     infra::raise(f);
                 }
+                self.note_oracle_a_checked(&state);
+                None
             }
-            Ok(_) => {}
+            Ok(_) => {
+                self.note_oracle_a_checked(&state);
+                None
+            }
         }
+    }
+
+    /// Capture the post-step state in the maw-ref-shape view Oracle A
+    /// needs. FAILS CLOSED (bn-25pac): an unreadable state, an unreadable
+    /// `ws/` directory, or an extant workspace directory whose state ref
+    /// cannot be resolved is a HarnessError — never an empty/skipped
+    /// workspace that would let Oracle A silently harvest nothing.
+    ///
+    /// We override `state.workspaces` (head_oid taken from
+    /// `refs/manifold/ws/<ws>`) because the in-proc driver doesn't create
+    /// real per-ws git worktrees — `capture_state`'s default
+    /// `git rev-parse HEAD` inside `ws/<x>/` would return empty. This
+    /// matches the modelling level the `oracle_a::tests` use.
+    fn observe_state(&mut self) -> Result<AssuranceState, HarnessErrorClass> {
+        let root = self.repo.path().to_path_buf();
+        let mut state = match capture_state(&root) {
+            Ok(s) => s,
+            Err(err) => {
+                // A host resource failure must not read as "clean".
+                infra::raise_if_infra_text(&err.to_string(), "capture_state");
+                return Err(HarnessErrorClass::new("capture_state", err.to_string()));
+            }
+        };
+        state.workspaces.clear();
+        let entries = std::fs::read_dir(root.join("ws")).map_err(|err| {
+            infra::raise_if_infra_io(&err, "read ws/");
+            HarnessErrorClass::new("read_ws_dir", err.to_string())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                infra::raise_if_infra_io(&err, "read ws/ entry");
+                HarnessErrorClass::new("read_ws_dir", err.to_string())
+            })?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let head_oid = match resolve_ref(&root, &refs_workspace_state(&name)) {
+                Ok(Some(oid)) => oid,
+                Ok(None) => {
+                    return Err(HarnessErrorClass::new(
+                        "ws_state_ref_missing",
+                        format!(
+                            "workspace dir ws/{name} exists but refs/manifold/ws/{name} does not"
+                        ),
+                    ));
+                }
+                Err(err) => {
+                    return Err(HarnessErrorClass::new(
+                        "ws_state_ref_unreadable",
+                        err.to_string(),
+                    ));
+                }
+            };
+            state.workspaces.insert(
+                name,
+                WorkspaceStatus {
+                    head_oid,
+                    is_dirty: false,
+                    exists: true,
+                },
+            );
+        }
+        #[cfg(test)]
+        if self.test_blind_ws_observation {
+            state.workspaces.clear();
+        }
+        // Cross-check: every workspace that gained evidence since the last
+        // observation and whose directory still exists MUST be in the view
+        // handed to Oracle A (independent of the enumeration above, so a
+        // future regression there cannot silently blind Oracle A).
+        for ws in self.pending_evidence.keys() {
+            if root.join("ws").join(ws).is_dir() && !state.workspaces.contains_key(ws) {
+                return Err(HarnessErrorClass::new(
+                    "ws_unobserved",
+                    format!("workspace ws/{ws} exists on disk but was not handed to Oracle A"),
+                ));
+            }
+        }
+        Ok(state)
+    }
+
+    /// Record that Oracle A judged `state`: fold pending evidence for every
+    /// workspace it saw into the counters. Evidence for a workspace that
+    /// vanished before any observation (a tail plant) is dropped uncounted.
+    fn note_oracle_a_checked(&mut self, state: &AssuranceState) {
+        self.stats.oracle_a_checks += 1;
+        let pending = std::mem::take(&mut self.pending_evidence);
+        for (ws, (creates, commits)) in pending {
+            if state.workspaces.contains_key(&ws) {
+                self.stats.workspaces_observed += creates;
+                self.stats.commits_observed += commits;
+            }
+        }
+    }
+
+    fn note_evidence(&mut self, ws: &str, creates: usize, commits: usize) {
+        self.stats.workspaces_created += creates;
+        self.stats.commits_made += commits;
+        let e = self.pending_evidence.entry(ws.to_string()).or_default();
+        e.0 += creates;
+        e.1 += commits;
     }
 
     // -- impl details below --
@@ -459,20 +722,46 @@ impl InProcDriver {
         std::fs::write(root.join("README.md"), "dst\n")?;
         run_git(root, &["add", "README.md"])?;
         run_git_env(root, &["commit", "-q", "--no-gpg-sign", "-m", "init"], &env)?;
-        let head = git_capture(root, &["rev-parse", "HEAD"]);
+        let head = git_capture(root, &["rev-parse", "HEAD"])?;
         run_git(root, &["update-ref", "refs/manifold/epoch/current", &head])?;
         Ok(())
     }
 
-    /// Apply a single plan step to the repo. Best-effort: a model-valid
-    /// plan never produces errors here in normal operation.
+    /// Apply a single plan step to the repo.
+    ///
+    /// ## Error classification (bn-25pac)
+    ///
+    /// The in-proc model has no op that is *expected* to fail: fault
+    /// injection only changes a merge's cleanup shape, and every plan-level
+    /// "refusal" is modelled as an `Ok(())` no-op below —
+    ///
+    /// | op | expected no-op outcome (data, `Ok`) |
+    /// |----|--------------------------------------|
+    /// | `EditFiles` / `Commit` | workspace dir gone (destroyed in flight) or nothing to commit |
+    /// | `Merge` | no sources, or the last source has no state ref (no tip) |
+    /// | `Recover` | no recovery ref for the source workspace |
+    /// | `Destroy` | workspace already gone (dir/refs absent) |
+    /// | `Sync`/`Advance`/`DirtyTrunkWrite`/`CorruptWorktreeStatMasked` | not modelled at this tier |
+    /// | `Gc` | age-gated sweep (no modellable effect) |
+    ///
+    /// Every `Err` is therefore a harness malfunction: the caller turns it
+    /// into [`StepVerdict::HarnessError`] (after infra triage).
     fn apply_op(&mut self, step: &PlannedStep) -> std::io::Result<()> {
         let root = self.repo.path().to_path_buf();
         let env = pinned_env(step.git_time);
         match &step.op {
-            Op::WsCreate { ws, from } => self.do_ws_create(&root, ws, from, &env),
+            Op::WsCreate { ws, from } => {
+                self.do_ws_create(&root, ws, from, &env)?;
+                self.note_evidence(&ws.0, 1, 0);
+                Ok(())
+            }
             Op::EditFiles { ws, files } => self.do_edit_files(&root, ws, files),
-            Op::Commit { ws, msg } => self.do_commit(&root, ws, msg, &env),
+            Op::Commit { ws, msg } => {
+                if self.do_commit(&root, ws, msg, &env)? {
+                    self.note_evidence(&ws.0, 0, 1);
+                }
+                Ok(())
+            }
             Op::Merge {
                 srcs,
                 into,
@@ -483,7 +772,12 @@ impl InProcDriver {
             // sets advance_weight > 0; the default soak profile never emits it.
             Op::Sync { ws } | Op::Advance { ws } => self.do_sync(&root, ws),
             Op::Destroy { ws, force: _ } => self.do_destroy(&root, ws, &env),
-            Op::Recover { ws, to } => self.do_recover(&root, ws, to, &env),
+            Op::Recover { ws, to } => {
+                if self.do_recover(&root, ws, to, &env)? {
+                    self.note_evidence(&to.0, 1, 0);
+                }
+                Ok(())
+            }
             // bn-2bcx escape ops. Only generated when a profile sets
             // escape_weight > 0; the default in-proc soak profile keeps it 0, so
             // these arms are inert for the bn-2yzz campaign. The load-bearing
@@ -527,7 +821,7 @@ impl InProcDriver {
         // Wire the workspace's owned refs to the root commit (`main` head).
         // This mirrors `maw ws create` which establishes head/state/epoch
         // refs pointing at the base epoch.
-        let head = git_capture(root, &["rev-parse", "refs/manifold/epoch/current"]);
+        let head = git_capture(root, &["rev-parse", "refs/manifold/epoch/current"])?;
         run_git(root, &["update-ref", &refs_workspace_state(&ws.0), &head])?;
         run_git(root, &["update-ref", &refs_workspace_epoch(&ws.0), &head])?;
         // Create an oplog-head **blob** at the same shape `ensure_workspace_oplog_head`
@@ -535,7 +829,7 @@ impl InProcDriver {
         let oplog_blob = git_hash_object_stdin(
             root,
             format!(r#"{{"workspace_id":"{}","epoch":"{}"}}"#, ws.0, head).as_bytes(),
-        );
+        )?;
         run_git(
             root,
             &["update-ref", &refs_workspace_head(&ws.0), &oplog_blob],
@@ -565,17 +859,17 @@ impl InProcDriver {
         ws: &WsId,
         msg: &Seeded,
         env: &[(String, String)],
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         // Manually build a commit at refs/manifold/ws/<ws> with the
         // workspace's edited file content (a single file per commit is
         // sufficient — we just need a real, hash-stable blob for Oracle
         // A's witness harvest).
         let ws_dir = root.join("ws").join(&ws.0);
         if !ws_dir.is_dir() {
-            return Ok(()); // destroyed in flight
+            return Ok(false); // destroyed in flight (modelled no-op)
         }
         let mut tree_entries: Vec<(String, String)> = Vec::new();
-        for entry in walk_files(&ws_dir) {
+        for entry in walk_files(&ws_dir)? {
             let rel = entry
                 .strip_prefix(&ws_dir)
                 .unwrap_or(&entry)
@@ -586,11 +880,11 @@ impl InProcDriver {
                 continue;
             }
             let content = std::fs::read(&entry)?;
-            let blob = git_hash_object_stdin(root, &content);
+            let blob = git_hash_object_stdin(root, &content)?;
             tree_entries.push((rel, blob));
         }
         if tree_entries.is_empty() {
-            return Ok(());
+            return Ok(false); // nothing edited yet (modelled no-op)
         }
         // Build a flat tree (paths with `/` get nested via mktree's flat
         // input format — we use one entry per file with `/` allowed only
@@ -623,25 +917,22 @@ impl InProcDriver {
         }
         dedup.sort_by(|a, b| a.0.cmp(&b.0));
         let mktree_input: String = dedup.iter().map(|(_, l)| format!("{l}\n")).collect();
-        let tree = git_pipe(root, &["mktree"], mktree_input.as_bytes());
+        let tree = git_pipe(root, &["mktree"], mktree_input.as_bytes())?;
         // Parent: current ws tip if any, else main.
         let ws_ref = refs_workspace_state(&ws.0);
-        let parent = git_capture_or(
-            root,
-            &["rev-parse", "--verify", &format!("{ws_ref}^{{commit}}")],
-            &self.root_oid,
-        );
+        let parent = resolve_ref(root, &format!("{ws_ref}^{{commit}}"))?
+            .unwrap_or_else(|| self.root_oid.clone());
         let commit = git_pipe_env(
             root,
             &["commit-tree", &tree, "-p", &parent, "-m", &msg.0],
             &[],
             env,
-        );
+        )?;
         run_git(root, &["update-ref", &ws_ref, &commit])?;
         // Roll the workspace head ref to the new commit too (oplog
         // semantics aside, this gives Oracle A a fresh tip to harvest).
         run_git(root, &["update-ref", &refs_workspace_head(&ws.0), &commit])?;
-        Ok(())
+        Ok(true)
     }
 
     fn do_merge(
@@ -661,13 +952,13 @@ impl InProcDriver {
             return Ok(());
         };
         let ws_ref = refs_workspace_state(&last.0);
-        let Some(new_tip) = git_capture_opt(root, &["rev-parse", "--verify", &ws_ref]) else {
+        let Some(new_tip) = resolve_ref(root, &ws_ref)? else {
             return Ok(()); // no tip to merge — model says the chooser still emitted it; no-op
         };
         // Synthesize a merge commit so main has a fresh OID (closer to maw's
         // semantics, which always emits a fresh epoch commit).
-        let prev_main = git_capture(root, &["rev-parse", "refs/heads/main"]);
-        let merge_tree = git_capture(root, &["rev-parse", &format!("{new_tip}^{{tree}}")]);
+        let prev_main = git_capture(root, &["rev-parse", "refs/heads/main"])?;
+        let merge_tree = git_capture(root, &["rev-parse", &format!("{new_tip}^{{tree}}")])?;
         let merge_msg = format!(
             "merge {srcs:?} -> default (in-proc-driver)",
             srcs = srcs.iter().map(|w| &w.0).collect::<Vec<_>>()
@@ -684,7 +975,7 @@ impl InProcDriver {
             ],
             &[],
             env,
-        );
+        )?;
         run_git(root, &["update-ref", "refs/heads/main", &merge_commit])?;
         run_git(
             root,
@@ -720,19 +1011,19 @@ impl InProcDriver {
         msg: &Seeded,
         env: &[(String, String)],
     ) -> std::io::Result<()> {
-        let prev_main = git_capture(root, &["rev-parse", "refs/heads/main"]);
-        let base_tree = git_capture(root, &["rev-parse", &format!("{prev_main}^{{tree}}")]);
+        let prev_main = git_capture(root, &["rev-parse", "refs/heads/main"])?;
+        let base_tree = git_capture(root, &["rev-parse", &format!("{prev_main}^{{tree}}")])?;
         // Layer the seed-derived blobs onto the base tree via a fresh flat
         // tree (basename-only, matching do_commit's flattening).
         let mut mktree_input = String::new();
         // Preserve the base tree's existing entries by reading it back.
-        let ls = git_capture(root, &["ls-tree", &base_tree]);
+        let ls = git_capture(root, &["ls-tree", &base_tree])?;
         for line in ls.lines() {
             mktree_input.push_str(line);
             mktree_input.push('\n');
         }
         for f in files {
-            let blob = git_hash_object_stdin(root, f.content.as_bytes());
+            let blob = git_hash_object_stdin(root, f.content.as_bytes())?;
             let basename = std::path::Path::new(&f.path)
                 .file_name()
                 .map_or_else(|| f.path.clone(), |s| s.to_string_lossy().into_owned());
@@ -749,13 +1040,13 @@ impl InProcDriver {
         }
         dedup.sort_by(|a, b| a.0.cmp(&b.0));
         let tree_input: String = dedup.iter().map(|(_, l)| format!("{l}\n")).collect();
-        let tree = git_pipe(root, &["mktree"], tree_input.as_bytes());
+        let tree = git_pipe(root, &["mktree"], tree_input.as_bytes())?;
         let commit = git_pipe_env(
             root,
             &["commit-tree", &tree, "-p", &prev_main, "-m", &msg.0],
             &[],
             env,
-        );
+        )?;
         run_git(root, &["update-ref", "refs/heads/main", &commit])?;
         // Deliberately DO NOT advance refs/manifold/epoch/current — that is the
         // whole point: main is now ahead of the epoch (drift to be absorbed).
@@ -786,9 +1077,9 @@ impl InProcDriver {
                 "--format=%(refname)",
                 "refs/manifold/recovery/",
             ],
-        );
+        )?;
         for ref_name in listing.lines() {
-            let _ = run_git(root, &["update-ref", "-d", ref_name]);
+            run_git(root, &["update-ref", "-d", ref_name])?;
         }
         Ok(())
     }
@@ -797,32 +1088,44 @@ impl InProcDriver {
         let _ = env;
         let ws_dir = root.join("ws").join(&ws.0);
         // Pin a recovery ref BEFORE tearing refs down (well-behaved destroy).
-        if let Some(tip) = git_capture_opt(
-            root,
-            &["rev-parse", "--verify", &refs_workspace_state(&ws.0)],
-        ) {
+        if let Some(tip) = resolve_ref(root, &refs_workspace_state(&ws.0))? {
             run_git(
                 root,
                 &[
                     "update-ref",
+                    // bn-25pac: the pinned date is "<secs> +0000"; only the
+                    // seconds go in the ref name. The full value contains a
+                    // space, which git rejects as a bad ref name — and since
+                    // that error was swallowed, EVERY in-proc destroy was a
+                    // silent no-op (dir + owned refs kept, no recovery pin)
+                    // until plan-step errors started failing closed.
                     &format!(
                         "refs/manifold/recovery/{}/dst-{}",
                         ws.0,
                         env.iter()
                             .find(|(k, _)| k == "GIT_AUTHOR_DATE")
-                            .map_or("0", |(_, v)| v.as_str())
+                            .and_then(|(_, v)| v.split_whitespace().next())
+                            .unwrap_or("0")
                     ),
                     &tip,
                 ],
             )?;
         }
-        let _ = std::fs::remove_dir_all(&ws_dir);
+        // An already-absent directory is the modelled "destroy of a gone
+        // workspace" no-op; any other removal failure is a harness error.
+        match std::fs::remove_dir_all(&ws_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         for owned in [
             refs_workspace_state(&ws.0),
             refs_workspace_epoch(&ws.0),
             refs_workspace_head(&ws.0),
         ] {
-            let _ = run_git(root, &["update-ref", "-d", &owned]);
+            // `update-ref -d` of an absent ref exits 0, so an error here is
+            // a real failure.
+            run_git(root, &["update-ref", "-d", &owned])?;
         }
         Ok(())
     }
@@ -833,7 +1136,7 @@ impl InProcDriver {
         ws: &WsId,
         to: &WsId,
         env: &[(String, String)],
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         let _ = env;
         // Pick the first recovery ref for `ws` (deterministic ordering
         // via for-each-ref's lexicographic output) and materialize a new
@@ -845,12 +1148,14 @@ impl InProcDriver {
                 "--format=%(refname) %(objectname)",
                 &format!("refs/manifold/recovery/{}/", ws.0),
             ],
-        );
+        )?;
         let Some(first) = listing.lines().next() else {
-            return Ok(()); // no recovery ref — skip
+            return Ok(false); // no recovery ref — modelled no-op
         };
         let Some((_, oid)) = first.split_once(' ') else {
-            return Ok(());
+            return Err(std::io::Error::other(format!(
+                "malformed for-each-ref line: {first:?}"
+            )));
         };
         let ws_dir = root.join("ws").join(&to.0);
         std::fs::create_dir_all(&ws_dir)?;
@@ -858,7 +1163,7 @@ impl InProcDriver {
         run_git(root, &["update-ref", &refs_workspace_state(&to.0), oid])?;
         run_git(root, &["update-ref", &refs_workspace_epoch(&to.0), oid])?;
         run_git(root, &["update-ref", &refs_workspace_head(&to.0), oid])?;
-        Ok(())
+        Ok(true)
     }
 
     fn apply_planted_defect(&self, defect: &PlantedDefect, _step: &PlannedStep) {
@@ -867,7 +1172,7 @@ impl InProcDriver {
             PlantedDefect::WorkLoss { ws } => {
                 // Snapshot the tip's blob OIDs so we know what we're losing.
                 let ws_ref = refs_workspace_state(ws);
-                if let Some(_tip) = git_capture_opt(&root, &["rev-parse", "--verify", &ws_ref]) {
+                if let Ok(Some(_tip)) = resolve_ref(&root, &ws_ref) {
                     // Drop ALL owned refs + the ws dir + DO NOT pin recovery.
                     let _ = std::fs::remove_dir_all(root.join("ws").join(ws));
                     for owned in [
@@ -891,9 +1196,7 @@ impl InProcDriver {
                 // If there is no head ref yet (workspace was never
                 // created), synthesize one pointing at the root commit so
                 // B1 has something to flag.
-                if git_capture_opt(&root, &["rev-parse", "--verify", &refs_workspace_head(ws)])
-                    .is_none()
-                {
+                if matches!(resolve_ref(&root, &refs_workspace_head(ws)), Ok(None)) {
                     let _ = run_git(
                         &root,
                         &["update-ref", &refs_workspace_head(ws), &self.root_oid],
@@ -903,46 +1206,18 @@ impl InProcDriver {
         }
     }
 
+    /// Run Oracle A + Oracle B on the post-step state.
+    ///
+    /// FAILS CLOSED (bn-25pac): an unreadable state or an Oracle A tooling
+    /// error that is not positively classified as INFRA is a
+    /// [`StepVerdict::HarnessError`], never `Clean`. (Oracle A/B findings
+    /// — including their non-infra `GitError` findings — are violations as
+    /// before.)
     fn check_oracles(&mut self, step_index: usize) -> StepVerdict {
-        let root = self.repo.path();
-        // Oracle A first (incremental). We override `state.workspaces`
-        // to reflect the **maw-ref-shape** view (head_oid taken from
-        // `refs/manifold/ws/<ws>`) because the in-proc driver doesn't
-        // create real per-ws git worktrees — so `capture_state`'s default
-        // `git rev-parse HEAD` inside `ws/<x>/` would return empty and
-        // Oracle A's witness harvest would skip every workspace. This
-        // matches the modelling level the `oracle_a::tests` use
-        // (`make_state` sets head_oid manually from the ws state ref).
-        let mut state = match capture_state(root) {
+        let state = match self.observe_state() {
             Ok(s) => s,
-            Err(err) => {
-                // A host resource failure must not read as "clean".
-                infra::raise_if_infra_text(&err.to_string(), "capture_state");
-                return StepVerdict::Clean; // best-effort
-            }
+            Err(e) => return StepVerdict::HarnessError(e),
         };
-        state.workspaces.clear();
-        if let Ok(entries) = std::fs::read_dir(root.join("ws")) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !entry.path().is_dir() {
-                    continue;
-                }
-                let head_oid = git_capture_opt(
-                    root,
-                    &["rev-parse", "--verify", &refs_workspace_state(&name)],
-                )
-                .unwrap_or_default();
-                state.workspaces.insert(
-                    name,
-                    WorkspaceStatus {
-                        head_oid,
-                        is_dirty: false,
-                        exists: true,
-                    },
-                );
-            }
-        }
         if std::env::var("MAW_INPROC_DEBUG").is_ok() {
             eprintln!(
                 "[in_proc] step {step_index}: refs={} workspaces={} W={} U={}",
@@ -962,9 +1237,11 @@ impl InProcDriver {
                 if let Some(f) = oracle_a_infra(&v) {
                     infra::raise(f);
                 }
+                self.note_oracle_a_checked(&state);
                 return StepVerdict::OracleA(OracleAClass::from_violation(&v));
             }
             Ok(rep) => {
+                self.note_oracle_a_checked(&state);
                 if std::env::var("MAW_INPROC_DEBUG").is_ok() {
                     eprintln!(
                         "[in_proc] step {step_index} oracle A: clean (full_rescan={}, W={}, U={})",
@@ -972,14 +1249,40 @@ impl InProcDriver {
                     );
                 }
             }
-            Err(err) => infra::raise_if_infra_text(&err.to_string(), "oracle A check"),
+            Err(err) => {
+                infra::raise_if_infra_text(&err.to_string(), "oracle A check");
+                return StepVerdict::HarnessError(HarnessErrorClass::new(
+                    "oracle_a_check",
+                    err.to_string(),
+                ));
+            }
         }
         // Oracle B.
-        match first_oracle_b_finding(oracle_b::check(root)) {
+        let verdict = match first_oracle_b_finding(oracle_b::check(self.repo.path())) {
             Ok(Some(v)) => StepVerdict::OracleB(OracleBClass::from_violation(&v)),
             Ok(None) => StepVerdict::Clean,
             Err(f) => infra::raise(f),
-        }
+        };
+        self.stats.oracle_b_checks += 1;
+        verdict
+    }
+}
+
+/// Stable HarnessError site for a failed plan step.
+fn op_site(op: &Op) -> &'static str {
+    match op {
+        Op::WsCreate { .. } => "apply_op:WsCreate",
+        Op::EditFiles { .. } => "apply_op:EditFiles",
+        Op::Commit { .. } => "apply_op:Commit",
+        Op::Merge { .. } => "apply_op:Merge",
+        Op::Sync { .. } => "apply_op:Sync",
+        Op::Advance { .. } => "apply_op:Advance",
+        Op::Destroy { .. } => "apply_op:Destroy",
+        Op::Recover { .. } => "apply_op:Recover",
+        Op::OutOfMawCommit { .. } => "apply_op:OutOfMawCommit",
+        Op::DirtyTrunkWrite { .. } => "apply_op:DirtyTrunkWrite",
+        Op::CorruptWorktreeStatMasked { .. } => "apply_op:CorruptWorktreeStatMasked",
+        Op::Gc { .. } => "apply_op:Gc",
     }
 }
 
@@ -991,6 +1294,8 @@ pub struct DriveOutcome {
     /// Number of plan steps actually replayed (the last one is the one
     /// that tripped, if any).
     pub steps_replayed: usize,
+    /// Evidence counters (bn-25pac): how much the oracles actually judged.
+    pub stats: DriveStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,8 +1357,8 @@ fn first_oracle_b_finding(
 
 /// Run `cmd` and return its output. A spawn error, or a non-zero exit whose
 /// stderr names a host resource failure, aborts the seed as INFRA
-/// (bn-30v6e); a non-infra spawn error panics as before.
-fn git_output(cmd: &mut Command, args: &[&str]) -> std::process::Output {
+/// (bn-30v6e); any other spawn error is returned (the caller fails closed).
+fn git_output(cmd: &mut Command, args: &[&str]) -> std::io::Result<std::process::Output> {
     match cmd.output() {
         Ok(out) => {
             if !out.status.success() {
@@ -1062,11 +1367,11 @@ fn git_output(cmd: &mut Command, args: &[&str]) -> std::process::Output {
                     &format!("git {}", args.join(" ")),
                 );
             }
-            out
+            Ok(out)
         }
         Err(err) => {
             infra::raise_if_infra_io(&err, &format!("spawn git {}", args.join(" ")));
-            panic!("git spawn: {err:?}");
+            Err(err)
         }
     }
 }
@@ -1126,46 +1431,57 @@ fn run_git_env(root: &Path, args: &[&str], env: &[(String, String)]) -> std::io:
     Ok(())
 }
 
-fn git_capture(root: &Path, args: &[&str]) -> String {
-    let out = git_output(Command::new("git").args(args).current_dir(root), args);
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn git_capture_or(root: &Path, args: &[&str], default: &str) -> String {
-    let out = git_output(Command::new("git").args(args).current_dir(root), args);
-    if out.status.success() {
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    } else {
-        default.to_string()
-    }
-}
-
-fn git_capture_opt(root: &Path, args: &[&str]) -> Option<String> {
-    let out = match Command::new("git").args(args).current_dir(root).output() {
-        Ok(out) => out,
-        Err(err) => {
-            infra::raise_if_infra_io(&err, &format!("spawn git {}", args.join(" ")));
-            return None;
-        }
-    };
+/// Run git and return trimmed stdout. A non-zero exit is an error
+/// (bn-25pac: previously it silently returned empty stdout).
+fn git_capture(root: &Path, args: &[&str]) -> std::io::Result<String> {
+    let out = git_output(Command::new("git").args(args).current_dir(root), args)?;
     if !out.status.success() {
-        infra::raise_if_infra_text(
-            &String::from_utf8_lossy(&out.stderr),
-            &format!("git {}", args.join(" ")),
-        );
+        return Err(std::io::Error::other(format!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn git_pipe(root: &Path, args: &[&str], stdin: &[u8]) -> String {
+/// Resolve `rev` to an OID. `Ok(None)` ONLY when git positively reports
+/// "no such revision" (`rev-parse --verify --quiet` exits 1 with empty
+/// stderr); every other failure is an error (bn-25pac: previously any
+/// failure — including a spawn failure — read as "absent").
+fn resolve_ref(root: &Path, rev: &str) -> std::io::Result<Option<String>> {
+    let args = ["rev-parse", "--verify", "--quiet", rev];
+    let out = git_output(Command::new("git").args(args).current_dir(root), &args)?;
+    if out.status.success() {
+        let oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if oid.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "git rev-parse --verify {rev}: empty output"
+            )));
+        }
+        return Ok(Some(oid));
+    }
+    if out.status.code() == Some(1) && out.stderr.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    Err(std::io::Error::other(format!(
+        "git rev-parse --verify {rev} failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )))
+}
+
+fn git_pipe(root: &Path, args: &[&str], stdin: &[u8]) -> std::io::Result<String> {
     git_pipe_env(root, args, stdin, &[])
 }
 
-fn git_pipe_env(root: &Path, args: &[&str], stdin: &[u8], env: &[(String, String)]) -> String {
+fn git_pipe_env(
+    root: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    env: &[(String, String)],
+) -> std::io::Result<String> {
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(root)
@@ -1180,48 +1496,54 @@ fn git_pipe_env(root: &Path, args: &[&str], stdin: &[u8], env: &[(String, String
         Ok(child) => child,
         Err(err) => {
             infra::raise_if_infra_io(&err, &format!("spawn {ctx}"));
-            panic!("git spawn: {err:?}");
+            return Err(err);
         }
     };
     // A git that dies early (e.g. on EDQUOT) closes stdin → EPIPE here;
-    // the real cause is in its stderr, so collect that before panicking.
+    // the real cause is in its stderr, so collect that before failing.
     let write_err = if stdin.is_empty() {
         None
     } else {
-        child.stdin.as_mut().unwrap().write_all(stdin).err()
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other(format!("{ctx}: no stdin pipe")))?
+            .write_all(stdin)
+            .err()
     };
     let out = match child.wait_with_output() {
         Ok(out) => out,
         Err(err) => {
             infra::raise_if_infra_io(&err, &format!("wait {ctx}"));
-            panic!("git wait: {err:?}");
+            return Err(err);
         }
     };
     if let Some(err) = write_err {
         infra::raise_if_infra_text(&String::from_utf8_lossy(&out.stderr), &ctx);
         infra::raise_if_infra_io(&err, &format!("{ctx} stdin"));
-        panic!("{ctx}: stdin write failed: {err:?}");
+        return Err(std::io::Error::other(format!(
+            "{ctx}: stdin write failed: {err}"
+        )));
     }
     if !out.status.success() {
         infra::raise_if_infra_text(&String::from_utf8_lossy(&out.stderr), &ctx);
-        panic!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
+        return Err(std::io::Error::other(format!(
+            "{ctx} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn git_hash_object_stdin(root: &Path, content: &[u8]) -> String {
+fn git_hash_object_stdin(root: &Path, content: &[u8]) -> std::io::Result<String> {
     git_pipe(root, &["hash-object", "-w", "--stdin"], content)
 }
 
-fn walk_files(dir: &Path) -> Vec<PathBuf> {
+fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    let _ = walk_files_inner(dir, &mut out);
+    walk_files_inner(dir, &mut out)?;
     out.sort();
-    out
+    Ok(out)
 }
 fn walk_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -1240,6 +1562,7 @@ fn walk_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[allow(dead_code)]
 fn list_refs(root: &Path) -> BTreeSet<String> {
     git_capture(root, &["for-each-ref", "--format=%(refname)"])
+        .unwrap_or_default()
         .lines()
         .map(str::to_string)
         .collect()
@@ -1341,5 +1664,362 @@ mod infra_triage_tests {
         let mut driver = InProcDriver::new().expect("driver").with_planted(planted);
         let out = driver.drive(&plan);
         assert!(out.verdict.is_violation(), "{:?}", out.verdict);
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    //! bn-25pac: oracle/harness errors and unreadable state must never be
+    //! counted as a clean seed, and a clean seed must carry non-vacuous
+    //! evidence.
+    use super::*;
+    use crate::scenario::{ConditionProfile, GIT_TIME_BASE_FOR_DRIVER, generate_plan};
+
+    fn step(index: usize, op: Op) -> PlannedStep {
+        PlannedStep {
+            index,
+            op,
+            fault: FaultSpec::None,
+            git_time: GIT_TIME_BASE_FOR_DRIVER + 100 * (i64::try_from(index).unwrap() + 1),
+        }
+    }
+
+    /// create ws-7, edit, commit (no plants).
+    fn commit_plan() -> ScenarioPlan {
+        let ws = WsId::slot(7);
+        ScenarioPlan {
+            seed: 0x25AC,
+            profile: ConditionProfile::default(),
+            steps: vec![
+                step(
+                    0,
+                    Op::WsCreate {
+                        ws: ws.clone(),
+                        from: BaseRef::Main,
+                    },
+                ),
+                step(
+                    1,
+                    Op::EditFiles {
+                        ws: ws.clone(),
+                        files: vec![FileEdit {
+                            path: "doc.txt".into(),
+                            content: "bn-25pac witness\n".into(),
+                        }],
+                    },
+                ),
+                step(
+                    2,
+                    Op::Commit {
+                        ws,
+                        msg: Seeded("bn-25pac".into()),
+                    },
+                ),
+            ],
+        }
+    }
+
+    fn harness_site(v: &StepVerdict) -> Option<&'static str> {
+        match v {
+            StepVerdict::HarnessError(h) => Some(h.site),
+            _ => None,
+        }
+    }
+
+    fn git_ok(root: &Path, args: &[&str]) {
+        run_git(root, args).expect("git");
+    }
+
+    #[test]
+    fn normal_drive_is_clean_with_real_evidence() {
+        let mut d = InProcDriver::new().expect("driver");
+        let out = d.drive(&commit_plan());
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        // one per step + the final check
+        assert_eq!(out.stats.oracle_a_checks, 4, "{:?}", out.stats);
+        assert_eq!(out.stats.oracle_b_checks, 4, "{:?}", out.stats);
+        assert_eq!(out.stats.workspaces_created, 1);
+        assert_eq!(out.stats.workspaces_observed, 1);
+        assert_eq!(out.stats.commits_made, 1);
+        assert_eq!(out.stats.commits_observed, 1);
+        assert!(out.stats.witnesses > 0, "{:?}", out.stats);
+        assert_eq!(out.stats.vacuity(), None);
+    }
+
+    #[test]
+    fn generated_plans_are_clean_and_non_vacuous() {
+        for seed in 0..6u64 {
+            let plan = generate_plan(seed, &ConditionProfile::default(), 32);
+            let mut d = InProcDriver::new().expect("driver");
+            let out = d.drive(&plan);
+            assert!(
+                matches!(out.verdict, StepVerdict::Clean),
+                "seed {seed}: {:?}",
+                out.verdict
+            );
+            assert_eq!(
+                out.stats.oracle_a_checks,
+                plan.steps.len() + 1,
+                "seed {seed}"
+            );
+            assert_eq!(
+                out.stats.oracle_b_checks,
+                plan.steps.len() + 1,
+                "seed {seed}"
+            );
+            assert!(
+                out.stats.workspaces_observed > 0,
+                "seed {seed}: {:?}",
+                out.stats
+            );
+        }
+    }
+
+    /// bn-25pac finding: the recovery ref name used to embed the pinned
+    /// date's " +0000", git rejected it, the error was swallowed, and every
+    /// in-proc destroy was a silent no-op.
+    #[test]
+    fn destroy_really_destroys_and_pins_recovery() {
+        let mut plan = commit_plan();
+        plan.steps.push(step(
+            3,
+            Op::Destroy {
+                ws: WsId::slot(7),
+                force: false,
+            },
+        ));
+        let mut d = InProcDriver::new().expect("driver");
+        let out = d.drive(&plan);
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        let root = d.repo_root();
+        assert!(!root.join("ws/ws-7").exists(), "ws dir must be gone");
+        assert_eq!(resolve_ref(root, "refs/manifold/ws/ws-7").unwrap(), None);
+        let pins = git_capture(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/manifold/recovery/ws-7/",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            pins.lines().count(),
+            1,
+            "exactly one recovery pin: {pins:?}"
+        );
+    }
+
+    #[test]
+    fn capture_state_error_is_harness_error() {
+        let mut d = InProcDriver::new().expect("driver");
+        let _ = d.drive(&commit_plan());
+        // Make the repo unreadable to `git for-each-ref`.
+        std::fs::remove_file(d.repo_root().join(".git/HEAD")).unwrap();
+        let v = d.check_oracles(3);
+        assert_eq!(harness_site(&v), Some("capture_state"), "{v:?}");
+    }
+
+    #[test]
+    fn oracle_a_tooling_error_is_harness_error() {
+        let mut d = InProcDriver::new().expect("driver");
+        let _ = d.drive(&commit_plan());
+        let root = d.repo_root().to_path_buf();
+        // Point ws-7's base epoch at a BLOB: capture_state still reads the
+        // refs fine, but Oracle A's `git diff --raw <base> <tip>` fails.
+        let blob = git_hash_object_stdin(&root, b"not a commit\n").unwrap();
+        git_ok(&root, &["update-ref", "refs/manifold/epoch/ws/ws-7", &blob]);
+        let v = d.check_oracles(3);
+        assert_eq!(harness_site(&v), Some("oracle_a_check"), "{v:?}");
+    }
+
+    #[test]
+    fn extant_ws_without_state_ref_is_harness_error() {
+        let mut d = InProcDriver::new().expect("driver");
+        let _ = d.drive(&commit_plan());
+        std::fs::create_dir_all(d.repo_root().join("ws/ghost")).unwrap();
+        let v = d.check_oracles(3);
+        assert_eq!(harness_site(&v), Some("ws_state_ref_missing"), "{v:?}");
+    }
+
+    #[test]
+    fn plan_step_error_is_harness_error() {
+        let mut d = InProcDriver::new().expect("driver");
+        // A FILE where ws-7's directory must go: WsCreate cannot apply.
+        std::fs::write(d.repo_root().join("ws/ws-7"), "obstruction").unwrap();
+        let out = d.drive(&commit_plan());
+        assert_eq!(
+            harness_site(&out.verdict),
+            Some("apply_op:WsCreate"),
+            "{:?}",
+            out.verdict
+        );
+        assert_eq!(out.steps_replayed, 1);
+    }
+
+    #[test]
+    fn plan_step_error_is_harness_error_in_fast_mode_too() {
+        let mut d = InProcDriver::new().expect("driver");
+        std::fs::write(d.repo_root().join("ws/ws-7"), "obstruction").unwrap();
+        let out = d.drive_fast(&commit_plan());
+        assert_eq!(harness_site(&out.verdict), Some("apply_op:WsCreate"));
+    }
+
+    #[test]
+    fn blind_workspace_observation_is_caught() {
+        let mut d = InProcDriver::new().expect("driver");
+        d.test_blind_ws_observation = true;
+        let out = d.drive(&commit_plan());
+        assert_eq!(
+            harness_site(&out.verdict),
+            Some("ws_unobserved"),
+            "{:?}",
+            out.verdict
+        );
+    }
+
+    #[test]
+    fn vacuity_guard_fires_on_each_vacuous_shape() {
+        let ok = DriveStats {
+            oracle_a_checks: 4,
+            oracle_b_checks: 4,
+            witnesses: 2,
+            workspaces_created: 1,
+            workspaces_observed: 1,
+            commits_made: 1,
+            commits_observed: 1,
+        };
+        assert_eq!(ok.vacuity(), None);
+        let site = |s: DriveStats| s.vacuity().map(|h| h.site);
+        assert_eq!(
+            site(DriveStats {
+                oracle_a_checks: 0,
+                ..ok
+            }),
+            Some("vacuous_checks")
+        );
+        assert_eq!(
+            site(DriveStats {
+                oracle_b_checks: 0,
+                ..ok
+            }),
+            Some("vacuous_checks")
+        );
+        assert_eq!(
+            site(DriveStats {
+                workspaces_observed: 0,
+                ..ok
+            }),
+            Some("vacuous_workspaces")
+        );
+        assert_eq!(
+            site(DriveStats { witnesses: 0, ..ok }),
+            Some("vacuous_witnesses")
+        );
+        // A plan that never created/committed anything is not vacuous.
+        assert_eq!(
+            site(DriveStats {
+                witnesses: 0,
+                workspaces_created: 0,
+                workspaces_observed: 0,
+                commits_made: 0,
+                commits_observed: 0,
+                ..ok
+            }),
+            None
+        );
+    }
+
+    /// The guard is wired into the drive: a seed whose final verdict is
+    /// clean but whose evidence is vacuous is reported as HarnessError.
+    #[test]
+    fn vacuity_guard_is_wired_into_drive() {
+        let mut d = InProcDriver::new().expect("driver");
+        // Empty plan → drive still runs the final check; zero evidence of
+        // anything is fine (nothing created) — so force a vacuous shape:
+        // pretend a commit was observed but Oracle A harvested nothing.
+        d.stats.commits_observed = 1;
+        let plan = ScenarioPlan {
+            seed: 0,
+            profile: ConditionProfile::default(),
+            steps: vec![step(0, Op::Sync { ws: WsId::slot(0) })],
+        };
+        let out = d.drive(&plan);
+        assert_eq!(
+            harness_site(&out.verdict),
+            Some("vacuous_witnesses"),
+            "{:?}",
+            out.verdict
+        );
+    }
+
+    /// bn-25pac finding (Oracle A): when the step that loses work (refs
+    /// dropped + pruned) ALSO advances another frontier root, Oracle A's
+    /// incremental `git rev-list <new> ^<prev roots>` hit `bad object` on
+    /// the pruned previous root and errored — which the driver used to
+    /// swallow as clean, so the loss went unreported. It must be judged.
+    #[test]
+    fn work_loss_with_concurrent_root_advance_is_judged() {
+        let mut plan = commit_plan();
+        let ws6 = WsId::slot(6);
+        plan.steps.push(step(
+            3,
+            Op::WsCreate {
+                ws: ws6.clone(),
+                from: BaseRef::Main,
+            },
+        ));
+        plan.steps.push(step(
+            4,
+            Op::EditFiles {
+                ws: ws6.clone(),
+                files: vec![FileEdit {
+                    path: "other.txt".into(),
+                    content: "ws-6 content\n".into(),
+                }],
+            },
+        ));
+        plan.steps.push(step(
+            5,
+            Op::Commit {
+                ws: ws6,
+                msg: Seeded("advance ws-6".into()),
+            },
+        ));
+        let planted = vec![PlantedDefect::WorkLoss { ws: "ws-7".into() }];
+        for fast in [false, true] {
+            let mut d = InProcDriver::new()
+                .expect("driver")
+                .with_planted(planted.clone());
+            let out = if fast {
+                d.drive_fast(&plan)
+            } else {
+                d.drive(&plan)
+            };
+            assert!(
+                matches!(&out.verdict, StepVerdict::OracleA(a) if a.kind == "ReachabilityLost"),
+                "fast={fast}: {:?}",
+                out.verdict
+            );
+        }
+    }
+
+    #[test]
+    fn harness_error_same_class_is_by_site() {
+        let a = StepVerdict::HarnessError(HarnessErrorClass::new("capture_state", "x /tmp/a"));
+        let b = StepVerdict::HarnessError(HarnessErrorClass::new("capture_state", "y /tmp/b"));
+        let c = StepVerdict::HarnessError(HarnessErrorClass::new("oracle_a_check", "x"));
+        assert!(a.same_class(&b));
+        assert!(!a.same_class(&c));
+        assert!(a.is_violation());
+        assert!(!a.same_class(&StepVerdict::Clean));
     }
 }

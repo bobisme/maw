@@ -456,8 +456,23 @@ impl OracleA {
             // we enumerate ONLY objects newly reachable via the
             // added/advanced roots. Deduplicate so we don't pass the same
             // OID twice.
+            //
+            // bn-25pac: a previous root whose object has since been PRUNED
+            // (e.g. a workspace's refs dropped without a recovery pin, then
+            // `gc --prune`) makes `git rev-list ... ^<gone>` fail with
+            // `bad object`. That used to surface as an Oracle A tooling
+            // error on exactly the steps where content was lost (and the
+            // in-proc driver swallowed it as clean). A pruned root cannot
+            // exclude anything, so dropping it only widens the enumeration
+            // (still a subset of what the new roots reach — sound), and it
+            // is by definition a retreat, which forces the authoritative
+            // full rescan that judges the loss.
             let prev_oids: BTreeSet<String> = self.last_frontier.values().cloned().collect();
-            let novel = rev_list_objects(&self.repo_root, &new_roots, &prev_oids)?;
+            let existing = existing_objects(&self.repo_root, &prev_oids)?;
+            if existing.len() != prev_oids.len() {
+                retreated = true;
+            }
+            let novel = rev_list_objects(&self.repo_root, &new_roots, &existing)?;
             self.reachable_blobs.extend(novel);
         }
         Ok(retreated)
@@ -582,6 +597,79 @@ fn rev_list_objects(
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().map(|s| s.trim().to_owned()).collect())
+}
+
+/// The subset of `oids` whose objects exist in the object database
+/// (bn-25pac). One `git cat-file --batch-check` round-trip; `<oid> missing`
+/// lines are dropped, any other failure is a `GitError` (fail closed).
+///
+/// TODO(gix): assurance carveout — see [`rev_list_objects`].
+fn existing_objects(
+    repo_root: &Path,
+    oids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, AssuranceViolation> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    if oids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let git_err = |stderr: String| AssuranceViolation::GitError {
+        check: "oracle_a::existing_objects".to_owned(),
+        command: "git cat-file --batch-check".to_owned(),
+        stderr,
+    };
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(repo_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| git_err(e.to_string()))?;
+    let mut input = String::new();
+    for oid in oids {
+        input.push_str(oid);
+        input.push('\n');
+    }
+    let write_res = child
+        .stdin
+        .take()
+        .ok_or_else(|| git_err("no stdin pipe".to_owned()))?
+        .write_all(input.as_bytes());
+    let output = child
+        .wait_with_output()
+        .map_err(|e| git_err(e.to_string()))?;
+    if let Err(e) = write_res {
+        return Err(git_err(format!(
+            "{e}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if !output.status.success() {
+        return Err(git_err(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut present = BTreeSet::new();
+    let mut lines = 0usize;
+    for line in stdout.lines() {
+        lines += 1;
+        let mut parts = line.split_whitespace();
+        let (Some(oid), Some(kind)) = (parts.next(), parts.next()) else {
+            return Err(git_err(format!("unparseable batch-check line: {line:?}")));
+        };
+        if kind != "missing" {
+            present.insert(oid.to_owned());
+        }
+    }
+    if lines != oids.len() {
+        return Err(git_err(format!(
+            "batch-check returned {lines} lines for {} oids",
+            oids.len()
+        )));
+    }
+    Ok(present)
 }
 
 /// Workspace delta blobs: every blob OID present in `tip`'s tree that is

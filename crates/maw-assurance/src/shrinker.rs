@@ -326,11 +326,7 @@ impl ShrinkerCorpusEntry {
     /// Build a corpus entry from a shrink report.
     #[must_use]
     pub fn from_report(report: &ShrinkReport, planted: &[crate::in_proc::PlantedDefect]) -> Self {
-        let (kind, entity) = match &report.minimal_verdict {
-            StepVerdict::OracleA(a) => (a.kind, a.oid.clone()),
-            StepVerdict::OracleB(b) => (b.kind, b.entity.clone()),
-            StepVerdict::Clean => ("Clean", String::new()),
-        };
+        let (kind, entity) = report.minimal_verdict.signature();
         let crash_phase = report
             .minimal
             .steps
