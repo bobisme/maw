@@ -98,8 +98,67 @@ pub struct WorkingCopyConflict {
     /// Path of the conflicted file, relative to the workspace root.
     pub path: String,
     /// Conflict type: `"content"`, `"both_added"`, `"both_deleted"`,
-    /// `"add_mod_conflict"`, `"delete_mod_conflict"`.
+    /// `"add_mod_conflict"`, `"delete_mod_conflict"`, `"type_change"`.
     pub conflict_type: String,
+    /// For a `"type_change"` conflict (bn-2ygs0): the two sides that could
+    /// not be merged into one path. No conflict markers exist for it; the
+    /// merged side is on disk and the local side lives only in the replayed
+    /// snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_conflict: Option<TypeConflict>,
+}
+
+/// The two sides of a dirty-replay type conflict: a symlink vs a regular
+/// file, a symlink vs a deletion, or two different symlink targets. (bn-2ygs0)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TypeConflict {
+    /// The merged side.
+    pub merged: EntryKind,
+    /// The user's uncommitted side (always preserved in the snapshot).
+    pub local: EntryKind,
+    /// Which side the replay left on disk: the merged side, unless the merge
+    /// deleted the path (then the user's side stays, as for a regular file
+    /// the merge deleted).
+    pub kept: KeptSide,
+}
+
+/// Which side of a [`TypeConflict`] is on disk after the replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptSide {
+    /// The merged side is on disk; the user's side is only in the snapshot.
+    Merged,
+    /// The user's side is on disk (the merge deleted the path).
+    Local,
+}
+
+/// The kind of a worktree entry, as far as a type conflict cares.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EntryKind {
+    /// The path does not exist.
+    Deleted,
+    /// A regular file.
+    File {
+        /// Whether the file is executable.
+        executable: bool,
+    },
+    /// A symbolic link.
+    Symlink {
+        /// The link target (lossy UTF-8).
+        target: String,
+    },
+}
+
+impl std::fmt::Display for EntryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deleted => f.write_str("deleted"),
+            Self::File { executable: false } => f.write_str("regular file"),
+            Self::File { executable: true } => f.write_str("executable regular file"),
+            Self::Symlink { target } => write!(f, "symlink -> {target}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +475,7 @@ pub fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyCon
         conflicts.push(WorkingCopyConflict {
             path,
             conflict_type: conflict_type.to_owned(),
+            type_conflict: None,
         });
     }
 
@@ -835,12 +895,26 @@ pub fn replay_snapshot_with_merge_protection(
         cfg
     };
 
+    // Step 3a (bn-2ygs0): a path where the merged side or the user's side is
+    // a symlink cannot go through the text merge below: the worktree entry
+    // may be a symlink (writing markers would follow it, or refuse and abort
+    // the whole replay), and a symlink and a file — or two symlink targets —
+    // have no textual merge. Classify those from the three trees and capture
+    // the merged entry exactly as the checkout left it on disk.
+    let typed_paths =
+        classify_symlink_overlaps(ws_path, snapshot, anchor_epoch, epoch_after, &overlapping)?;
+
     // Step 3: Save the merge versions of overlapping files BEFORE stash apply.
     // After checkout, these files contain the correct merge result.
     let mut merge_versions: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     for path in &overlapping {
+        if typed_paths.iter().any(|t| &t.path == path) {
+            continue;
+        }
         let full = ws_path.join(path);
-        if full.is_file() {
+        // Never follow a symlink here: its target's bytes are not this
+        // path's merged content. (bn-2ygs0)
+        if full.symlink_metadata().is_ok_and(|m| m.is_file()) {
             match std::fs::read(&full) {
                 Ok(content) => merge_versions.push((path.clone(), content)),
                 Err(e) => {
@@ -877,6 +951,12 @@ pub fn replay_snapshot_with_merge_protection(
         tracing::warn!("failed to unstage after stash apply: {e}");
     }
 
+    // Step 4b (bn-2ygs0): settle the symlink/type-change paths. Conflicts are
+    // data: the merged side goes back on disk, the user's side stays in the
+    // pinned snapshot, and the conflict record names both so the caller can
+    // print how to restore the user's side.
+    let mut conflicts = settle_symlink_overlaps(ws_path, &typed_paths)?;
+
     // Step 5: For each overlapping file, run a proper 3-way merge using
     // `git merge-file`. This cleanly merges non-overlapping edits and only
     // produces conflict markers for true conflicts. (bn-2fk0)
@@ -894,7 +974,6 @@ pub fn replay_snapshot_with_merge_protection(
     let anchor_attrs = load_stash_replay_attrs(ws_path, anchor_epoch);
     let target_attrs = load_stash_replay_attrs(ws_path, epoch_after);
 
-    let mut conflicts = Vec::new();
     for (path, merge_content) in &merge_versions {
         let full = ws_path.join(path);
 
@@ -915,6 +994,7 @@ pub fn replay_snapshot_with_merge_protection(
             conflicts.push(WorkingCopyConflict {
                 path: path.display().to_string(),
                 conflict_type: "delete_mod_conflict".to_owned(),
+                type_conflict: None,
             });
             continue;
         };
@@ -997,6 +1077,7 @@ pub fn replay_snapshot_with_merge_protection(
                         conflicts.push(WorkingCopyConflict {
                             path: path.display().to_string(),
                             conflict_type: "sanity-flag".to_owned(),
+                            type_conflict: None,
                         });
                         continue;
                     }
@@ -1014,6 +1095,7 @@ pub fn replay_snapshot_with_merge_protection(
                 conflicts.push(WorkingCopyConflict {
                     path: path.display().to_string(),
                     conflict_type: "content".to_owned(),
+                    type_conflict: None,
                 });
             }
             Err(e) => {
@@ -1033,6 +1115,7 @@ pub fn replay_snapshot_with_merge_protection(
                 conflicts.push(WorkingCopyConflict {
                     path: path.display().to_string(),
                     conflict_type: "content".to_owned(),
+                    type_conflict: None,
                 });
             }
         }
@@ -1060,6 +1143,335 @@ pub fn replay_snapshot_with_merge_protection(
     } else {
         Ok(SnapshotReplayResult::Conflicts(conflicts))
     }
+}
+
+// ---------------------------------------------------------------------------
+// bn-2ygs0: symlink / type-change overlaps in the dirty-trunk replay
+// ---------------------------------------------------------------------------
+
+/// A path's entry in one of the three replay trees (base, merged, snapshot).
+#[derive(Clone, Debug)]
+struct TreeSide {
+    mode: maw_git::EntryMode,
+    oid: maw_git::GitOid,
+    content: Vec<u8>,
+}
+
+impl TreeSide {
+    fn same_entry(a: Option<&Self>, b: Option<&Self>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.mode == b.mode && a.oid == b.oid,
+            _ => false,
+        }
+    }
+
+    fn is_symlink(side: Option<&Self>) -> bool {
+        side.is_some_and(|s| s.mode == maw_git::EntryMode::Link)
+    }
+
+    fn kind(side: Option<&Self>) -> EntryKind {
+        match side {
+            None => EntryKind::Deleted,
+            Some(s) if s.mode == maw_git::EntryMode::Link => EntryKind::Symlink {
+                target: String::from_utf8_lossy(&s.content).into_owned(),
+            },
+            Some(s) => EntryKind::File {
+                executable: s.mode == maw_git::EntryMode::BlobExecutable,
+            },
+        }
+    }
+}
+
+/// A worktree entry captured from disk (never through a symlink).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DiskSide {
+    Absent,
+    Symlink(PathBuf),
+    File { bytes: Vec<u8>, mode: u32 },
+}
+
+impl DiskSide {
+    fn capture(full: &Path) -> Result<Self> {
+        let meta = match full.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
+            Err(e) => return Err(e).with_context(|| format!("stat {}", full.display())),
+        };
+        if meta.file_type().is_symlink() {
+            let target =
+                std::fs::read_link(full).with_context(|| format!("readlink {}", full.display()))?;
+            return Ok(Self::Symlink(target));
+        }
+        if meta.is_file() {
+            let bytes = std::fs::read(full).with_context(|| format!("read {}", full.display()))?;
+            return Ok(Self::File {
+                bytes,
+                mode: file_mode_bits(&meta),
+            });
+        }
+        Ok(Self::Absent)
+    }
+
+    /// The entry a tree side describes (used when the disk does not hold it).
+    fn from_tree(side: Option<&TreeSide>) -> Self {
+        match side {
+            None => Self::Absent,
+            Some(s) if s.mode == maw_git::EntryMode::Link => {
+                Self::Symlink(PathBuf::from(bytes_to_os_string(&s.content)))
+            }
+            Some(s) => Self::File {
+                bytes: s.content.clone(),
+                mode: if s.mode == maw_git::EntryMode::BlobExecutable {
+                    0o755
+                } else {
+                    0o644
+                },
+            },
+        }
+    }
+
+    fn matches_kind(&self, side: Option<&TreeSide>) -> bool {
+        match (self, side) {
+            (Self::Absent, None) => true,
+            (Self::Symlink(_), Some(s)) => s.mode == maw_git::EntryMode::Link,
+            (Self::File { .. }, Some(s)) => matches!(
+                s.mode,
+                maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable
+            ),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn file_mode_bits(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn file_mode_bits(_meta: &std::fs::Metadata) -> u32 {
+    0o644
+}
+
+#[cfg(unix)]
+fn bytes_to_os_string(bytes: &[u8]) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+#[cfg(not(unix))]
+fn bytes_to_os_string(bytes: &[u8]) -> std::ffi::OsString {
+    String::from_utf8_lossy(bytes).into_owned().into()
+}
+
+/// An overlapping replay path where the merged or the user's side is a
+/// symlink.
+#[derive(Debug)]
+struct SymlinkOverlap {
+    path: PathBuf,
+    base: Option<TreeSide>,
+    ours: Option<TreeSide>,
+    theirs: Option<TreeSide>,
+    /// The merged entry as the checkout left it on disk, captured before
+    /// `stash_apply` overwrote it.
+    ours_on_disk: DiskSide,
+}
+
+fn read_tree_side(
+    repo: &maw_git::GixRepo,
+    commit: maw_git::GitOid,
+    path: &str,
+) -> Result<Option<TreeSide>> {
+    Ok(repo
+        .read_blob_at_path(commit, path)
+        .map_err(|e| anyhow::anyhow!("read '{path}' at {commit}: {e}"))?
+        .map(|(mode, oid, content)| TreeSide { mode, oid, content }))
+}
+
+/// Pick out the overlapping paths whose merged (`epoch_after`) or snapshot
+/// entry is a symlink, with all three sides and the on-disk merged entry.
+fn classify_symlink_overlaps(
+    ws_path: &Path,
+    snapshot: &SnapshotRef,
+    anchor_epoch: &str,
+    epoch_after: &str,
+    overlapping: &[PathBuf],
+) -> Result<Vec<SymlinkOverlap>> {
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let resolve = |spec: &str| {
+        repo.rev_parse(spec)
+            .map_err(|e| anyhow::anyhow!("resolve '{spec}': {e}"))
+    };
+    let base_oid = resolve(anchor_epoch)?;
+    let ours_oid = resolve(epoch_after)?;
+    let theirs_oid = resolve(&snapshot.oid)?;
+
+    let mut out = Vec::new();
+    for path in overlapping {
+        let Some(rel) = path.to_str() else {
+            continue;
+        };
+        let rel = rel.replace('\\', "/");
+        let ours = read_tree_side(&repo, ours_oid, &rel)?;
+        let theirs = read_tree_side(&repo, theirs_oid, &rel)?;
+        if !TreeSide::is_symlink(ours.as_ref()) && !TreeSide::is_symlink(theirs.as_ref()) {
+            continue;
+        }
+        let base = read_tree_side(&repo, base_oid, &rel)?;
+        let ours_on_disk = DiskSide::capture(&ws_path.join(path))?;
+        out.push(SymlinkOverlap {
+            path: path.clone(),
+            base,
+            ours,
+            theirs,
+            ours_on_disk,
+        });
+    }
+    Ok(out)
+}
+
+/// After `stash_apply` wrote the user's entry for every symlink overlap,
+/// settle each one as a 3-way merge of whole entries:
+///
+/// - same entry on both sides, or only the user changed it: the user's entry
+///   (already on disk) stands;
+/// - only the merge changed it: the merged entry goes back on disk;
+/// - both changed it differently: a `type_change` conflict. The merged entry
+///   goes back on disk and the user's entry stays in the snapshot; the record
+///   names both. If the merge deleted the path, the user's entry stays on
+///   disk (as for a regular file the merge deleted), still reported.
+fn settle_symlink_overlaps(
+    ws_path: &Path,
+    overlaps: &[SymlinkOverlap],
+) -> Result<Vec<WorkingCopyConflict>> {
+    let mut conflicts = Vec::new();
+    for o in overlaps {
+        let (base, ours, theirs) = (o.base.as_ref(), o.ours.as_ref(), o.theirs.as_ref());
+        if TreeSide::same_entry(ours, theirs) || TreeSide::same_entry(ours, base) {
+            continue;
+        }
+        let merged_entry = if o.ours_on_disk.matches_kind(ours) {
+            o.ours_on_disk.clone()
+        } else {
+            DiskSide::from_tree(ours)
+        };
+        if TreeSide::same_entry(theirs, base) {
+            write_worktree_entry(ws_path, &o.path, &merged_entry)?;
+            continue;
+        }
+        let kept = if ours.is_some() {
+            write_worktree_entry(ws_path, &o.path, &merged_entry)?;
+            KeptSide::Merged
+        } else {
+            KeptSide::Local
+        };
+        let (merged, local) = (TreeSide::kind(ours), TreeSide::kind(theirs));
+        tracing::info!(
+            path = %o.path.display(),
+            %merged,
+            %local,
+            ?kept,
+            "dirty replay: symlink/type conflict"
+        );
+        conflicts.push(WorkingCopyConflict {
+            path: o.path.display().to_string(),
+            conflict_type: "type_change".to_owned(),
+            type_conflict: Some(TypeConflict {
+                merged,
+                local,
+                kept,
+            }),
+        });
+    }
+    Ok(conflicts)
+}
+
+/// Replace the worktree entry at `rel` with `entry`, never following a
+/// symlink: parent components inside the workspace must be real directories
+/// (missing ones are created), and an existing final entry is unlinked, not
+/// written through.
+fn write_worktree_entry(ws_path: &Path, rel: &Path, entry: &DiskSide) -> Result<()> {
+    let components: Vec<_> = rel.components().collect();
+    let Some((_, parents)) = components.split_last() else {
+        bail!("refusing to write an empty path in {}", ws_path.display());
+    };
+    let mut current = ws_path.to_path_buf();
+    for component in parents {
+        let std::path::Component::Normal(name) = component else {
+            bail!("refusing to write non-normal path {}", rel.display());
+        };
+        current.push(name);
+        match current.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => bail!(
+                "refusing to write {} because path component {} is a symlink",
+                rel.display(),
+                current.display()
+            ),
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => bail!(
+                "refusing to write {} because {} is not a directory",
+                rel.display(),
+                current.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .with_context(|| format!("create directory {}", current.display()))?;
+            }
+            Err(e) => return Err(e).with_context(|| format!("stat {}", current.display())),
+        }
+    }
+    let full = ws_path.join(rel);
+    match full.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => bail!(
+            "refusing to replace directory {} with a file or symlink",
+            full.display()
+        ),
+        Ok(_) => {
+            std::fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("stat {}", full.display())),
+    }
+    match entry {
+        DiskSide::Absent => Ok(()),
+        DiskSide::Symlink(target) => create_symlink(target, &full),
+        DiskSide::File { bytes, mode } => {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&full)
+                .with_context(|| format!("create {}", full.display()))?;
+            file.write_all(bytes)
+                .with_context(|| format!("write {}", full.display()))?;
+            set_file_mode(&file, *mode).with_context(|| format!("chmod {}", full.display()))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link)
+        .with_context(|| format!("create symlink {}", link.display()))
+}
+
+#[cfg(not(unix))]
+fn create_symlink(target: &Path, link: &Path) -> Result<()> {
+    std::fs::write(link, target.to_string_lossy().as_bytes())
+        .with_context(|| format!("write symlink placeholder {}", link.display()))
+}
+
+#[cfg(unix)]
+fn set_file_mode(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_file: &std::fs::File, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Reconcile the executable bit of every file a snapshot replay wrote.
@@ -1359,10 +1771,23 @@ fn committed_content_changed(ws_path: &Path, before: &str, after: &str, path: &P
     let a = repo.read_file_at_commit(before, path);
     let b = repo.read_file_at_commit(after, path);
     match (a, b) {
-        (Ok(a), Ok(b)) => a != b,
+        (Ok(a), Ok(b)) if a != b => true,
+        // Same bytes: still "changed" if the path turned from a symlink into
+        // a regular file or back (a symlink's blob is its target text), or
+        // the user's replayed entry would silently revert the merged type
+        // change. (bn-2ygs0)
+        (Ok(_), Ok(_)) => is_symlink_at(&repo, before, path) != is_symlink_at(&repo, after, path),
         // Read failure — prefer the safe (driver-aware) path.
         _ => true,
     }
+}
+
+/// Whether `path` is a symlink in `commit` (`None` if unreadable).
+pub fn is_symlink_at(repo: &maw_git::GixRepo, commit: &str, path: &Path) -> Option<bool> {
+    let oid = repo.rev_parse(commit).ok()?;
+    let rel = path.to_str()?.replace('\\', "/");
+    let entry = repo.read_blob_at_path(oid, &rel).ok()?;
+    Some(entry.is_some_and(|(mode, _, _)| mode == maw_git::EntryMode::Link))
 }
 
 /// Write diff3-style conflict markers for a file.

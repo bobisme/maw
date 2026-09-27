@@ -450,6 +450,7 @@ mod tests {
             conflicts: vec![AdvanceConflict {
                 path: "src/main.rs".to_owned(),
                 conflict_type: "content".to_owned(),
+                type_conflict: None,
             }],
             message: "Conflicts detected.".to_owned(),
             invariant: None,

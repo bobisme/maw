@@ -7501,35 +7501,55 @@ pub fn update_default_workspace(
             } else {
                 source_workspace_names.join(", ")
             };
-            eprintln!();
-            eprintln!(
-                "  WARNING: {} file(s) in '{}' have local-vs-merge conflicts.",
-                conflicts.len(),
-                ws_name,
-            );
-            eprintln!();
-            eprintln!("  What happened: '{ws_name}' had uncommitted edits to files that");
-            eprintln!("  '{source_label}' also modified. Both versions are in conflict markers:");
-            eprintln!();
-            eprintln!("    <<<<<<< {source_label}   — from the merged workspace");
-            eprintln!("    ||||||| base");
-            eprintln!("    =======");
-            eprintln!("    >>>>>>> {ws_name}   — uncommitted edits in {ws_name}");
-            eprintln!();
-            for c in &conflicts {
-                eprintln!("    [{:>20}] {}", c.conflict_type, c.path);
+            // bn-2ygs0: symlink/type conflicts have no markers — report them
+            // separately, with the exact command that restores the user's side.
+            let (type_conflicts, marker_conflicts): (Vec<_>, Vec<_>) =
+                conflicts.iter().partition(|c| c.type_conflict.is_some());
+            if !type_conflicts.is_empty() {
+                report_replay_type_conflicts(
+                    &type_conflicts,
+                    ws_name,
+                    &source_label,
+                    default_ws_path,
+                    durable_recovery_ref.as_deref(),
+                    &snapshot.oid,
+                );
             }
-            eprintln!();
-            eprintln!("  To fix (pick one):");
-            eprintln!(
-                "    maw ws resolve {ws_name} --keep {source_label}    # keep merged version"
-            );
-            eprintln!("    maw ws resolve {ws_name} --keep {ws_name}    # keep local edits");
-            eprintln!("    maw ws resolve {ws_name} --keep both    # keep both sides concatenated");
-            eprintln!(
-                "    maw ws resolve {ws_name} --list                  # list conflicted files"
-            );
-            eprintln!();
+            if !marker_conflicts.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "  WARNING: {} file(s) in '{}' have local-vs-merge conflicts.",
+                    marker_conflicts.len(),
+                    ws_name,
+                );
+                eprintln!();
+                eprintln!("  What happened: '{ws_name}' had uncommitted edits to files that");
+                eprintln!(
+                    "  '{source_label}' also modified. Both versions are in conflict markers:"
+                );
+                eprintln!();
+                eprintln!("    <<<<<<< {source_label}   — from the merged workspace");
+                eprintln!("    ||||||| base");
+                eprintln!("    =======");
+                eprintln!("    >>>>>>> {ws_name}   — uncommitted edits in {ws_name}");
+                eprintln!();
+                for c in &marker_conflicts {
+                    eprintln!("    [{:>20}] {}", c.conflict_type, c.path);
+                }
+                eprintln!();
+                eprintln!("  To fix (pick one):");
+                eprintln!(
+                    "    maw ws resolve {ws_name} --keep {source_label}    # keep merged version"
+                );
+                eprintln!("    maw ws resolve {ws_name} --keep {ws_name}    # keep local edits");
+                eprintln!(
+                    "    maw ws resolve {ws_name} --keep both    # keep both sides concatenated"
+                );
+                eprintln!(
+                    "    maw ws resolve {ws_name} --list                  # list conflicted files"
+                );
+                eprintln!();
+            }
             eprintln!("  The merge commit is safe — epoch has advanced. These conflicts only");
             eprintln!(
                 "  affect the working copy at {}.",
@@ -7603,6 +7623,70 @@ pub fn update_default_workspace(
     record_workspace_epoch();
 
     Ok(())
+}
+
+/// Print the dirty-replay type conflicts (bn-2ygs0): a symlink vs a file (or
+/// a deletion), or two different symlink targets. They have no conflict
+/// markers, so name both sides of each path and give the exact command that
+/// puts the user's side back from the pinned recovery snapshot.
+fn report_replay_type_conflicts(
+    conflicts: &[&super::working_copy::WorkingCopyConflict],
+    ws_name: &str,
+    source_label: &str,
+    ws_path: &Path,
+    recovery_ref: Option<&str>,
+    snapshot_oid: &str,
+) {
+    use super::working_copy::{EntryKind, KeptSide};
+
+    let snapshot_name = recovery_ref.unwrap_or(snapshot_oid);
+    eprintln!();
+    eprintln!(
+        "  WARNING: {} path(s) in '{ws_name}' have a type conflict (symlink vs file, or two symlink targets).",
+        conflicts.len()
+    );
+    eprintln!(
+        "  What happened: '{source_label}' and your uncommitted edits in '{ws_name}' changed"
+    );
+    eprintln!("  each path in ways that cannot be combined into one entry, so no conflict");
+    eprintln!("  markers were written. Nothing is lost: your version is in the recovery");
+    eprintln!("  snapshot {snapshot_name}.");
+    eprintln!();
+    for c in conflicts {
+        let Some(tc) = &c.type_conflict else {
+            continue;
+        };
+        let quoted = shell_quote_path(Path::new(&c.path));
+        eprintln!("    {}", c.path);
+        eprintln!("      merged ({source_label}): {}", tc.merged);
+        eprintln!("      yours (uncommitted): {}", tc.local);
+        match tc.kept {
+            KeptSide::Merged => {
+                eprintln!("      on disk now: the merged version");
+                if tc.local == EntryKind::Deleted {
+                    eprintln!("      restore yours: maw exec {ws_name} -- rm -f -- {quoted}");
+                } else if let (Some(r), "default") = (recovery_ref, ws_name) {
+                    eprintln!(
+                        "      restore yours: maw ws recover --ref {r} --restore-file {quoted}"
+                    );
+                } else {
+                    // `--restore-file` only targets the default workspace.
+                    eprintln!(
+                        "      inspect yours: git -C {} show {snapshot_oid}:{quoted}",
+                        shell_quote_path(ws_path)
+                    );
+                }
+            }
+            KeptSide::Local => {
+                eprintln!("      on disk now: your version (the merge deleted this path)");
+                eprintln!(
+                    "      take the merge's deletion: maw exec {ws_name} -- rm -f -- {quoted}"
+                );
+            }
+        }
+    }
+    eprintln!();
+    eprintln!("  To keep what is on disk, do nothing: the working copy is consistent.");
 }
 
 /// Last-resort force checkout when snapshot/replay fails.
@@ -7843,8 +7927,25 @@ fn verify_trunk_replay_fidelity(
         if committed_anchor != committed_after {
             continue;
         }
+        // bn-2ygs0: equal bytes but a symlink <-> file type change is still a
+        // merge change (a symlink's blob is its target text); the replay owns
+        // that outcome.
+        if super::working_copy::is_symlink_at(&repo, anchor_epoch, path)
+            != super::working_copy::is_symlink_at(&repo, epoch_after, path)
+        {
+            continue;
+        }
 
         let full = ws_path.join(path);
+        // bn-2ygs0: the byte comparison and repair below follow symlinks, so
+        // they would compare (and could overwrite) the link's TARGET. A
+        // symlink on disk came from the snapshot replay verbatim.
+        if full
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            continue;
+        }
         let final_bytes = if full.is_file() {
             std::fs::read(&full).ok()
         } else {
