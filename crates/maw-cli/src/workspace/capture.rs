@@ -896,10 +896,10 @@ pub(super) fn parse_uncapturable_embedded_repo_paths(stderr: &str) -> Vec<String
     paths
 }
 
-fn path_is_under_excluded(path: &str, excluded: &str) -> bool {
-    let p = path.trim_end_matches('/');
-    let e = excluded.trim_end_matches('/');
-    p == e || p.starts_with(&format!("{e}/"))
+/// Component-wise: `a` excludes `a` and `a/x`, never `ab` (proven in
+/// `maw_core::model::path_safety::path_is_under`, bn-2wav).
+const fn path_is_under_excluded(path: &str, excluded: &str) -> bool {
+    maw_core::model::path_safety::path_is_under(path, excluded)
 }
 
 /// Resolve the repo root from a worktree path.
@@ -1028,6 +1028,34 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// bn-2wav: exhaustive over all pairs of <= 3-segment repo paths from
+    /// `{a, ab, ""}` (a complete proof for that bound): the exclusion filter
+    /// is component-wise (`a` excludes `a/x` but never `ab`), agreeing with
+    /// std's `Path::starts_with` for a non-empty exclusion.
+    #[test]
+    fn exhaustive_path_is_under_excluded_le_3_segments() {
+        use super::super::path_domain::bounded_paths;
+        use std::path::Path;
+        let domain: Vec<String> = bounded_paths(3)
+            .into_iter()
+            .filter(|s| !s.starts_with('/'))
+            .filter(|s| !s.split('/').any(|seg| seg == "." || seg == ".."))
+            .collect();
+        let mut hits = 0;
+        for p in &domain {
+            for e in &domain {
+                let nonempty = Path::new(e).components().next().is_some();
+                let spec = nonempty && Path::new(p).starts_with(Path::new(e));
+                let got = path_is_under_excluded(p, e);
+                assert_eq!(got, spec, "path={p:?} excluded={e:?}");
+                hits += usize::from(got);
+            }
+        }
+        assert!(hits > 50, "match set suspiciously small: {hits}");
+        assert!(path_is_under_excluded("sub/file", "sub/"));
+        assert!(!path_is_under_excluded("subdir/file", "sub/"));
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers

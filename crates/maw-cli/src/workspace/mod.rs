@@ -45,6 +45,8 @@ pub(crate) mod metadata;
 mod names;
 pub(crate) mod oplog_runtime;
 mod overlap;
+#[cfg(test)]
+mod path_domain;
 pub(crate) mod post_sync_hook;
 mod prune;
 pub(crate) mod recover;

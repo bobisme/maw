@@ -7,4 +7,5 @@ pub mod join;
 pub mod layout;
 pub mod ordering;
 pub mod patch;
+pub mod path_safety;
 pub mod types;

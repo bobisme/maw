@@ -1275,23 +1275,11 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
 }
 
 /// Validate the `--show` path argument against directory traversal.
+///
+/// The lexical rules live in `maw_core::model::path_safety` (bn-2wav), where
+/// they are proven with Kani and exhaustive enumeration.
 fn validate_show_path(path: &str) -> Result<()> {
-    if path.is_empty() {
-        bail!("Path cannot be empty");
-    }
-    if path.starts_with('/') {
-        bail!("Path must be relative (no leading '/')");
-    }
-    if path.contains('\0') {
-        bail!("Path cannot contain null bytes");
-    }
-    // Reject path traversal components
-    for component in path.split('/') {
-        if component == ".." {
-            bail!("Path cannot contain '..' components (directory traversal)");
-        }
-    }
-    Ok(())
+    maw_core::model::path_safety::validate_show_path(path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,18 +1396,16 @@ fn checked_restore_destination(default_ws: &Path, path: &str) -> Result<std::pat
     use std::path::Component;
 
     let mut destination = default_ws.to_path_buf();
+    // Lexical half (proven in maw_core::model::path_safety, bn-2wav): every
+    // component is Normal or CurDir and at least one is Normal.
+    if !maw_core::model::path_safety::is_contained_relative_path(Path::new(path)) {
+        bail!("Refusing unsafe restore path '{path}': path must stay inside the default workspace");
+    }
+
     let components: Vec<_> = Path::new(path)
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
         .collect();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!("Refusing unsafe restore path '{path}': path must stay inside the default workspace");
-    }
-
     for (index, component) in components.iter().enumerate() {
         let Component::Normal(name) = component else {
             unreachable!("validated above")
@@ -2302,6 +2288,52 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    /// bn-2wav: exhaustive over every path of <= 4 segments from
+    /// `{a, ab, ., .., ""}` (optionally rooted) — a complete proof for that
+    /// bound. `checked_restore_destination` (against an empty base, so the
+    /// symlink walk only sees `NotFound`) accepts exactly the paths that name
+    /// something strictly inside the base, and every accepted destination is
+    /// `base` + one or more Normal components.
+    #[test]
+    fn exhaustive_restore_destination_le_4_segments() {
+        use super::super::path_domain::{bounded_paths, spec_strictly_inside};
+        use std::path::Component;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path().join("ws");
+        let mut accepted = 0;
+        for s in bounded_paths(4) {
+            let got = checked_restore_destination(&base, &s);
+            assert_eq!(got.is_ok(), spec_strictly_inside(&s), "{s:?}: {got:?}");
+            if let Ok(dest) = got {
+                accepted += 1;
+                let rest = dest.strip_prefix(&base).expect("destination under base");
+                assert!(rest.components().next().is_some(), "{s:?} -> base itself");
+                assert!(
+                    rest.components().all(|c| matches!(c, Component::Normal(_))),
+                    "{s:?} -> {rest:?}"
+                );
+            }
+        }
+        assert!(accepted > 100, "accept set suspiciously small: {accepted}");
+    }
+
+    /// bn-2wav: exhaustive `validate_show_path` over the same bound, plus a
+    /// NUL-bearing variant of every <= 3-segment path.
+    #[test]
+    fn exhaustive_validate_show_path_le_4_segments() {
+        use super::super::path_domain::bounded_paths;
+        let mut inputs = bounded_paths(4);
+        inputs.extend(bounded_paths(3).into_iter().map(|s| format!("{s}\0x")));
+        inputs.push(String::new());
+        for s in inputs {
+            let spec = !s.is_empty()
+                && !s.starts_with('/')
+                && !s.contains('\0')
+                && !s.split('/').any(|seg| seg == "..");
+            assert_eq!(validate_show_path(&s).is_ok(), spec, "{s:?}");
+        }
+    }
 
     #[test]
     fn validate_show_path_rejects_traversal() {

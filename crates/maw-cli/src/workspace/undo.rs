@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -176,10 +176,9 @@ fn ensure_safe_relative_path(path: &Path) -> Result<()> {
         );
     }
 
-    if path
-        .components()
-        .any(|comp| matches!(comp, Component::ParentDir | Component::RootDir))
-    {
+    // Must name something strictly inside the workspace: `""` / `"."` would
+    // join to the workspace root itself and be `remove_dir_all`'d (bn-2wav).
+    if !maw_core::model::path_safety::is_contained_relative_path(path) {
         bail!(
             "Unsafe relative path in workspace patch: {}",
             path.display()
@@ -248,4 +247,49 @@ fn latest_snapshot_or_head(root: &Path, ws_id: &WorkspaceId, head: &GitOid) -> R
             }
         })
         .unwrap_or_else(|| head.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// bn-2wav: exhaustive over every path of <= 4 segments from
+    /// `{a, ab, ., .., ""}` (optionally rooted) — a complete proof for that
+    /// bound. `ensure_safe_relative_path` accepts exactly the paths that
+    /// name something strictly inside the workspace. In particular `""` and
+    /// `"."` (which join to the workspace root and would be
+    /// `remove_dir_all`'d by `remove_added_paths`) are rejected.
+    #[test]
+    fn exhaustive_ensure_safe_relative_path_le_4_segments() {
+        use super::super::path_domain::{bounded_paths, spec_strictly_inside};
+        let mut inputs = bounded_paths(4);
+        inputs.push(String::new());
+        for s in inputs {
+            assert_eq!(
+                ensure_safe_relative_path(Path::new(&s)).is_ok(),
+                spec_strictly_inside(&s),
+                "{s:?}"
+            );
+        }
+    }
+
+    /// Regression (bn-2wav): an empty or `.` added-path must never make undo
+    /// delete the workspace root.
+    #[test]
+    fn remove_added_paths_refuses_workspace_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join("keep")).unwrap();
+        std::fs::write(ws.join("keep/file"), b"x").unwrap();
+        for bad in ["", ".", "./", "./."] {
+            assert!(
+                remove_added_paths(&ws, &[PathBuf::from(bad)]).is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                ws.join("keep/file").exists(),
+                "{bad:?} deleted workspace content"
+            );
+        }
+    }
 }
