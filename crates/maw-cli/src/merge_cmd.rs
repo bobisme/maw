@@ -15,8 +15,8 @@ use crate::workspace::{MawConfig, get_backend, repo_root};
 use maw::merge::events::{self as merge_events, MergeEvent, MergeEventKind};
 use maw::merge::last_conflict;
 use maw::merge::quarantine::{
-    PromoteResult, QuarantineError, abandon_quarantine, list_quarantines, promote_quarantine,
-    quarantine_workspace_path, validate_merge_id,
+    PromoteResult, QuarantineError, RemovalProof, abandon_quarantine, list_quarantines,
+    promote_quarantine, quarantine_workspace_name, quarantine_workspace_path, validate_merge_id,
 };
 
 /// `maw merge` subcommands.
@@ -41,7 +41,11 @@ pub enum MergeCommands {
 
     /// Abandon (discard) a quarantine workspace.
     ///
-    /// Removes the quarantine workspace directory and its state file.
+    /// Snapshots the quarantine worktree (commits made inside it plus any
+    /// uncommitted edits) under refs/manifold/recovery/merge-quarantine-<id>/,
+    /// then removes the worktree and its state file. Recover with
+    /// `maw ws recover merge-quarantine-<id>`. Refuses (removes nothing) if
+    /// the snapshot cannot be pinned.
     /// Source workspaces are NOT affected -- the merge can be retried
     /// separately with `maw ws merge`.
     ///
@@ -253,6 +257,7 @@ fn promote_locked(root: &std::path::Path, merge_id: &str) -> Result<()> {
         let config_skip = maw_core::config::ValidationConfig::default();
         match promote_quarantine(&root, &manifold_dir, merge_id, &config_skip) {
             Ok(PromoteResult::Committed { new_epoch }) => {
+                cleanup_after_promote(&root, &manifold_dir, merge_id, &state, &new_epoch);
                 refresh_default_after_promote(
                     &root,
                     &state.branch,
@@ -273,6 +278,7 @@ fn promote_locked(root: &std::path::Path, merge_id: &str) -> Result<()> {
 
     match promote_quarantine(&root, &manifold_dir, merge_id, validation_config) {
         Ok(PromoteResult::Committed { new_epoch }) => {
+            cleanup_after_promote(&root, &manifold_dir, merge_id, &state, &new_epoch);
             refresh_default_after_promote(
                 &root,
                 &state.branch,
@@ -305,6 +311,118 @@ fn promote_locked(root: &std::path::Path, merge_id: &str) -> Result<()> {
         }
         Err(e) => bail!("Promote failed: {e}"),
     }
+}
+
+/// Remove a promoted quarantine's worktree, pinning anything not already on
+/// the branch first (bn-jfj2).
+///
+/// Validation ran inside the worktree AFTER `promote_quarantine` committed its
+/// edits, so it can hold bytes the promoted commit does not (written by the
+/// validation command, or by an agent while it ran). When the worktree is clean
+/// at the promoted commit nothing is pinned and the removal is justified by
+/// reachability from the branch; otherwise the state is pinned exactly like
+/// `maw ws abandon`.
+///
+/// Best-effort like the default refresh: the refs already moved, so a failure
+/// leaves the quarantine in place with a warning instead of failing promote.
+fn cleanup_after_promote(
+    root: &std::path::Path,
+    manifold_dir: &std::path::Path,
+    merge_id: &str,
+    state: &maw::merge::quarantine::QuarantineState,
+    new_epoch: &maw_core::model::types::GitOid,
+) {
+    let result = (|| -> Result<Option<crate::workspace::capture::CaptureResult>> {
+        let ws_path = quarantine_workspace_path(root, merge_id)?;
+        if !ws_path.exists() {
+            abandon_quarantine(root, manifold_dir, merge_id, None)?;
+            return Ok(None);
+        }
+        let pinned = pin_quarantine(
+            root,
+            merge_id,
+            &ws_path,
+            new_epoch,
+            new_epoch.as_str(),
+            crate::workspace::destroy_record::DestroyReason::QuarantinePromote,
+        )?;
+        let (proof, capture) = match pinned {
+            Some((proof, capture)) => (proof, Some(capture)),
+            None => (
+                RemovalProof::CleanAndReachable {
+                    reachable_from: format!("refs/heads/{}", state.branch),
+                },
+                None,
+            ),
+        };
+        abandon_quarantine(root, manifold_dir, merge_id, Some(&proof))?;
+        Ok(capture)
+    })();
+    match result {
+        Ok(Some(capture)) => {
+            let name = quarantine_workspace_name(merge_id);
+            println!(
+                "  Quarantine held edits not in the promoted commit; pinned {} before removal.",
+                capture.pinned_ref
+            );
+            println!("  Recover them: maw ws recover {name}");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "  WARNING: promote succeeded, but the quarantine worktree was left in place: {e:#}"
+            );
+            eprintln!("  Remove it once inspected: maw merge abandon {merge_id}");
+        }
+    }
+}
+
+/// Pin a quarantine worktree's full state under
+/// `refs/manifold/recovery/merge-quarantine-<id>/` and write a destroy record,
+/// so `maw ws recover merge-quarantine-<id>` finds it (bn-jfj2).
+///
+/// Reuses `ws destroy --force`'s capture: dirty (including stat-cache-masked)
+/// state becomes a snapshot commit whose parent is HEAD — so commits made
+/// inside the quarantine stay reachable — and a clean worktree whose HEAD is
+/// not `base` is pinned head-only. Returns `Ok(None)` only when the worktree is
+/// clean at `base`.
+///
+/// # Fail-safe (Prime Invariant)
+///
+/// Any capture, pin or record failure is an `Err`; callers must not remove the
+/// worktree then.
+fn pin_quarantine(
+    root: &std::path::Path,
+    merge_id: &str,
+    ws_path: &std::path::Path,
+    base: &maw_core::model::types::GitOid,
+    record_epoch: &str,
+    reason: crate::workspace::destroy_record::DestroyReason,
+) -> Result<Option<(RemovalProof, crate::workspace::capture::CaptureResult)>> {
+    let name = quarantine_workspace_name(merge_id);
+    let Some(capture) = crate::workspace::capture::capture_before_destroy(ws_path, &name, base)
+        .with_context(|| format!("failed to snapshot quarantine '{merge_id}' before removal"))?
+    else {
+        return Ok(None);
+    };
+    let final_head = crate::workspace::capture::resolve_head(ws_path)
+        .with_context(|| format!("failed to read quarantine '{merge_id}' HEAD"))?;
+    let record_epoch = maw_core::model::types::EpochId::new(record_epoch)
+        .map_err(|e| anyhow::anyhow!("invalid epoch {record_epoch}: {e}"))?;
+    crate::workspace::destroy_record::write_destroy_record(
+        root,
+        &name,
+        &record_epoch,
+        &final_head,
+        Some(&capture),
+        reason,
+    )
+    .with_context(|| format!("failed to write the destroy record for quarantine '{merge_id}'"))?;
+    let proof = RemovalProof::Pinned {
+        recovery_ref: capture.pinned_ref.clone(),
+        oid: capture.commit_oid.clone(),
+    };
+    Ok(Some((proof, capture)))
 }
 
 /// Refresh the default/root worktree to the promoted epoch, preserving any
@@ -391,10 +509,15 @@ fn abandon(merge_id: &str) -> Result<()> {
 
     let ws_path = quarantine_workspace_path(&root, merge_id)?;
 
+    // bn-jfj2: abandon pins recovery refs and writes a destroy record —
+    // shared recovery state, like `ws destroy`. Take the epoch lock.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "merge abandon")?;
+
     println!("Abandoning quarantine '{merge_id}'...");
 
     // Try to read state for informational output (non-fatal if missing)
-    match maw::merge::quarantine::QuarantineState::read(&manifold_dir, merge_id) {
+    let epoch_before = match maw::merge::quarantine::QuarantineState::read(&manifold_dir, merge_id)
+    {
         Ok(state) => {
             println!(
                 "  Sources: {}",
@@ -405,6 +528,7 @@ fn abandon(merge_id: &str) -> Result<()> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            Some(state.epoch_before.as_str().to_owned())
         }
         Err(QuarantineError::NotFound { .. }) => {
             if !ws_path.exists() {
@@ -425,12 +549,67 @@ fn abandon(merge_id: &str) -> Result<()> {
         }
         Err(e) => {
             eprintln!("  WARNING: Could not read quarantine state: {e}");
+            None
         }
-    }
+    };
 
-    abandon_quarantine(&root, &manifold_dir, merge_id).context("Failed to abandon quarantine")?;
+    // bn-jfj2: pin the worktree before removing it. Since bn-3rhz agents
+    // commit fixes INSIDE the quarantine, so its HEAD may be the only ref to
+    // them; uncommitted edits exist nowhere else. Fail closed: no pin, no
+    // removal.
+    let pinned = if ws_path.exists() {
+        let name = quarantine_workspace_name(merge_id);
+        // A base no HEAD can equal: the candidate itself is not reachable from
+        // any ref once the worktree is gone, so even an untouched quarantine
+        // is pinned (head-only).
+        let never = maw_core::model::types::GitOid::new(&"0".repeat(40))
+            .map_err(|e| anyhow::anyhow!("zero oid: {e}"))?;
+        let head = crate::workspace::capture::resolve_head(&ws_path).with_context(|| {
+            format!(
+                "failed to read quarantine HEAD; refusing to remove {}",
+                ws_path.display()
+            )
+        })?;
+        let record_epoch = epoch_before.unwrap_or_else(|| head.as_str().to_owned());
+        let (proof, capture) = pin_quarantine(
+            &root,
+            merge_id,
+            &ws_path,
+            &never,
+            &record_epoch,
+            crate::workspace::destroy_record::DestroyReason::QuarantineAbandon,
+        )
+        .with_context(|| {
+            format!(
+                "Refusing to abandon quarantine '{merge_id}': its worktree could not be \
+                 pinned for recovery, so nothing was removed.\n  \
+                 Worktree: {}\n  \
+                 Alternatively remove it with a snapshot: maw ws destroy {name} --force",
+                ws_path.display()
+            )
+        })?
+        .context("capture unexpectedly pinned nothing; refusing to remove the quarantine")?;
+        abandon_quarantine(&root, &manifold_dir, merge_id, Some(&proof))
+            .context("Failed to abandon quarantine")?;
+        Some(capture)
+    } else {
+        abandon_quarantine(&root, &manifold_dir, merge_id, None)
+            .context("Failed to abandon quarantine")?;
+        None
+    };
 
     println!("[OK] Quarantine '{merge_id}' abandoned.");
+    if let Some(capture) = pinned {
+        let name = quarantine_workspace_name(merge_id);
+        println!();
+        println!(
+            "  Snapshot saved: {} ({})",
+            &capture.commit_oid.as_str()[..12],
+            capture.pinned_ref
+        );
+        println!("  Recover (inspect):  maw ws recover {name}");
+        println!("  Recover (restore):  maw ws recover {name} --to <new-workspace>");
+    }
     println!();
     println!("Source workspaces are preserved.");
     println!("To retry the merge: maw ws merge <workspace...>");

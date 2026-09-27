@@ -546,9 +546,26 @@ fn redestroy_sources(
         // Capture + record a fresh destroy record so recovery stays possible,
         // mirroring merge cleanup (but without re-taking the epoch lock, which
         // we already hold).
-        let capture = capture_before_destroy(&ws_path, source.as_str(), epoch_after)
-            .ok()
-            .flatten();
+        //
+        // bn-jfj2: fail closed PER SOURCE. A capture or record failure means
+        // the workspace's state is not proven recoverable, so it is left in
+        // place (with a note) rather than destroyed unpinned; the other
+        // sources and the redo itself proceed. `Ok(None)` (nothing to
+        // capture) is fine.
+        let not_destroyed = |why: String| {
+            format!(
+                "  {ws} — NOT re-destroyed: could not pin a recovery snapshot ({why}); \
+                 it is left in place — run: maw ws destroy {ws}",
+                ws = source.as_str()
+            )
+        };
+        let capture = match capture_before_destroy(&ws_path, source.as_str(), epoch_after) {
+            Ok(c) => c,
+            Err(e) => {
+                notes.push(not_destroyed(format!("{e:#}")));
+                continue;
+            }
+        };
         let final_head = crate::workspace::capture::resolve_head(&ws_path)
             .unwrap_or_else(|_| epoch_after.clone());
         if let Err(e) = write_destroy_record(
@@ -559,7 +576,8 @@ fn redestroy_sources(
             capture.as_ref(),
             DestroyReason::MergeDestroy,
         ) {
-            tracing::warn!("redo: failed to write destroy record for '{source}': {e}");
+            notes.push(not_destroyed(format!("destroy record: {e:#}")));
+            continue;
         }
         match backend.destroy(source) {
             Ok(()) => notes.push(format!("  {} — re-destroyed", source.as_str())),

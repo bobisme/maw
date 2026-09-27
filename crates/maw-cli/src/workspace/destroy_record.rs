@@ -14,6 +14,11 @@ use super::capture::{CaptureMode, CaptureResult};
 pub enum DestroyReason {
     Destroy,
     MergeDestroy,
+    /// `maw merge abandon` removed a merge quarantine (bn-jfj2).
+    QuarantineAbandon,
+    /// `maw merge promote` removed a merge quarantine after promoting it
+    /// (bn-jfj2).
+    QuarantinePromote,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

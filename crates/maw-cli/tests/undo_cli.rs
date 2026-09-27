@@ -183,6 +183,52 @@ fn undo_then_undo_is_redo() {
     );
 }
 
+/// bn-jfj2: redo must fail closed per source. When the pre-destroy capture
+/// cannot pin a recovery snapshot, the restored source is left in place with
+/// an actionable note instead of being destroyed unpinned.
+#[test]
+fn redo_leaves_source_in_place_when_capture_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = setup_repo(tmp.path());
+    let (_before, after) = merge_destroy(&root, "carol");
+    maw_ok(&root, &["undo"]);
+
+    // Make the restored source uncapturable: an unreadable untracked file
+    // makes the snapshot's `git add` fail.
+    let ws = root.join(".maw").join("workspaces").join("carol");
+    assert!(ws.is_dir(), "undo restored carol at {}", ws.display());
+    let locked = ws.join("wip.bin");
+    std::fs::write(&locked, "only copy\n").expect("write wip");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read(&locked).is_ok() {
+        // Running with CAP_DAC_OVERRIDE (root): cannot provoke the failure.
+        return;
+    }
+
+    let out = maw(&root, &["undo"]);
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "redo itself still succeeds:\n{text}");
+    assert_eq!(git_rev(&root, "refs/manifold/epoch/current"), after);
+    assert!(
+        ws.is_dir() && locked.is_file(),
+        "a source whose capture failed must NOT be destroyed (bn-jfj2):\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&locked).expect("read"),
+        "only copy\n"
+    );
+    assert!(
+        text.contains("carol — NOT re-destroyed") && text.contains("maw ws destroy carol"),
+        "redo must say the source was left in place and how to remove it:\n{text}"
+    );
+}
+
 #[test]
 fn undo_refuses_when_epoch_advanced_since_merge() {
     let tmp = tempfile::tempdir().expect("tmp");

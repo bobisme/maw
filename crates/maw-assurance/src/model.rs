@@ -344,7 +344,8 @@ pub enum Pc {
     /// MUTATION ONLY ([`Mutation::QuarantinePromoteUnlockedSplitCas`]): the
     /// separate branch CAS.
     QCasBranch,
-    /// `abandon_quarantine` after a successful promote.
+    /// Quarantine cleanup after a successful promote (the CLI pins the
+    /// worktree, then calls `abandon_quarantine` with the proof — bn-jfj2).
     QCleanup,
 }
 

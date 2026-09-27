@@ -191,6 +191,10 @@ pub enum QuarantineError {
     /// recoverable crashed merge into one `ws merge --abort` refuses to
     /// clear (bn-3w2b).
     MergeInProgress { phase: String },
+    /// Refused to remove an existing quarantine worktree because no valid
+    /// [`RemovalProof`] shows its state is recoverable (bn-jfj2). Nothing was
+    /// removed.
+    Unpinned { merge_id: String, reason: String },
 }
 
 impl std::fmt::Display for QuarantineError {
@@ -222,6 +226,11 @@ impl std::fmt::Display for QuarantineError {
                 "a `maw ws merge` is in progress (merge-state phase: {phase}); \
                  refusing to promote while its journal exists.\n  \
                  Finish or recover it first: maw ws merge --abort"
+            ),
+            Self::Unpinned { merge_id, reason } => write!(
+                f,
+                "refusing to remove quarantine '{merge_id}' worktree: its state is not \
+                 proven recoverable ({reason}); nothing was removed"
             ),
         }
     }
@@ -500,18 +509,20 @@ pub fn promote_quarantine(
                      neither ref was changed. Abandon it and re-run the merge: \
                      maw merge abandon {merge_id}\n  \
                      The quarantine's content (including any fix) is commit {}; \
-                     abandon deletes the worktree, so keep it first if needed: \
-                     git branch quarantine-{merge_id} {}",
+                     abandon pins it first, recover it with: \
+                     maw ws recover {}",
                     state.branch,
                     &epoch_before_oid.as_str()[..12],
                     commit_oid.as_str(),
-                    commit_oid.as_str()
+                    quarantine_workspace_name(merge_id)
                 ))
             })?;
 
-            // 4b. Clean up quarantine (best-effort)
-            let _ = abandon_quarantine(repo_root, manifold_dir, merge_id);
-
+            // 4b. The quarantine worktree is NOT removed here (bn-jfj2).
+            // Validation just ran inside it, so it may hold bytes written
+            // after step 2 committed the edits; removing it is the caller's
+            // job, via `abandon_quarantine` with a [`RemovalProof`] that the
+            // worktree's state is recoverable.
             Ok(PromoteResult::Committed {
                 new_epoch: commit_oid,
             })
@@ -535,6 +546,36 @@ pub fn promote_quarantine(
 // abandon_quarantine
 // ---------------------------------------------------------------------------
 
+/// Evidence that a quarantine worktree's state is recoverable, required by
+/// [`abandon_quarantine`] before it deletes the worktree (bn-jfj2).
+///
+/// Since bn-3rhz promote builds on the quarantine's HEAD, so agents commit
+/// fixes inside the quarantine; the worktree's HEAD is then the only ref to
+/// those commits. The Prime Invariant forbids deleting it without a recovery
+/// point. The recovery machinery (`capture_before_destroy` + destroy record)
+/// lives in the CLI crate, so the caller captures and hands the result here;
+/// `abandon_quarantine` re-checks the claim against the repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemovalProof {
+    /// The worktree state is pinned at `recovery_ref` (under
+    /// `refs/manifold/recovery/`), which resolves to `oid`. The worktree's
+    /// HEAD must be `oid` or an ancestor of it (a dirty snapshot's parent).
+    Pinned {
+        /// Full recovery ref name.
+        recovery_ref: String,
+        /// Commit the ref resolves to.
+        oid: GitOid,
+    },
+    /// The caller verified the worktree has no uncommitted state (including
+    /// stat-cache-masked bytes) and its HEAD is reachable from `reachable_from`
+    /// (e.g. the branch a promote just advanced). `abandon_quarantine`
+    /// re-checks the reachability; cleanliness is the caller's claim.
+    CleanAndReachable {
+        /// A ref whose tip must have the worktree HEAD as an ancestor.
+        reachable_from: String,
+    },
+}
+
 /// Abandon a quarantine workspace: remove the worktree and state file.
 ///
 /// This operation is idempotent — calling it on an already-abandoned
@@ -548,21 +589,29 @@ pub fn promote_quarantine(
 /// * `repo_root` — Path to the git repository root.
 /// * `manifold_dir` — Path to the `.manifold/` directory.
 /// * `merge_id` — The quarantine identifier.
+/// * `proof` — Evidence the worktree's state is recoverable. Required (and
+///   verified) whenever the worktree still exists; may be `None` only when it
+///   is already gone.
 ///
 /// # Errors
 ///
+/// Returns [`QuarantineError::Unpinned`] if the worktree exists and `proof` is
+/// missing or does not check out — nothing is removed in that case.
 /// Returns [`QuarantineError::Git`] if the git worktree removal fails in a
-/// way that is not "worktree not found". I/O errors removing the state file
-/// are logged but do not cause an error return.
+/// way that is not "worktree not found".
 pub fn abandon_quarantine(
     repo_root: &Path,
     manifold_dir: &Path,
     merge_id: &str,
+    proof: Option<&RemovalProof>,
 ) -> Result<(), QuarantineError> {
     let ws_path = quarantine_workspace_path(repo_root, merge_id)?;
 
     // Remove the git worktree (idempotent — ignore "not registered" errors)
     if ws_path.exists() {
+        // bn-jfj2: fail closed — never delete a worktree whose state has not
+        // been shown recoverable.
+        verify_removal_proof(repo_root, &ws_path, merge_id, proof)?;
         remove_worktree(repo_root, &ws_path)?;
         // Also clean up the directory (git worktree remove may leave it)
         let _ = fs::remove_dir_all(&ws_path);
@@ -692,11 +741,14 @@ fn commit_quarantine_edits(
     // Without this step the index would still match the pre-fix-forward
     // commit, causing downstream `git status` / index-vs-HEAD checks to
     // report phantom staged changes.
-    let head_path = ws_repo.git_dir().join("HEAD");
-    std::fs::write(&head_path, format!("{new_head}\n")).map_err(|e| {
+    //
+    // bn-jfj2: the move goes through maw-git's guarded HEAD mover (atomic
+    // write under `HEAD.lock` + reflog entry), never a raw `fs::write` that
+    // leaves no reflog trail. CAS against the HEAD we just validated so a
+    // concurrent `git commit` in the quarantine is never silently moved off.
+    ws_repo.set_head_detached_cas(head, new_head).map_err(|e| {
         QuarantineError::Git(format!(
-            "failed to advance HEAD to {new_head} at {}: {e}",
-            head_path.display()
+            "failed to advance quarantine HEAD from {head} to {new_head}: {e}"
         ))
     })?;
     ws_repo.unstage_all().map_err(|e| {
@@ -706,6 +758,69 @@ fn commit_quarantine_edits(
     })?;
     GitOid::new(&new_head.to_string())
         .map_err(|e| QuarantineError::Git(format!("parse HEAD OID: {e}")))
+}
+
+/// Check a [`RemovalProof`] against the repository before
+/// [`abandon_quarantine`] deletes `ws_path` (bn-jfj2).
+fn verify_removal_proof(
+    repo_root: &Path,
+    ws_path: &Path,
+    merge_id: &str,
+    proof: Option<&RemovalProof>,
+) -> Result<(), QuarantineError> {
+    let unpinned = |reason: String| QuarantineError::Unpinned {
+        merge_id: merge_id.to_owned(),
+        reason,
+    };
+    let Some(proof) = proof else {
+        return Err(unpinned(
+            "no recovery pin was provided for the existing worktree".to_owned(),
+        ));
+    };
+    let ws_repo =
+        GixRepo::open(ws_path).map_err(|e| unpinned(format!("open quarantine worktree: {e}")))?;
+    let head = ws_repo
+        .rev_parse_opt("HEAD")
+        .map_err(|e| unpinned(format!("read quarantine HEAD: {e}")))?
+        .ok_or_else(|| unpinned("quarantine HEAD is unborn".to_owned()))?;
+    let repo = GixRepo::open(repo_root).map_err(|e| unpinned(format!("open repo: {e}")))?;
+    let (anchor_ref, anchor) = match proof {
+        RemovalProof::Pinned { recovery_ref, oid } => {
+            if !recovery_ref.starts_with("refs/manifold/recovery/") {
+                return Err(unpinned(format!(
+                    "{recovery_ref} is not a recovery ref (refs/manifold/recovery/)"
+                )));
+            }
+            let resolved = repo
+                .rev_parse_opt(recovery_ref)
+                .map_err(|e| unpinned(format!("resolve {recovery_ref}: {e}")))?
+                .ok_or_else(|| unpinned(format!("{recovery_ref} does not exist")))?;
+            if resolved.to_string() != oid.as_str() {
+                return Err(unpinned(format!(
+                    "{recovery_ref} resolves to {resolved}, not the captured {}",
+                    oid.as_str()
+                )));
+            }
+            (recovery_ref.as_str(), resolved)
+        }
+        RemovalProof::CleanAndReachable { reachable_from } => {
+            let tip = repo
+                .rev_parse_opt(reachable_from)
+                .map_err(|e| unpinned(format!("resolve {reachable_from}: {e}")))?
+                .ok_or_else(|| unpinned(format!("{reachable_from} does not exist")))?;
+            (reachable_from.as_str(), tip)
+        }
+    };
+    if head != anchor
+        && !repo
+            .is_ancestor(head, anchor)
+            .map_err(|e| unpinned(format!("ancestry check: {e}")))?
+    {
+        return Err(unpinned(format!(
+            "quarantine HEAD {head} is not reachable from {anchor_ref}"
+        )));
+    }
+    Ok(())
 }
 
 /// Remove a quarantine git worktree.
@@ -821,6 +936,25 @@ mod tests {
     }
 
     /// Create a second commit (candidate commit) in the repo.
+    /// Pin the quarantine worktree's HEAD under a recovery ref and return the
+    /// matching [`RemovalProof`] (`None` when the worktree does not exist).
+    fn pin(root: &Path, merge_id: &str) -> Option<RemovalProof> {
+        let ws = quarantine_workspace_path(root, merge_id).ok()?;
+        if !ws.exists() {
+            return None;
+        }
+        let head = run_git(&ws, &["rev-parse", "HEAD"]);
+        let recovery_ref = format!(
+            "refs/manifold/recovery/{}/test",
+            quarantine_workspace_name(merge_id)
+        );
+        run_git(root, &["update-ref", &recovery_ref, &head]);
+        Some(RemovalProof::Pinned {
+            recovery_ref,
+            oid: GitOid::new(&head).unwrap(),
+        })
+    }
+
     fn make_candidate_commit(root: &Path, content: &str) -> GitOid {
         fs::write(root.join("candidate.txt"), content).expect("operation should succeed");
         run_git(root, &["add", "."]);
@@ -1071,7 +1205,8 @@ mod tests {
         let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         assert!(ws_path.exists());
 
-        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
+        abandon_quarantine(root, &manifold_dir, merge_id, pin(root, merge_id).as_ref())
+            .expect("operation should succeed");
 
         assert!(
             !ws_path.exists(),
@@ -1081,6 +1216,133 @@ mod tests {
         assert!(
             matches!(state_result, Err(QuarantineError::NotFound { .. })),
             "state should be removed after abandon"
+        );
+    }
+
+    /// Create a quarantine at a fresh candidate; returns (dir, manifold, id, ws).
+    fn quarantine_fixture() -> (TempDir, PathBuf, String, PathBuf) {
+        let (dir, epoch_oid) = setup_repo();
+        let root = dir.path().to_path_buf();
+        let manifold_dir = root.join(".manifold");
+        let candidate = make_candidate_commit(&root, "content\n");
+        let merge_id = candidate.as_str()[..12].to_owned();
+        create_quarantine_workspace(
+            &root,
+            &manifold_dir,
+            &merge_id,
+            vec![WorkspaceId::new("ws-1").unwrap()],
+            &EpochId::new(epoch_oid.as_str()).unwrap(),
+            candidate,
+            "main",
+            dummy_validation_result(false),
+        )
+        .unwrap();
+        let ws = quarantine_workspace_path(&root, &merge_id).unwrap();
+        (dir, manifold_dir, merge_id, ws)
+    }
+
+    fn commit_in(ws: &Path, file: &str) -> String {
+        fs::write(ws.join(file), "fix\n").unwrap();
+        run_git(ws, &["add", file]);
+        run_git(
+            ws,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "fix",
+            ],
+        );
+        run_git(ws, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn abandon_refuses_existing_worktree_without_proof() {
+        let (dir, manifold_dir, merge_id, ws) = quarantine_fixture();
+        let err = abandon_quarantine(dir.path(), &manifold_dir, &merge_id, None)
+            .expect_err("abandon without proof must refuse (bn-jfj2)");
+        assert!(matches!(err, QuarantineError::Unpinned { .. }), "{err}");
+        assert!(ws.exists(), "worktree must survive a refused abandon");
+        assert!(QuarantineState::read(&manifold_dir, &merge_id).is_ok());
+    }
+
+    #[test]
+    fn abandon_refuses_proof_that_does_not_cover_head() {
+        let (dir, manifold_dir, merge_id, ws) = quarantine_fixture();
+        let root = dir.path();
+        // Pin the candidate, then commit a fix: the pin no longer covers HEAD.
+        let proof = pin(root, &merge_id).unwrap();
+        commit_in(&ws, "fix.txt");
+        let err = abandon_quarantine(root, &manifold_dir, &merge_id, Some(&proof))
+            .expect_err("stale pin must refuse");
+        assert!(matches!(err, QuarantineError::Unpinned { .. }), "{err}");
+        assert!(ws.exists());
+
+        // A ref outside refs/manifold/recovery/ is not a pin.
+        let head = run_git(&ws, &["rev-parse", "HEAD"]);
+        run_git(root, &["update-ref", "refs/heads/elsewhere", &head]);
+        let bad = RemovalProof::Pinned {
+            recovery_ref: "refs/heads/elsewhere".to_owned(),
+            oid: GitOid::new(&head).unwrap(),
+        };
+        assert!(matches!(
+            abandon_quarantine(root, &manifold_dir, &merge_id, Some(&bad)),
+            Err(QuarantineError::Unpinned { .. })
+        ));
+        // A proof whose oid disagrees with what the ref resolves to.
+        let r = format!(
+            "refs/manifold/recovery/{}/x",
+            quarantine_workspace_name(&merge_id)
+        );
+        run_git(root, &["update-ref", &r, &head]);
+        let mismatched = RemovalProof::Pinned {
+            recovery_ref: r.clone(),
+            oid: GitOid::new(&"0".repeat(40)).unwrap(),
+        };
+        assert!(matches!(
+            abandon_quarantine(root, &manifold_dir, &merge_id, Some(&mismatched)),
+            Err(QuarantineError::Unpinned { .. })
+        ));
+        // Clean-and-reachable from a ref that does not contain HEAD.
+        let unreachable = RemovalProof::CleanAndReachable {
+            reachable_from: "refs/heads/main".to_owned(),
+        };
+        assert!(matches!(
+            abandon_quarantine(root, &manifold_dir, &merge_id, Some(&unreachable)),
+            Err(QuarantineError::Unpinned { .. })
+        ));
+        assert!(
+            ws.exists(),
+            "every refused proof leaves the worktree intact"
+        );
+
+        // The correct pin succeeds.
+        let good = RemovalProof::Pinned {
+            recovery_ref: r,
+            oid: GitOid::new(&head).unwrap(),
+        };
+        abandon_quarantine(root, &manifold_dir, &merge_id, Some(&good)).expect("abandon");
+        assert!(!ws.exists());
+    }
+
+    #[test]
+    fn commit_edits_moves_head_with_reflog() {
+        let (_dir, _m, _id, ws) = quarantine_fixture();
+        let before = run_git(&ws, &["rev-parse", "HEAD"]);
+        fs::write(ws.join("edit.txt"), "e\n").unwrap();
+        let cand = GitOid::new(&before).unwrap();
+        let new = commit_quarantine_edits(&ws, &ws, &cand).expect("commit");
+        assert_ne!(new.as_str(), before);
+        assert_eq!(run_git(&ws, &["rev-parse", "HEAD"]), new.as_str());
+        // bn-jfj2: the guarded HEAD mover writes a reflog entry; a raw
+        // fs::write of HEAD left none.
+        let reflog = run_git(&ws, &["reflog", "--format=%H", "HEAD"]);
+        assert!(
+            reflog.lines().next() == Some(new.as_str()),
+            "HEAD move must be recorded in the reflog:\n{reflog}"
         );
     }
 
@@ -1107,9 +1369,11 @@ mod tests {
         .expect("operation should succeed");
 
         // First abandon
-        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
+        abandon_quarantine(root, &manifold_dir, merge_id, pin(root, merge_id).as_ref())
+            .expect("operation should succeed");
         // Second abandon should also succeed
-        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
+        abandon_quarantine(root, &manifold_dir, merge_id, pin(root, merge_id).as_ref())
+            .expect("operation should succeed");
     }
 
     #[test]
@@ -1119,8 +1383,13 @@ mod tests {
         let manifold_dir = root.join(".manifold");
 
         // Abandon something that was never created — should not error
-        abandon_quarantine(root, &manifold_dir, "nonexistent123")
-            .expect("operation should succeed");
+        abandon_quarantine(
+            root,
+            &manifold_dir,
+            "nonexistent123",
+            pin(root, "nonexistent123").as_ref(),
+        )
+        .expect("operation should succeed");
     }
 
     // -----------------------------------------------------------------------
@@ -1159,7 +1428,8 @@ mod tests {
         .expect("operation should succeed");
 
         // Abandon the first worktree to free the HEAD ref before making a second commit
-        abandon_quarantine(root, &manifold_dir, &id1).expect("operation should succeed");
+        abandon_quarantine(root, &manifold_dir, &id1, pin(root, &id1).as_ref())
+            .expect("operation should succeed");
 
         // Recreate state for id1 without the worktree (test list with state-only)
         let state1 = QuarantineState {
@@ -1257,17 +1527,25 @@ mod tests {
             }
         }
 
-        // Quarantine should be cleaned up after promote
+        // bn-jfj2: promote no longer removes the worktree itself — the caller
+        // pins its state and calls `abandon_quarantine` with the proof.
         let ws_path = quarantine_workspace_path(root, merge_id).unwrap();
         assert!(
-            !ws_path.exists(),
-            "quarantine worktree should be removed after promote"
+            ws_path.exists(),
+            "promote must leave worktree removal to the caller (bn-jfj2)"
         );
 
+        // The promoted HEAD is on main, so a clean worktree can be removed
+        // on the strength of reachability alone.
+        let proof = RemovalProof::CleanAndReachable {
+            reachable_from: "refs/heads/main".to_owned(),
+        };
+        abandon_quarantine(root, &manifold_dir, merge_id, Some(&proof)).expect("cleanup");
+        assert!(!ws_path.exists());
         let state_result = QuarantineState::read(&manifold_dir, merge_id);
         assert!(
             matches!(state_result, Err(QuarantineError::NotFound { .. })),
-            "quarantine state should be removed after promote"
+            "quarantine state should be removed after cleanup"
         );
     }
 
@@ -1655,7 +1933,7 @@ mod tests {
         fs::create_dir_all(&victim).unwrap();
         fs::write(victim.join("state.json"), "{}").unwrap();
 
-        let err = abandon_quarantine(root, &manifold_dir, "../../victim")
+        let err = abandon_quarantine(root, &manifold_dir, "../../victim", None)
             .expect_err("traversal id must be rejected");
         assert!(matches!(err, QuarantineError::InvalidId { .. }), "{err}");
         assert!(victim.join("state.json").exists(), "victim must survive");
@@ -1713,7 +1991,8 @@ mod tests {
         assert!(!root.join("ws").exists(), "no legacy ws/ in trunk checkout");
         assert_eq!(quarantine_workspace_path(root, merge_id).unwrap(), expected);
 
-        abandon_quarantine(root, &manifold_dir, merge_id).expect("abandon");
+        abandon_quarantine(root, &manifold_dir, merge_id, pin(root, merge_id).as_ref())
+            .expect("abandon");
         assert!(!expected.exists());
     }
 
@@ -1752,7 +2031,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(quarantine_workspace_path(root, merge_id).unwrap(), legacy);
-        abandon_quarantine(root, &manifold_dir, merge_id).expect("abandon");
+        abandon_quarantine(root, &manifold_dir, merge_id, pin(root, merge_id).as_ref())
+            .expect("abandon");
         assert!(
             !legacy.exists(),
             "legacy quarantine worktree must be removed"
