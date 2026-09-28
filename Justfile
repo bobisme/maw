@@ -156,7 +156,10 @@ proptests:
 verify: proptests kani-fast formal-check
 
 # All assurance gates combined
-check: fmt-check clippy nodefault-check test proptests dst-fast formal-fast contract-drift
+# bn-2zubk: sg1-assurance-clippy is part of check so the local gate lints the
+# same feature builds as CI (dst-faithful.yml) — pre.17 went RED on main from
+# model.rs lints no local gate ran.
+check: fmt-check clippy sg1-assurance-clippy nodefault-check test proptests dst-fast formal-fast contract-drift
 
 coverage:
   cargo llvm-cov
@@ -240,6 +243,8 @@ sg1-production-tier-faults:
     dst_production_tier_survives_faults -- --ignored --nocapture
   cargo test --features assurance --test dst_production_tier \
     bn_1sbjf_ -- --ignored --nocapture
+  cargo test --features assurance --test dst_production_tier \
+    bn_2zubk_ -- --ignored --nocapture
 
 # sg1-per-commit: bounded SG1 sweep — corpus replay + small random
 # budget (default 64 seeds × 32 steps). Hard wall-clock cap 8 min.
@@ -321,8 +326,12 @@ sg1-faithful-clippy:
 # bn-2byw production-code DST tier (`tests/dst_production_tier.rs`) runs
 # under `--features assurance`, so this recipe keeps BOTH feature-clippy
 # passes clean going forward (bn-1r1y).
+# bn-2zubk: maw-assurance is linted with `--all-features`, not
+# `--features oracles`: `oracles` does not imply `stateright`, so the
+# Stateright protocol model (src/model.rs) was never linted here and went
+# `-D warnings`-dirty unnoticed. tests/ci_lane_wiring.rs pins this.
 sg1-assurance-clippy:
-  cargo clippy -p maw-assurance --features oracles --all-targets -- -D warnings
+  cargo clippy -p maw-assurance --all-features --all-targets -- -D warnings
   cargo clippy --features assurance --all-targets -- -D warnings
 
 # sg2-bench-clippy: the default `just clippy` only covers default features,

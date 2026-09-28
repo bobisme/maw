@@ -76,7 +76,7 @@ pub struct StateSnapshot {
     pub epoch_ref: String,
     /// OID of the configured branch HEAD (e.g., `refs/heads/main`).
     pub branch_ref: String,
-    /// Current merge phase from `.manifold/merge-state.json`, or empty
+    /// Current merge phase from the layout's `merge-state.json`, or empty
     /// string if no merge is in progress.
     pub merge_phase: String,
     /// Names of all workspaces discovered under `ws/`.
@@ -256,7 +256,7 @@ impl TraceLogger {
 /// Reads:
 /// - `refs/manifold/epoch/current` via `git rev-parse`
 /// - The configured branch HEAD via `git rev-parse`
-/// - Merge phase from `.manifold/merge-state.json`
+/// - Merge phase from the layout's `merge-state.json`
 /// - Workspace directories under `ws/`
 /// - Per-workspace dirty status via `git status --porcelain`
 /// - Recovery refs via `git for-each-ref`
@@ -348,9 +348,10 @@ fn read_configured_branch(root: &Path) -> Option<String> {
     None
 }
 
-/// Read the merge phase from `.manifold/merge-state.json`.
+/// Read the merge phase from the layout's `merge-state.json`
+/// (bn-2zubk: layout-aware, see [`crate::merge_state_path`]).
 fn read_merge_phase(root: &Path) -> Option<String> {
-    let path = root.join(".manifold").join("merge-state.json");
+    let path = crate::merge_state_path(root);
     let content = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value.get("phase")?.as_str().map(ToOwned::to_owned)

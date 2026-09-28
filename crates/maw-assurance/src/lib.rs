@@ -125,6 +125,29 @@ pub mod shrinker;
 mod shrinker_tests;
 pub mod trace;
 
+/// Path of the merge journal (`merge-state.json`) for `repo_root`'s layout.
+///
+/// bn-2zubk: every harness reader of the journal used to hard-code the legacy
+/// v2 `<root>/.manifold/merge-state.json`, so on a consolidated repo (the
+/// v1.0 default, journal at `<root>/.maw/manifold/merge-state.json`) they
+/// never saw a phase — which made [`fault::SubprocFault`]'s phase-targeted
+/// kill inert and blinded G3 / trace snapshots to live merges.
+///
+/// Mirrors maw-core's presence-based `LayoutFlavor::detect` +
+/// `MergeStateFile::default_path` (maw-core is an optional dependency of this
+/// crate, so the two-line rule is repeated here; `fault`'s tests pin it
+/// against maw-core for both layouts).
+#[must_use]
+pub fn merge_state_path(repo_root: &std::path::Path) -> std::path::PathBuf {
+    let consolidated = repo_root.join(".maw").join("manifold");
+    let manifold_dir = if consolidated.is_dir() {
+        consolidated
+    } else {
+        repo_root.join(".manifold")
+    };
+    manifold_dir.join("merge-state.json")
+}
+
 // Re-export key types for convenience.
 pub use oracle::{
     AssuranceState, AssuranceViolation, WorkspaceStatus, capture_state, check_all,

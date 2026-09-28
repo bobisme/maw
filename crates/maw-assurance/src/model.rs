@@ -1617,7 +1617,10 @@ impl ProtocolModel {
     fn recover_pre_bn_1fcox_abort(s: &mut State, j: &MergeJournal) {
         let post = matches!(j.phase, JPhase::Commit | JPhase::Cleanup);
         let at_candidate = j.candidate.is_some_and(|c| s.epoch == c || s.branch == c);
-        if (post && at_candidate) || s.epoch != j.epoch_before {
+        // Deliberately the journal's `epoch_before` (not its candidate): the
+        // old abort refused once the live epoch had LEFT the pre-merge epoch.
+        let epoch_moved = s.epoch != j.epoch_before;
+        if (post && at_candidate) || epoch_moved {
             s.stuck = true;
         } else {
             s.merge_state = None;
@@ -2304,10 +2307,12 @@ pub mod configs {
         }
     }
 
-    /// bn-1fcox: one merge that may crash anywhere (including after the CAS,
-    /// before the target checkout), direct trunk commits racing the crash and
-    /// the recovery, and a sync of the sibling. Recovery must converge on
-    /// both sides of the CAS.
+    /// bn-1fcox: a crashing merge racing trunk commits and a sibling sync.
+    ///
+    /// The merge may crash anywhere (including after the CAS, before the
+    /// target checkout), direct trunk commits race the crash and the
+    /// recovery, and the sibling syncs. Recovery must converge on both sides
+    /// of the CAS.
     pub fn fast_merge_crash_recover_racing_trunk() -> ProtocolModel {
         ProtocolModel {
             procs: vec![merge(0), ProcSpec::Sync { ws: 1 }],

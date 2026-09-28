@@ -22,6 +22,12 @@
 //!   committed content changed via a merge. This oracle asserts the recorded
 //!   uncommitted trunk bytes survive on disk **or** are surfaced in a recovery
 //!   ref, after any op.
+//! - [`TrunkDirtyDisplacement`] — the **bn-15fzo / bn-3jqfk** class
+//!   (bn-2zubk). The strict companion of `TrunkDirtyPreservation`: bytes that
+//!   survive ONLY in a recovery ref uphold the Prime Invariant but are still a
+//!   bug when the user was never told. This oracle flags any recorded dirty
+//!   trunk entry that left the worktree unless the op's own output reported it
+//!   (a conflict line or recovery command naming the path).
 //! - [`check_record_ref_coherence`] — the **bn-3uou** class. `maw gc` desynced
 //!   recovery refs from destroy records. This oracle asserts no destroy record
 //!   claims (via `snapshot_ref` / `final_head_ref`) a recovery ref that does
@@ -83,6 +89,27 @@ pub enum EscapeViolation {
         path: String,
     },
 
+    /// **bn-2zubk** (bn-15fzo / bn-3jqfk class) — uncommitted trunk content
+    /// recorded at `path` is no longer in the default worktree, and no op
+    /// output reported that it was moved (no conflict line, no recovery
+    /// command naming the path). It may well survive in a recovery ref (the
+    /// Prime Invariant holds) — the user just has no way to know to look.
+    TrunkDirtyDisplaced {
+        /// The trunk path whose uncommitted content was displaced.
+        path: String,
+        /// Whether the displaced content is reachable from a recovery ref
+        /// (`true` = silently displaced; `false` = also lost, which
+        /// `TrunkDirtyPreservation` reports separately).
+        in_recovery_ref: bool,
+        /// Whether the displacement was left by a crashed op and survived the
+        /// next recovering merge (the bn-15fzo shape), rather than being made
+        /// by a completed op.
+        after_crash: bool,
+        /// Whether the op output went further and CLAIMED the user's version
+        /// is back on disk (a false report, the bn-3jqfk regression shape).
+        claimed_on_disk: bool,
+    },
+
     /// **bn-3uou** — a destroy record claims a recovery ref that does not
     /// exist. `maw gc` must keep records ↔ refs coherent.
     RecordClaimsMissingRef {
@@ -120,6 +147,32 @@ impl fmt::Display for EscapeViolation {
                 f,
                 "TrunkDirtyPreservation (bn-1xmk): uncommitted trunk bytes at '{path}' were \
                  lost — the file no longer holds them and no recovery ref surfaces them"
+            ),
+            Self::TrunkDirtyDisplaced {
+                path,
+                in_recovery_ref,
+                after_crash,
+                claimed_on_disk,
+            } => write!(
+                f,
+                "TrunkDirtyDisplacement (bn-2zubk): uncommitted trunk content at '{path}' \
+                 left the default worktree {when} and {told}{where_}",
+                when = if *after_crash {
+                    "across a crash and the recovering merge"
+                } else {
+                    "during the op"
+                },
+                told = if *claimed_on_disk {
+                    "the op output FALSELY claimed the user's version is back on disk"
+                } else {
+                    "the user was never told (no conflict / recovery command naming it \
+                     in the op output)"
+                },
+                where_ = if *in_recovery_ref {
+                    " — it survives only in a recovery ref"
+                } else {
+                    ""
+                },
             ),
             Self::RecordClaimsMissingRef {
                 workspace,
@@ -373,6 +426,306 @@ impl TrunkDirtyPreservation {
             violations.push(EscapeViolation::TrunkDirtyLost { path: path.clone() });
         }
         violations
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TrunkDirtyDisplacement (bn-2zubk) — stateful, strict
+// ---------------------------------------------------------------------------
+
+/// The uncommitted trunk entry the harness expects back on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirtyEntry {
+    /// A regular file with exactly these bytes.
+    File(String),
+    /// A symlink with exactly this target (bn-3jqfk: a retargeted tracked
+    /// link must come back AS a link, to the user's target).
+    Symlink(String),
+}
+
+/// Output markers that report the WHOLE pre-merge snapshot as displaced (no
+/// per-path list follows), so they acknowledge every tracked path.
+const WHOLE_SNAPSHOT_NOTICES: &[&str] = &[
+    // Step-4 replay hard failure: "WARNING: replay_snapshot failed: ...",
+    // followed by the snapshot ref + a `stash apply` command.
+    "replay_snapshot failed",
+    // bn-15fzo: a stale checkout intent for a different commit — "left its
+    // pre-merge edits pinned at <ref>".
+    "pre-merge edits pinned at",
+];
+
+/// Phrases by which maw tells the user their version of a path is back on
+/// disk (the bn-1xmk replay-divergence notice: "Your version was restored from
+/// the in-memory pre-merge snapshot" / "your version is already on disk").
+/// A paragraph naming the path with one of these is a claim, not a
+/// displacement report: if the recorded content is NOT on disk, the user was
+/// told something false (bn-3jqfk's regression printed exactly this for a
+/// symlink whose retarget it had lost).
+const ON_DISK_CLAIMS: &[&str] = &["already on disk", "was restored"];
+
+/// Output markers that give the user a way back to a displaced path. A path
+/// counts as reported only when some output line names it AND one of these
+/// handles is present — a bare mention (e.g. a progress line) is not a report.
+/// Deliberately excludes "recovery snapshot pinned", which maw prints on EVERY
+/// dirty-trunk merge ("preserving N uncommitted trunk file(s) across merge
+/// (recovery snapshot pinned)") whether or not anything is later displaced.
+const RECOVERY_HANDLES: &[&str] = &[
+    "maw ws resolve",
+    "maw ws recover",
+    "stash apply",
+    "Snapshot preserved at",
+    " show ",
+];
+
+/// **Strict** dirty-trunk oracle (bn-2zubk): every recorded uncommitted trunk
+/// entry must stay in the default worktree unless the op that moved it
+/// REPORTED the move.
+///
+/// [`TrunkDirtyPreservation`] accepts bytes that survive only in a recovery
+/// ref. That is the Prime Invariant (nothing lost), but it cannot tell a
+/// correct merge from one that silently parked the user's edits in a ref and
+/// left the worktree without them — exactly the bn-15fzo (crash between the
+/// target checkout and the replay; resume ignored the checkout intent) and
+/// bn-3jqfk (snapshot capture followed a symlink) regressions, on which every
+/// other oracle stayed green. A displacement is legitimate only when the user
+/// was told: a conflict report naming the path (`[content] path`, a type
+/// conflict with a `maw ws recover --restore-file` / `git show` command), or a
+/// whole-snapshot notice ([`WHOLE_SNAPSHOT_NOTICES`]).
+///
+/// # Crash deferral
+///
+/// A crashed op (killed mid-flight) cannot report anything, and a crash inside
+/// the target update legitimately leaves the tree mid-way (bn-15fzo: merged
+/// tree on disk, user edits only in the pinned snapshot). So a displacement
+/// observed after a crashed op is DEFERRED, not judged: it must be undone —
+/// back on disk — or reported by the time the next non-crashed `Merge` (the
+/// op that runs journal recovery) finishes. Other ops in between neither
+/// settle nor flag it.
+///
+/// Each path is judged once: after a violation or an acknowledged report the
+/// path stops being tracked (a later `record_dirty` re-arms it), so one
+/// displacement is one finding, not one per remaining step.
+#[derive(Debug, Default, Clone)]
+pub struct TrunkDirtyDisplacement {
+    /// `path -> expected on-disk entry`. Most-recent write per path wins.
+    pending: BTreeMap<String, DirtyEntry>,
+    /// Paths displaced by a crashed op, awaiting the recovering merge.
+    deferred: BTreeSet<String>,
+    /// Per-path verdicts rendered — still on disk after a completed merge,
+    /// reported, or flagged — the non-vacuity counter.
+    judged: u64,
+    /// Displacements the op output reported (acknowledged, not violations).
+    reported: u64,
+    /// Displacements deferred across a crash (whatever their outcome).
+    deferred_total: u64,
+}
+
+impl TrunkDirtyDisplacement {
+    /// Fresh tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an uncommitted trunk file write (the bytes the harness just
+    /// wrote into the default worktree at `path`).
+    pub fn record_dirty(&mut self, path: &str, content: &str) {
+        self.deferred.remove(path);
+        self.pending
+            .insert(path.to_owned(), DirtyEntry::File(content.to_owned()));
+    }
+
+    /// Record an uncommitted trunk symlink (the harness just pointed the link
+    /// at `path` to `target`).
+    pub fn record_dirty_symlink(&mut self, path: &str, target: &str) {
+        self.deferred.remove(path);
+        self.pending
+            .insert(path.to_owned(), DirtyEntry::Symlink(target.to_owned()));
+    }
+
+    /// Stop expecting `paths` — the trunk legitimately (re)committed them.
+    pub fn note_trunk_overwrite<I, S>(&mut self, paths: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for p in paths {
+            self.pending.remove(p.as_ref());
+            self.deferred.remove(p.as_ref());
+        }
+    }
+
+    /// Per-path verdicts rendered so far (0 = the oracle judged nothing).
+    #[must_use]
+    pub const fn judged(&self) -> u64 {
+        self.judged
+    }
+
+    /// Displacements the op output reported (acknowledged).
+    #[must_use]
+    pub const fn reported(&self) -> u64 {
+        self.reported
+    }
+
+    /// Displacements deferred across a crashed op.
+    #[must_use]
+    pub const fn deferred_total(&self) -> u64 {
+        self.deferred_total
+    }
+
+    /// Judge every tracked entry after `op` ran. `output` is the op's combined
+    /// stdout + stderr (empty for non-maw ops); `crashed` is true when the op
+    /// was a fault-injected invocation that did not complete.
+    pub fn check_step(
+        &mut self,
+        repo_root: &Path,
+        op: &Op,
+        output: &str,
+        crashed: bool,
+    ) -> Vec<EscapeViolation> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let default_ws = LayoutFlavor::detect(repo_root).default_target_path(repo_root, "default");
+        let recovery_op = matches!(op, Op::Merge { .. }) && !crashed;
+        let mut recovery_blobs: Option<BTreeSet<String>> = None;
+
+        let mut violations = Vec::new();
+        let mut settled = Vec::new();
+        for (path, expected) in &self.pending {
+            let was_deferred = self.deferred.contains(path);
+            if entry_on_disk(&default_ws.join(path), expected) {
+                if was_deferred && recovery_op {
+                    // Restored by the recovering merge.
+                    self.deferred.remove(path);
+                }
+                if recovery_op {
+                    // Survived a completed merge — the op class that can
+                    // displace it — so this is a real verdict.
+                    self.judged += 1;
+                }
+                continue;
+            }
+            let report = classify_report(output, path);
+            if report == Report::Displaced {
+                self.reported += 1;
+                self.judged += 1;
+                settled.push(path.clone());
+                continue;
+            }
+            if crashed && report == Report::Silent {
+                if self.deferred.insert(path.clone()) {
+                    self.deferred_total += 1;
+                }
+                continue;
+            }
+            if was_deferred && !recovery_op {
+                // Still awaiting the recovering merge.
+                continue;
+            }
+            let in_recovery_ref = match expected {
+                DirtyEntry::File(content) => {
+                    let blobs = recovery_blobs
+                        .get_or_insert_with(|| recovery_reachable_blobs(repo_root, None));
+                    hash_blob(repo_root, content).is_some_and(|oid| blobs.contains(&oid))
+                }
+                DirtyEntry::Symlink(target) => {
+                    let blobs = recovery_blobs
+                        .get_or_insert_with(|| recovery_reachable_blobs(repo_root, None));
+                    hash_blob(repo_root, target).is_some_and(|oid| blobs.contains(&oid))
+                }
+            };
+            self.judged += 1;
+            settled.push(path.clone());
+            violations.push(EscapeViolation::TrunkDirtyDisplaced {
+                path: path.clone(),
+                in_recovery_ref,
+                after_crash: was_deferred,
+                claimed_on_disk: report == Report::ClaimedOnDisk,
+            });
+        }
+        for path in settled {
+            self.pending.remove(&path);
+            self.deferred.remove(&path);
+        }
+        violations
+    }
+}
+
+/// Whether `expected` is what sits at `abs` in the default worktree.
+fn entry_on_disk(abs: &Path, expected: &DirtyEntry) -> bool {
+    match expected {
+        DirtyEntry::File(content) => {
+            std::fs::symlink_metadata(abs).is_ok_and(|m| m.file_type().is_file())
+                && std::fs::read_to_string(abs).ok().as_deref() == Some(content.as_str())
+        }
+        DirtyEntry::Symlink(target) => {
+            std::fs::symlink_metadata(abs).is_ok_and(|m| m.file_type().is_symlink())
+                && std::fs::read_link(abs).is_ok_and(|t| t == Path::new(target))
+        }
+    }
+}
+
+/// Whether `line` names `path` as a whitespace-separated token (tolerating
+/// quotes and trailing punctuation: `'link'.`, `"a b"`, `path:`).
+fn line_names_path(line: &str, path: &str) -> bool {
+    line.split_whitespace()
+        .any(|tok| tok.trim_matches(|c| matches!(c, '\'' | '"' | ':' | ',' | '.')) == path)
+}
+
+/// Whether some output paragraph (run of non-blank lines) that names `path`
+/// CLAIMS the user's version is back on disk ([`ON_DISK_CLAIMS`]).
+fn claims_on_disk(output: &str, path: &str) -> bool {
+    let mut para: Vec<&str> = Vec::new();
+    let judge = |para: &[&str]| {
+        para.iter().any(|l| line_names_path(l, path))
+            && para
+                .iter()
+                .any(|l| ON_DISK_CLAIMS.iter().any(|c| l.contains(c)))
+    };
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            if judge(&para) {
+                return true;
+            }
+            para.clear();
+        } else {
+            para.push(line);
+        }
+    }
+    judge(&para)
+}
+
+/// How the op output accounted for a displaced `path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Report {
+    /// Not mentioned with any way back.
+    Silent,
+    /// Reported as moved, with a way back (acknowledged).
+    Displaced,
+    /// Claimed to be back on disk — while it is not (a false report).
+    ClaimedOnDisk,
+}
+
+/// How `output` accounts for `path`, which is NOT on disk as recorded (see
+/// [`WHOLE_SNAPSHOT_NOTICES`] / [`RECOVERY_HANDLES`] / [`ON_DISK_CLAIMS`]).
+fn classify_report(output: &str, path: &str) -> Report {
+    if output.is_empty() {
+        return Report::Silent;
+    }
+    // A claim that the content is restored outranks any recovery command in
+    // the same message: the user is told there is nothing to do.
+    if claims_on_disk(output, path) {
+        return Report::ClaimedOnDisk;
+    }
+    if WHOLE_SNAPSHOT_NOTICES.iter().any(|m| output.contains(m)) {
+        return Report::Displaced;
+    }
+    let names_path = output.lines().any(|line| line_names_path(line, path));
+    if names_path && RECOVERY_HANDLES.iter().any(|h| output.contains(h)) {
+        Report::Displaced
+    } else {
+        Report::Silent
     }
 }
 
@@ -1080,6 +1433,196 @@ mod tests {
             v.is_empty(),
             "dirty bytes surfaced in a recovery ref must be green: {v:?}"
         );
+    }
+
+    // ----- TrunkDirtyDisplacement (bn-2zubk) -------------------------------
+
+    fn merge_op() -> Op {
+        Op::Merge {
+            srcs: vec![WsId("ws-a".to_owned())],
+            into: crate::scenario::Target::Default,
+            destroy: false,
+        }
+    }
+
+    /// Pin `content` at `path` under a recovery ref (the "survives only in a
+    /// ref" state both bn-15fzo and bn-3jqfk left behind).
+    fn pin_in_recovery_ref(root: &Path, parent: &str, path: &str, content: &str) {
+        let rec = commit_unique_file(root, parent, path, content);
+        git(
+            root,
+            &["update-ref", "refs/manifold/recovery/default/snap", &rec],
+        );
+    }
+
+    /// The bn-15fzo / bn-3jqfk shape: bytes survive only in a recovery ref,
+    /// nothing was reported. `TrunkDirtyPreservation` is green on it (that is
+    /// the gap); the strict oracle must flag it.
+    #[test]
+    fn silent_displacement_into_recovery_ref_trips() {
+        let (dir, root_oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let content = "user edit\n";
+        pin_in_recovery_ref(root, &root_oid, "hot.txt", content);
+
+        let mut lenient = TrunkDirtyPreservation::new();
+        lenient.record_dirty("hot.txt", content);
+        assert!(
+            lenient.check(root).is_empty(),
+            "precondition: lenient oracle is green"
+        );
+
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("hot.txt", content);
+        let out = "Default workspace updated to new epoch.\n  preserving 1 uncommitted \
+                   trunk file(s) across merge (recovery snapshot pinned)\n";
+        let v = strict.check_step(root, &merge_op(), out, false);
+        assert!(
+            matches!(
+                v.as_slice(),
+                [EscapeViolation::TrunkDirtyDisplaced {
+                    path,
+                    in_recovery_ref: true,
+                    after_crash: false,
+                    claimed_on_disk: false,
+                }] if path == "hot.txt"
+            ),
+            "{v:?}"
+        );
+        // One finding per displacement, not one per remaining step.
+        assert!(strict.check_step(root, &gc_op(), "", false).is_empty());
+    }
+
+    #[test]
+    fn dirty_entry_on_disk_is_green() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        fs::write(root.join("ws/default/hot.txt"), "user edit\n").unwrap();
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("hot.txt", "user edit\n");
+        assert!(strict.check_step(root, &merge_op(), "", false).is_empty());
+    }
+
+    /// A conflict report naming the path with a resolve command acknowledges
+    /// the displacement; a report that names ANOTHER path does not.
+    #[test]
+    fn reported_displacement_is_green_unreported_path_is_not() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        fs::write(root.join("ws/default/a.txt"), "<<<<<<< markers\n").unwrap();
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("a.txt", "user a\n");
+        strict.record_dirty("b.txt", "user b\n");
+        let out = "  WARNING: 1 file(s) in 'default' have local-vs-merge conflicts.\n\
+                   \x20   [             content] a.txt\n\
+                   \x20   maw ws resolve default --keep default    # keep local edits\n";
+        let v = strict.check_step(root, &merge_op(), out, false);
+        assert!(
+            matches!(v.as_slice(), [EscapeViolation::TrunkDirtyDisplaced { path, .. }] if path == "b.txt"),
+            "{v:?}"
+        );
+        assert_eq!(strict.reported(), 1);
+    }
+
+    /// bn-3jqfk regression shape: the output names the path WITH a recovery
+    /// command, but claims the user's version is already back on disk. When it
+    /// is not, that is a false report, not an acknowledgement.
+    #[cfg(unix)]
+    #[test]
+    fn false_on_disk_claim_is_not_an_acknowledgement() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let out = "\n  WARNING (bn-1xmk): replay did not reproduce your uncommitted edits to 'link'.\n\
+                   \x20 Your version was restored from the in-memory pre-merge snapshot.\n\
+                   \x20 Restore:  maw ws recover --ref refs/manifold/recovery/default/x --restore-file link\n\
+                   \x20           (your version is already on disk — add --force to overwrite it)\n";
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty_symlink("link", "new-target");
+        let v = strict.check_step(root, &merge_op(), out, false);
+        assert!(
+            matches!(
+                v.as_slice(),
+                [EscapeViolation::TrunkDirtyDisplaced { path, claimed_on_disk: true, .. }]
+                    if path == "link"
+            ),
+            "{v:?}"
+        );
+        // The same claim is TRUE when the link is on disk: green.
+        std::os::unix::fs::symlink("new-target", root.join("ws/default/link")).unwrap();
+        strict.record_dirty_symlink("link", "new-target");
+        assert!(strict.check_step(root, &merge_op(), out, false).is_empty());
+    }
+
+    /// A crashed op defers; the recovering merge must restore or report. A
+    /// non-merge op in between neither settles nor flags.
+    #[test]
+    fn crash_defers_until_the_recovering_merge() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("hot.txt", "user edit\n");
+
+        assert!(
+            strict.check_step(root, &merge_op(), "", true).is_empty(),
+            "crash defers"
+        );
+        assert!(
+            strict.check_step(root, &gc_op(), "", false).is_empty(),
+            "gc does not recover"
+        );
+        let v = strict.check_step(root, &merge_op(), "Recovered an interrupted merge", false);
+        assert!(
+            matches!(
+                v.as_slice(),
+                [EscapeViolation::TrunkDirtyDisplaced {
+                    after_crash: true,
+                    ..
+                }]
+            ),
+            "{v:?}"
+        );
+        assert_eq!(strict.deferred_total(), 1);
+
+        // Same crash, but the recovering merge puts the bytes back: green.
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("hot.txt", "user edit\n");
+        assert!(strict.check_step(root, &merge_op(), "", true).is_empty());
+        fs::write(root.join("ws/default/hot.txt"), "user edit\n").unwrap();
+        assert!(strict.check_step(root, &merge_op(), "", false).is_empty());
+        assert_eq!(strict.judged(), 1);
+    }
+
+    /// bn-3jqfk: a retargeted symlink must come back as a link to the user's
+    /// target; a regular file with the same bytes, or the old target, trips.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_retarget_must_survive_as_a_symlink() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let link = root.join("ws/default/link");
+        std::os::unix::fs::symlink("new-target", &link).unwrap();
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty_symlink("link", "new-target");
+        assert!(strict.check_step(root, &merge_op(), "", false).is_empty());
+
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("old-target", &link).unwrap();
+        let v = strict.check_step(root, &merge_op(), "", false);
+        assert!(
+            matches!(v.as_slice(), [EscapeViolation::TrunkDirtyDisplaced { path, .. }] if path == "link"),
+            "{v:?}"
+        );
+
+        strict.record_dirty_symlink("link", "new-target");
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, "new-target").unwrap();
+        assert_eq!(strict.check_step(root, &merge_op(), "", false).len(), 1);
     }
 
     // ----- RecordRefCoherence (bn-3uou) ------------------------------------

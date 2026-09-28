@@ -334,7 +334,7 @@ impl SubprocFault {
         self
     }
 
-    /// Read the current merge phase from `<root>/.manifold/merge-state.json`.
+    /// Read the current merge phase from the layout's `merge-state.json`.
     fn read_phase(&self) -> Option<String> {
         read_merge_phase(&self.repo_root)
     }
@@ -427,10 +427,21 @@ impl SubprocFault {
     /// the first attempt right after a real kill is racy (owner pid not yet
     /// observed dead), so this MUST be a loop with seconds of backoff, not a
     /// single call. Returns the attempt count on success, `None` if exhausted.
+    ///
+    /// bn-2zubk: an attempt counts as recovered when it exits 0 **or** when
+    /// it leaves no merge journal behind. A crash AFTER the COMMIT CAS is
+    /// recovered by finishing the interrupted merge ("its commit had already
+    /// landed"); the same invocation then goes on to re-merge the source,
+    /// which by now is behind the new epoch, so it refuses as stale and exits
+    /// non-zero. Judging by exit code alone turned every successful
+    /// post-commit recovery into `RecoveryExhausted` (never seen before
+    /// because the legacy-path phase reader never let a consolidated run get
+    /// this far). A still-present journal (e.g. the dead owner not yet
+    /// observed) keeps retrying, as before.
     #[must_use]
     pub fn recover_with_retry(&self) -> Option<u32> {
         for attempt in 1..=self.max_recovery_attempts {
-            let ok = Command::new(&self.maw_bin)
+            let exited_ok = Command::new(&self.maw_bin)
                 .args(&self.merge_args)
                 .current_dir(&self.repo_root)
                 .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00 +0000")
@@ -439,7 +450,8 @@ impl SubprocFault {
                 .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success());
-            if ok {
+            let journal_cleared = !crate::merge_state_path(&self.repo_root).exists();
+            if exited_ok || journal_cleared {
                 return Some(attempt);
             }
             if attempt < self.max_recovery_attempts {
@@ -450,14 +462,20 @@ impl SubprocFault {
     }
 }
 
-/// Read the merge phase from a v2 repo's `merge-state.json`, if present.
+/// Read the merge phase from the repo's `merge-state.json`, if present.
+///
+/// Layout-aware (bn-2zubk): the journal lives at `.maw/manifold/` in a
+/// consolidated repo and `.manifold/` in a v2 one ([`crate::merge_state_path`]).
+/// Reading only the legacy path made [`SubprocFault`] report
+/// `PhaseNotObserved` for every consolidated repo — its phase-targeted kill
+/// never fired.
 ///
 /// Shared by both tiers' polling/oracle glue. Returns `None` if the file is
 /// absent or malformed (a malformed/absent state file is itself a valid
 /// observation, not an error).
 #[must_use]
 pub fn read_merge_phase(repo_root: &Path) -> Option<String> {
-    let bytes = std::fs::read(repo_root.join(".manifold/merge-state.json")).ok()?;
+    let bytes = std::fs::read(crate::merge_state_path(repo_root)).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v.get("phase")
         .and_then(serde_json::Value::as_str)
@@ -629,5 +647,37 @@ mod tests {
     fn read_phase_missing_is_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(read_merge_phase(dir.path()), None);
+    }
+
+    /// bn-2zubk: the journal path agrees with maw-core's layout rule for both
+    /// layouts, and `read_merge_phase` reads a consolidated repo's journal.
+    #[test]
+    fn read_phase_is_layout_aware() {
+        use maw_core::merge_state::MergeStateFile;
+        use maw_core::model::layout::LayoutFlavor;
+
+        let expect = |root: &Path| {
+            MergeStateFile::default_path(&LayoutFlavor::detect(root).manifold_dir(root))
+        };
+
+        // Consolidated: journal under .maw/manifold/.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifold = dir.path().join(".maw").join("manifold");
+        std::fs::create_dir_all(&manifold).expect("mkdir");
+        assert_eq!(crate::merge_state_path(dir.path()), expect(dir.path()));
+        std::fs::write(manifold.join("merge-state.json"), r#"{"phase":"commit"}"#)
+            .expect("write journal");
+        assert_eq!(read_merge_phase(dir.path()).as_deref(), Some("commit"));
+
+        // V2: journal under .manifold/.
+        let v2 = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(v2.path().join(".manifold")).expect("mkdir");
+        assert_eq!(crate::merge_state_path(v2.path()), expect(v2.path()));
+        std::fs::write(
+            v2.path().join(".manifold").join("merge-state.json"),
+            r#"{"phase":"build"}"#,
+        )
+        .expect("write journal");
+        assert_eq!(read_merge_phase(v2.path()).as_deref(), Some("build"));
     }
 }

@@ -370,9 +370,10 @@ fn check_workspace_dirty(ws_path: &Path) -> bool {
     }
 }
 
-/// Read the merge-state phase from `.manifold/merge-state.json`.
+/// Read the merge-state phase from the layout's `merge-state.json`
+/// (bn-2zubk: layout-aware, see [`crate::merge_state_path`]).
 fn read_merge_state_phase(root: &Path) -> Option<String> {
-    let state_path = root.join(".manifold").join("merge-state.json");
+    let state_path = crate::merge_state_path(root);
     let content = std::fs::read_to_string(state_path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value.get("phase")?.as_str().map(ToOwned::to_owned)

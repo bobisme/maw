@@ -97,7 +97,8 @@ use maw::assurance::oracle_a::OracleA;
 use maw::assurance::oracle_b;
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_escape::{
-    SiblingRefFaithfulness, TrunkDirtyPreservation, check_record_ref_coherence,
+    SiblingRefFaithfulness, TrunkDirtyDisplacement, TrunkDirtyPreservation,
+    check_record_ref_coherence,
 };
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_worktree::{CleanMaterialization, MaskedStalePreservation};
@@ -224,6 +225,16 @@ struct Liveness {
     /// bn-22jy: masked-stale workspaces later observed clean at their own HEAD
     /// again — maw re-materialized them, so `CleanMaterialization` re-armed.
     masked_resolutions: u64,
+    /// bn-2zubk: per-path verdicts the strict `TrunkDirtyDisplacement` oracle
+    /// rendered (still on disk after a completed merge, reported, or
+    /// flagged). Dirty paths merely sitting on disk between non-merge ops are
+    /// not counted.
+    displacement_judgements: u64,
+    /// bn-2zubk: displacements the op output reported (acknowledged).
+    displacements_reported: u64,
+    /// bn-2zubk: displacements left by a crashed op and deferred to the
+    /// recovering merge.
+    displacements_deferred: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -270,6 +281,11 @@ const fn base_ref_arg(base: &BaseRef) -> &'static str {
     reason = "one flat Op -> CLI mapping table; splitting it would hide which op maps to which invocation"
 )]
 fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
+    // bn-2zubk: every maw invocation's combined stdout + stderr is kept so
+    // `TrunkDirtyDisplacement` can tell a REPORTED displacement from a silent
+    // one. Non-maw ops (and the `git add` prelude of a commit) have no output
+    // the user would read as a maw report.
+    let judged = |out: std::process::Output| (out.status.success(), output_text(&out));
     OpOutcome::from(match op {
         Op::WsCreate { ws, from } => {
             // Create as --persistent so the `Advance` op (maw ws advance) has a
@@ -285,7 +301,7 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
                 base_ref_arg(from),
                 "--persistent",
             ]);
-            out.status.success()
+            judged(out)
         }
         Op::EditFiles { ws, files } => {
             // Edits go straight to the workspace working tree (NOT through maw).
@@ -298,14 +314,13 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
                 }
             }
             // Editing is not a maw op; count it as a no-op for liveness.
-            false
+            (false, String::new())
         }
         Op::Commit { ws, msg } => {
             // `git add -A` then `git commit -m <msg>` inside the workspace, via
             // `maw exec`. A commit with nothing staged exits non-zero — fine.
             let _ = repo.maw_raw_exact(&["exec", &ws.0, "--", "git", "add", "-A"]);
-            let out = repo.maw_raw_exact(&["exec", &ws.0, "--", "git", "commit", "-m", &msg.0]);
-            out.status.success()
+            judged(repo.maw_raw_exact(&["exec", &ws.0, "--", "git", "commit", "-m", &msg.0]))
         }
         Op::Merge {
             srcs,
@@ -329,31 +344,24 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
             if *destroy {
                 args.push("--destroy");
             }
-            let out = repo.maw_raw_exact(&args);
-            out.status.success()
+            judged(repo.maw_raw_exact(&args))
         }
-        Op::Sync { ws } => {
-            let out = repo.maw_raw_exact(&["ws", "sync", &ws.0]);
-            out.status.success()
-        }
+        Op::Sync { ws } => judged(repo.maw_raw_exact(&["ws", "sync", &ws.0])),
         Op::Destroy { ws, force } => {
             let mut args: Vec<&str> = vec!["ws", "destroy", &ws.0];
             if *force {
                 args.push("--force");
             }
-            let out = repo.maw_raw_exact(&args);
-            out.status.success()
+            judged(repo.maw_raw_exact(&args))
         }
         Op::Recover { ws, to } => {
-            let out = repo.maw_raw_exact(&["ws", "recover", &ws.0, "--to", &to.0]);
-            out.status.success()
+            judged(repo.maw_raw_exact(&["ws", "recover", &ws.0, "--to", &to.0]))
         }
         Op::Advance { ws } => {
             // `maw ws advance <ws>` — routes committed-ahead work through the
             // guarded rebase path (bn-8flz). This is the production
             // HEAD-movement code the in-proc model can't reach.
-            let out = repo.maw_raw_exact(&["ws", "advance", &ws.0]);
-            out.status.success()
+            judged(repo.maw_raw_exact(&["ws", "advance", &ws.0]))
         }
         Op::OutOfMawCommit { files, msg } => {
             // Advance refs/heads/main with a real commit made ENTIRELY outside
@@ -361,7 +369,7 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
             // epoch update). This leaves main ahead of
             // refs/manifold/epoch/current, arming reconcile_epoch_with_branch
             // (the FF-absorb path, bn-11ip/bn-rah2) for the next merge.
-            out_of_maw_commit(repo, files, &msg.0)
+            (out_of_maw_commit(repo, files, &msg.0), String::new())
         }
         Op::DirtyTrunkWrite { files } => {
             // Uncommitted writes into the default workspace's working tree.
@@ -378,7 +386,7 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
                 }
             }
             // Not a maw op; count as no-op for liveness.
-            false
+            (false, String::new())
         }
         Op::Gc {
             recovery_snapshots,
@@ -391,8 +399,7 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
                 args.push("--older-than");
                 args.push(&older);
             }
-            let out = repo.maw_raw_exact(&args);
-            out.status.success()
+            judged(repo.maw_raw_exact(&args))
         }
         Op::CorruptWorktreeStatMasked { ws, path, nonce } => {
             // bn-22jy: handled out-of-band because it is the one op whose
@@ -404,6 +411,7 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
             return OpOutcome {
                 succeeded: false,
                 masked: corrupt_worktree_stat_masked(repo, &ws.0, path.as_deref(), *nonce),
+                output: String::new(),
             };
         }
     })
@@ -421,16 +429,28 @@ struct OpOutcome {
     /// `(resolved_path, stale_bytes)` iff a corruption op established a mask
     /// that `git status` genuinely reports as clean.
     masked: Option<(String, String)>,
+    /// bn-2zubk: the maw invocation's combined stdout + stderr (empty for
+    /// non-maw ops) — what the user was told.
+    output: String,
 }
 
 #[cfg(feature = "assurance")]
-impl From<bool> for OpOutcome {
-    fn from(succeeded: bool) -> Self {
+impl From<(bool, String)> for OpOutcome {
+    fn from((succeeded, output): (bool, String)) -> Self {
         Self {
             succeeded,
             masked: None,
+            output,
         }
     }
+}
+
+/// Combined stdout + stderr of a maw invocation.
+#[cfg(feature = "assurance")]
+fn output_text(out: &std::process::Output) -> String {
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text
 }
 
 /// **bn-22jy: the stat-cache-masked worktree corruption primitive.**
@@ -795,9 +815,8 @@ fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (OpOutcome, bo
 
     let succeeded = out.status.success();
     let crashed = !out.status.success();
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (OpOutcome::from(succeeded), crashed, text)
+    let text = output_text(&out);
+    (OpOutcome::from((succeeded, text.clone())), crashed, text)
 }
 
 /// Merge target name. Increment 1 always merges into `default`.
@@ -887,6 +906,9 @@ fn run_seed(
     // recorded dirty writes; RecordRefCoherence is stateless.
     let mut sibling_oracle = SiblingRefFaithfulness::new();
     let mut trunk_oracle = TrunkDirtyPreservation::new();
+    // bn-2zubk: the STRICT dirty-trunk oracle — displacement out of the
+    // worktree must be reported by the op, not merely survive in a ref.
+    let mut displacement_oracle = TrunkDirtyDisplacement::new();
     // bn-3gba: CleanMaterialization is incremental (one per seed, fed every
     // step in order with the op's success verdict).
     let mut clean_materialization = CleanMaterialization::new();
@@ -912,15 +934,15 @@ fn run_seed(
             None
         };
 
-        let outcome = if let Some(fp_name) = fault_name {
+        let (outcome, crashed) = if let Some(fp_name) = fault_name {
             // Arm MAW_FP=<name>=abort on the failpoints binary; the op will
             // likely crash mid-flight. That is EXPECTED — the oracle judges the
             // post-crash state below.
             live.faults_injected += 1;
-            let (out, _crashed, _text) = execute_op_faulted(&repo, op, fp_name);
-            out
+            let (out, crashed, _text) = execute_op_faulted(&repo, op, fp_name);
+            (out, crashed)
         } else {
-            execute_op(&repo, op)
+            (execute_op(&repo, op), false)
         };
         let succeeded = outcome.succeeded;
         // bn-22jy: feed the corruption oracle the RESOLVED victim (the op
@@ -951,11 +973,13 @@ fn run_seed(
                 // A deliberate trunk re-commit supersedes any dirty-write
                 // expectation on the same paths.
                 trunk_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
+                displacement_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
             }
             Op::DirtyTrunkWrite { files } => {
                 live.dirty_trunk_writes += 1;
                 for fe in files {
                     trunk_oracle.record_dirty(&fe.path, &fe.content);
+                    displacement_oracle.record_dirty(&fe.path, &fe.content);
                 }
             }
             Op::Gc { .. } if succeeded => live.gc_runs += 1,
@@ -1016,6 +1040,14 @@ fn run_seed(
                 "seed={seed} step={i} op={name} TrunkDirtyPreservation: {v}"
             ));
         }
+        // TrunkDirtyDisplacement (bn-2zubk): the same bytes must still be ON
+        // DISK unless this op told the user where they went (crashed ops
+        // defer to the recovering merge).
+        for v in displacement_oracle.check_step(repo.root(), op, &outcome.output, crashed) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} TrunkDirtyDisplacement: {v}"
+            ));
+        }
         // RecordRefCoherence (bn-3uou): no destroy record may claim a recovery
         // ref that does not exist.
         for v in check_record_ref_coherence(repo.root()) {
@@ -1061,6 +1093,16 @@ fn run_seed(
     live.masked_resolutions = live
         .masked_resolutions
         .saturating_add(clean_materialization.masked_resolutions());
+    // bn-2zubk: same discipline for the strict displacement oracle.
+    live.displacement_judgements = live
+        .displacement_judgements
+        .saturating_add(displacement_oracle.judged());
+    live.displacements_reported = live
+        .displacements_reported
+        .saturating_add(displacement_oracle.reported());
+    live.displacements_deferred = live
+        .displacements_deferred
+        .saturating_add(displacement_oracle.deferred_total());
 
     violations
 }
@@ -1127,6 +1169,8 @@ fn drive_tier(
          {} clean-materialization checks (bn-3gba); \
          {} masked corruptions ({} effective), {} masked-removal judgements \
          (overwrite or destroy, bn-2k9e), {} masks re-materialized (bn-22jy); \
+         {} displacement judgements ({} reported, {} deferred across a crash, \
+         bn-2zubk); \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
@@ -1145,6 +1189,9 @@ fn drive_tier(
         live.masked_corruptions_effective,
         live.masked_overwrites_judged,
         live.masked_resolutions,
+        live.displacement_judgements,
+        live.displacements_reported,
+        live.displacements_deferred,
         all_violations.len(),
         n_trials,
         wilson_ub,
@@ -1378,7 +1425,7 @@ struct RegressionRun {
 fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan) -> RegressionRun {
     let repo = TestRepo::new();
     repo.seed_files(&[("base.txt", "base content\n")]);
-    drive_plan_on(&repo, plan, false, &mut |_, _| {}).0
+    drive_plan_on(&repo, plan, false, &mut |_, _| Vec::new()).0
 }
 
 /// One faulted step of a regression plan driven with faults honored.
@@ -1397,25 +1444,33 @@ struct FaultedStep {
     checkout_intent_after: bool,
 }
 
+/// Harness hook run before each step of [`drive_plan_on`]; returns the
+/// uncommitted trunk symlinks it planted as `(path, target)`.
+#[cfg(feature = "assurance")]
+type BeforeStep<'a> = dyn FnMut(&TestRepo, usize) -> Vec<(String, String)> + 'a;
+
 /// Drive `plan` on an already-seeded `repo`, running every oracle after every
 /// op. With `inject_faults`, a step carrying a `FaultSpec::Failpoint` runs on
 /// the failpoints binary with
 /// [`maw::assurance::fault::production_fp_spec`] (exactly as the faulted
 /// tier does). `before_step(repo, i)` runs before step `i` executes, for
 /// harness-side setup the op vocabulary cannot express (bn-1sbjf: a trunk
-/// symlink).
+/// symlink). It returns the uncommitted trunk SYMLINKS it planted as
+/// `(path, target)`, so the strict displacement oracle (bn-2zubk) tracks them
+/// like any `DirtyTrunkWrite`.
 #[cfg(feature = "assurance")]
 fn drive_plan_on(
     repo: &TestRepo,
     plan: &maw::assurance::scenario::ScenarioPlan,
     inject_faults: bool,
-    before_step: &mut dyn FnMut(&TestRepo, usize),
+    before_step: &mut BeforeStep<'_>,
 ) -> (RegressionRun, Vec<FaultedStep>) {
     let mut faulted_steps = Vec::new();
 
     let mut oracle_a = OracleA::new(repo.root());
     let mut sibling_oracle = SiblingRefFaithfulness::new();
     let mut trunk_oracle = TrunkDirtyPreservation::new();
+    let mut displacement_oracle = TrunkDirtyDisplacement::new();
     let mut clean_materialization = CleanMaterialization::new();
     let mut masked_oracle = MaskedStalePreservation::new();
     let mut masked_paths: Vec<(String, String)> = Vec::new();
@@ -1424,10 +1479,14 @@ fn drive_plan_on(
     for (i, step) in plan.steps.iter().enumerate() {
         let op = &step.op;
         let name = op_name(op);
-        before_step(repo, i);
+        for (path, target) in before_step(repo, i) {
+            displacement_oracle.record_dirty_symlink(&path, &target);
+        }
+        let mut crashed = false;
         let outcome = match (&step.fault, inject_faults) {
             (FaultSpec::Failpoint { name: fp, .. }, true) => {
-                let (outcome, _crashed, output) = execute_op_faulted(repo, op, fp);
+                let (outcome, op_crashed, output) = execute_op_faulted(repo, op, fp);
+                crashed = op_crashed;
                 faulted_steps.push(FaultedStep {
                     index: i,
                     spec: maw::assurance::fault::production_fp_spec(fp),
@@ -1452,10 +1511,12 @@ fn drive_plan_on(
         match op {
             Op::OutOfMawCommit { files, .. } => {
                 trunk_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
+                displacement_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
             }
             Op::DirtyTrunkWrite { files } => {
                 for fe in files {
                     trunk_oracle.record_dirty(&fe.path, &fe.content);
+                    displacement_oracle.record_dirty(&fe.path, &fe.content);
                 }
             }
             _ => {}
@@ -1481,6 +1542,9 @@ fn drive_plan_on(
         }
         for v in trunk_oracle.check(repo.root()) {
             violations.push(format!("step={i} op={name} TrunkDirtyPreservation: {v}"));
+        }
+        for v in displacement_oracle.check_step(repo.root(), op, &outcome.output, crashed) {
+            violations.push(format!("step={i} op={name} TrunkDirtyDisplacement: {v}"));
         }
         for v in check_record_ref_coherence(repo.root()) {
             violations.push(format!("step={i} op={name} RecordRefCoherence: {v}"));
@@ -1917,6 +1981,7 @@ fn bn_1sbjf_crash_after_default_checkout_is_recovered() {
                 std::fs::read_to_string(ws.join(&tracked_path)).is_ok_and(|c| c == tracked_dirty);
             in_window = Some((merged_on_disk, user_edit_on_disk));
         }
+        Vec::new()
     });
 
     assert_eq!(faulted.len(), 1, "exactly one faulted step");
@@ -1978,7 +2043,11 @@ fn bn_1sbjf_failed_snapshot_fallback_keeps_trunk_edits_and_symlink() {
             let link = repo.default_workspace().join("link");
             std::fs::remove_file(&link).expect("rm link");
             std::os::unix::fs::symlink(untracked, &link).expect("retarget link");
+            // bn-2zubk: the retargeted link is uncommitted trunk content the
+            // strict displacement oracle must see come back.
+            return vec![("link".to_owned(), untracked.to_owned())];
         }
+        Vec::new()
     });
 
     assert_eq!(faulted.len(), 1, "exactly one faulted step");
@@ -2034,4 +2103,115 @@ fn bn_1sbjf_failed_snapshot_fallback_keeps_trunk_edits_and_symlink() {
          {new_pins:?}\n{ctx}"
     );
     assert_bn_1sbjf_target_state(&repo, &plan, &["link"], &ctx);
+}
+
+// ---------------------------------------------------------------------------
+// bn-2zubk: phase-targeted faults fire in a consolidated repo
+// ---------------------------------------------------------------------------
+
+/// bn-2zubk (2): `fault::SubprocFault` polls the merge journal for the
+/// seed-selected phase and only kills once it sees it. It used to read the
+/// legacy `.manifold/merge-state.json`, so on a consolidated repo (journal at
+/// `.maw/manifold/`) it never observed a phase and every run came back
+/// `PhaseNotObserved` — the phase-targeted kill was inert.
+///
+/// Drives the real failpoints binary against a `maw init` consolidated repo
+/// and demands the full cycle: phase observed, killed, recovered, and the
+/// workspace's work landed on trunk. Reverting `read_merge_phase` to the
+/// legacy path turns this RED (`PhaseNotObserved`).
+#[cfg(feature = "assurance")]
+#[test]
+#[ignore = "heavyweight: builds a --features failpoints maw binary. Run via just sg1-production-tier-faults"]
+fn bn_2zubk_phase_targeted_fault_fires_in_consolidated_repo() {
+    use maw::assurance::fault::{CrashKind, FaultPlan, SubprocFault, SubprocOutcome};
+    use std::process::Command;
+
+    let bin = failpoints_maw_bin();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path();
+    let run = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new(bin)
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@localhost")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@localhost")
+            .output()
+            .expect("spawn maw");
+        assert!(
+            out.status.success(),
+            "maw {args:?} failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run(root, &["init"]);
+    assert!(
+        root.join(".maw").join("manifold").is_dir(),
+        "NON-VACUITY: maw init must produce the consolidated layout"
+    );
+    assert!(
+        !root.join(".manifold").exists(),
+        "NON-VACUITY: no legacy .manifold/ dir may exist, or the old reader would see it"
+    );
+    manifold_common::git_ok(root, &["config", "user.name", "Test"]);
+    manifold_common::git_ok(root, &["config", "user.email", "test@localhost"]);
+    run(root, &["ws", "create", "--from", "main", "zubk"]);
+    let ws = root.join(".maw").join("workspaces").join("zubk");
+    std::fs::write(ws.join("zubk.txt"), "bn-2zubk work\n").expect("write");
+    run(root, &["exec", "zubk", "--", "git", "add", "-A"]);
+    run(
+        root,
+        &["exec", "zubk", "--", "git", "commit", "-m", "zubk work"],
+    );
+
+    // A real-kill boundary whose `error` bridge leaves the journal on disk at
+    // the target phase, so the observation does not depend on winning a
+    // 20 ms polling race (at the commit-phase sites the `error` exits and
+    // clears the journal within milliseconds).
+    let plan = FaultPlan {
+        seed: 0,
+        phase: "cleanup".to_owned(),
+        failpoint: "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT".to_owned(),
+        kind: CrashKind::SigKill,
+    };
+    let merge_args: Vec<String> = [
+        "ws",
+        "merge",
+        "zubk",
+        "--into",
+        "default",
+        "--message",
+        "bn-2zubk",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let outcome = SubprocFault::new(plan, bin, root, merge_args)
+        .with_observe_timeout(std::time::Duration::from_secs(15))
+        .run()
+        .expect("spawn faulted merge");
+
+    match &outcome {
+        SubprocOutcome::Recovered { killed_phase, .. } => {
+            assert_eq!(killed_phase, "cleanup", "{outcome:?}");
+        }
+        other => panic!(
+            "bn-2zubk: the phase-targeted fault must observe the 'cleanup' phase in a \
+             consolidated repo, kill, and recover; got {other:?}"
+        ),
+    }
+    assert!(
+        !maw::assurance::merge_state_path(root).exists(),
+        "recovery must finish the interrupted merge (journal still on disk)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("zubk.txt"))
+            .ok()
+            .as_deref(),
+        Some("bn-2zubk work\n"),
+        "the recovered merge must land the workspace's work on the trunk"
+    );
 }

@@ -226,3 +226,54 @@ fn every_gate_recipe_is_wired_or_marked_local_only() {
         );
     }
 }
+
+/// bn-2zubk: `sg1-assurance-clippy` must lint EVERY maw-assurance feature.
+///
+/// It used to run `-p maw-assurance --features oracles`, but `oracles` does
+/// not imply `stateright`, so the Stateright model (`src/model.rs`) was never
+/// linted by any CI lane and rotted `-D warnings`-dirty. Wiring alone (the
+/// test above) cannot see a lane that runs but with too few features, so pin
+/// the flag: `--all-features` covers any feature added later too.
+#[test]
+fn assurance_clippy_lints_every_maw_assurance_feature() {
+    let root = project_root();
+    let justfile = fs::read_to_string(root.join("Justfile")).expect("read Justfile");
+    let body: Vec<&str> = justfile
+        .lines()
+        .skip_while(|l| !l.starts_with("sg1-assurance-clippy:"))
+        .skip(1)
+        .take_while(|l| l.starts_with(' ') || l.starts_with('\t'))
+        .collect();
+    assert!(
+        !body.is_empty(),
+        "sg1-assurance-clippy recipe not found in the Justfile"
+    );
+    let assurance_lines: Vec<&&str> = body
+        .iter()
+        .filter(|l| l.contains("cargo clippy") && l.contains("-p maw-assurance"))
+        .collect();
+    assert!(
+        !assurance_lines.is_empty(),
+        "sg1-assurance-clippy no longer lints the maw-assurance crate: {body:?}"
+    );
+    for line in assurance_lines {
+        assert!(
+            line.contains("--all-features") && line.contains("-D warnings"),
+            "sg1-assurance-clippy must lint maw-assurance with --all-features and \
+             -D warnings (a feature subset leaves feature-gated modules such as the \
+             stateright model unlinted): {line}"
+        );
+    }
+    // The local gate must run it too, so `just check` matches CI (pre.17 went
+    // RED on main from model.rs lints no local gate ran).
+    let check_deps = justfile
+        .lines()
+        .find_map(|l| l.strip_prefix("check:"))
+        .expect("`check:` recipe in the Justfile");
+    assert!(
+        check_deps
+            .split_whitespace()
+            .any(|d| d == "sg1-assurance-clippy"),
+        "`just check` must depend on sg1-assurance-clippy: check:{check_deps}"
+    );
+}
