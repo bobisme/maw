@@ -90,6 +90,7 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
         })?;
     opts.overwrite_existing = true;
     opts.destination_is_initially_empty = false;
+    let fs_has_exec_bit = opts.fs.executable_bit;
 
     // When the `lfs` feature is on, maw-lfs handles LFS smudge/clean itself
     // in a post-pass. Clear external filter drivers here so gix does NOT
@@ -132,6 +133,15 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
                 first.error,
             ),
         });
+    }
+
+    // bn-2nnuz: gix writes over an existing file in place and only ever ADDS
+    // the executable bit (`finalize_entry`), so a target entry of mode 100644
+    // that lands on an executable file keeps `+x` — the worktree then shows
+    // a mode change and the next commit reverts the target's mode. Clear it,
+    // like `git checkout` (which recreates the file with the entry's mode).
+    if fs_has_exec_bit {
+        clear_stale_exec_bits(&mut index_file, workdir)?;
     }
 
     // LFS smudge post-pass: replace any LFS pointer files with real content
@@ -190,6 +200,87 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     remove_stale_files(workdir, workdir, &tree_paths, &old_tracked)?;
 
     Ok(())
+}
+
+/// Clear the executable bit of every checked-out regular file whose index
+/// entry is a plain (non-executable) blob, refreshing the entry's stat so the
+/// chmod's ctime change does not make the file look modified. (bn-2nnuz)
+///
+/// Only regular files are touched and nothing is followed through a symlink:
+/// the leaf is `lstat`ed, and a path with a symlinked (or missing) parent
+/// component inside `workdir` is skipped — gix never writes through one.
+#[cfg(unix)]
+fn clear_stale_exec_bits(
+    index_file: &mut gix::index::File,
+    workdir: &Path,
+) -> Result<(), GitError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixes: Vec<(usize, gix::index::entry::Stat)> = Vec::new();
+    for (idx, entry) in index_file.entries().iter().enumerate() {
+        if entry.mode != gix::index::entry::Mode::FILE
+            || entry
+                .flags
+                .contains(gix::index::entry::Flags::SKIP_WORKTREE)
+        {
+            continue;
+        }
+        let Ok(rel) = gix::path::try_from_bstr(entry.path(index_file)) else {
+            continue;
+        };
+        let full = workdir.join(&rel);
+        let Ok(meta) = std::fs::symlink_metadata(&full) else {
+            continue;
+        };
+        let mode = meta.permissions().mode();
+        if !meta.is_file() || mode & 0o111 == 0 || has_symlinked_parent(workdir, &rel) {
+            continue;
+        }
+        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode & !0o111)).map_err(
+            |e| GitError::BackendError {
+                message: format!(
+                    "failed to clear executable bit of '{}' after checkout: {e}",
+                    rel.display()
+                ),
+            },
+        )?;
+        if let Ok(meta) = gix::index::fs::Metadata::from_path_no_follow(&full)
+            && let Ok(stat) = gix::index::entry::Stat::from_fs(&meta)
+        {
+            fixes.push((idx, stat));
+        }
+    }
+    let entries = index_file.entries_mut();
+    for (idx, stat) in fixes {
+        entries[idx].stat = stat;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn clear_stale_exec_bits(
+    _index_file: &mut gix::index::File,
+    _workdir: &Path,
+) -> Result<(), GitError> {
+    Ok(())
+}
+
+/// Whether any proper parent component of `rel` inside `root` is a symlink
+/// (or cannot be `lstat`ed).
+#[cfg(unix)]
+fn has_symlinked_parent(root: &Path, rel: &Path) -> bool {
+    let Some(parent) = rel.parent() else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in parent.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if !meta.file_type().is_symlink() => {}
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// Self-contained LFS smudge for an existing worktree: open repo, smudge
@@ -1175,6 +1266,79 @@ mod tests {
 
         // Reflog entry must exist.
         assert!(reflog_has_entry(&wt), "reflog entry must be written");
+    }
+
+    /// bn-2nnuz: checking out a commit whose entry is `100644` over a worktree
+    /// file that is executable (the previous commit had `100755`) clears the
+    /// executable bit — both a mode-only change and a mode+content change —
+    /// and leaves a clean status; the reverse direction still sets it; a
+    /// symlink's target is never chmodded.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_tree_clears_exec_bit_when_target_mode_is_regular() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of = |p: &Path| fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        for f in ["mode_only.sh", "mode_content.sh"] {
+            fs::write(root.join(f), "#!/bin/sh\n").unwrap();
+            fs::set_permissions(root.join(f), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(root.join("plain.txt"), "p\n").unwrap();
+        // An executable file OUTSIDE the tree, reached through a tracked symlink.
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "x\n").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&victim, root.join("link")).unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "exec"]);
+        let c1 = git(&root, &["rev-parse", "HEAD"]);
+
+        git(&root, &["update-index", "--chmod=-x", "mode_only.sh"]);
+        fs::write(root.join("mode_content.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        git(&root, &["add", "mode_content.sh"]);
+        git(&root, &["update-index", "--chmod=-x", "mode_content.sh"]);
+        git(&root, &["update-index", "--chmod=+x", "plain.txt"]);
+        git(&root, &["commit", "-qm", "flip"]);
+        let c2 = git(&root, &["rev-parse", "HEAD"]);
+
+        let wt = root.join("wt");
+        git(
+            &root,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), &c1],
+        );
+        assert_eq!(mode_of(&wt.join("mode_only.sh")) & 0o111, 0o111);
+
+        let repo = GixRepo::open(&wt).expect("open worktree repo");
+        super::checkout_detach(&repo, c2.parse().unwrap(), &wt).expect("checkout_detach");
+
+        assert_eq!(
+            mode_of(&wt.join("mode_only.sh")) & 0o111,
+            0,
+            "mode-only -x kept +x"
+        );
+        assert_eq!(
+            mode_of(&wt.join("mode_content.sh")) & 0o111,
+            0,
+            "mode+content -x kept +x"
+        );
+        assert_ne!(mode_of(&wt.join("plain.txt")) & 0o111, 0, "+x not applied");
+        assert_eq!(
+            mode_of(&victim) & 0o111,
+            0o111,
+            "symlink target was chmodded"
+        );
+        let status = git(&wt, &["status", "--porcelain"]);
+        assert!(
+            status.is_empty(),
+            "worktree must be clean after checkout: {status:?}"
+        );
     }
 
     /// `checkout_detach` back from c2 to c1 removes the file added in c2.

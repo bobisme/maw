@@ -8282,10 +8282,20 @@ fn verify_trunk_replay_fidelity(
             continue;
         }
         let (pre_bytes, final_bytes) = match (pre_entry, &final_entry) {
-            (DiskSide::File { bytes: a, .. }, DiskSide::File { bytes: b, .. }) => {
+            (DiskSide::File { bytes: a, mode }, DiskSide::File { bytes: b, .. }) => {
                 if a == b {
-                    // Only the mode differs; the replay's exec-bit
-                    // reconciliation (bn-3fcbu) owns that.
+                    // Only the mode differs. The replay's exec-bit
+                    // reconciliation (bn-3fcbu) normally settled it, but the
+                    // snapshot-failed fallback has no replay: settle it here
+                    // from the in-memory capture (bn-2nnuz).
+                    settle_fidelity_exec_bit(
+                        &repo,
+                        ws_path,
+                        path,
+                        *mode,
+                        anchor_epoch,
+                        epoch_after,
+                    );
                     continue;
                 }
                 (Some(a.as_slice()), Some(b.as_slice()))
@@ -8315,8 +8325,12 @@ fn verify_trunk_replay_fidelity(
         // (a symlink, a deletion, a type change) replaces the entry without
         // following a link (bn-3jqfk).
         let repaired = match (pre_entry, &final_entry) {
-            (DiskSide::File { bytes, .. }, DiskSide::File { .. }) => {
-                std::fs::write(&full, bytes).is_ok()
+            (DiskSide::File { bytes, mode }, DiskSide::File { .. }) => {
+                let ok = std::fs::write(&full, bytes).is_ok();
+                // bn-2nnuz: the on-disk mode is whatever the checkout (or
+                // replay) left, not the user's: settle the exec bit too.
+                settle_fidelity_exec_bit(&repo, ws_path, path, *mode, anchor_epoch, epoch_after);
+                ok
             }
             _ => super::working_copy::write_worktree_entry(ws_path, path, pre_entry)
                 .inspect_err(|e| {
@@ -8362,6 +8376,46 @@ fn verify_trunk_replay_fidelity(
                 eprintln!("  Inspect recovery snapshots: maw ws recover {ws_name}");
             }
         }
+    }
+}
+
+/// Settle the executable bit of a user-edited regular file the merge left
+/// committed-unchanged, as a 3-way result over the anchor, the merged commit
+/// and the user's pre-merge capture: the user's bit wins when the user changed
+/// it (or added the file); otherwise the merged commit's bit applies. Same
+/// rule as the replay's `reconcile_replayed_exec_bits` (bn-3fcbu), from the
+/// authoritative in-memory capture, so the snapshot-failed fallback — which
+/// has no replay — cannot leave the checkout's mode behind. Best effort.
+/// (bn-2nnuz)
+fn settle_fidelity_exec_bit(
+    repo: &maw_git::GixRepo,
+    ws_path: &Path,
+    path: &Path,
+    user_mode: u32,
+    anchor_epoch: &str,
+    epoch_after: &str,
+) {
+    let user_exec = user_mode & 0o111 != 0;
+    let exec_at = |commit: &str| -> Option<Option<bool>> {
+        let oid = repo.rev_parse(commit).ok()?;
+        let rel = path.to_str()?.replace('\\', "/");
+        let entry = repo.read_blob_at_path(oid, &rel).ok()?;
+        Some(entry.and_then(|(mode, _, _)| match mode {
+            maw_git::EntryMode::Blob => Some(false),
+            maw_git::EntryMode::BlobExecutable => Some(true),
+            _ => None,
+        }))
+    };
+    // Unreadable trees: keep the user's bit (their capture is authoritative).
+    let want = match (exec_at(anchor_epoch), exec_at(epoch_after)) {
+        (Some(Some(base)), Some(Some(merged))) if base == user_exec => merged,
+        _ => user_exec,
+    };
+    if let Err(e) = super::working_copy::set_worktree_exec_bit(ws_path, path, want) {
+        tracing::warn!(
+            "bn-2nnuz: could not settle the executable bit of '{}': {e:#}",
+            path.display()
+        );
     }
 }
 

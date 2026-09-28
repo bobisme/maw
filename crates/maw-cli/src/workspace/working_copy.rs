@@ -1851,7 +1851,7 @@ fn try_reconcile_replayed_exec_bits(
 /// `ws_path`, without following symlinks (the file or any parent component
 /// inside the workspace). Non-regular paths are left alone.
 #[cfg(unix)]
-fn set_worktree_exec_bit(ws_path: &Path, rel: &Path, exec: bool) -> Result<()> {
+pub(super) fn set_worktree_exec_bit(ws_path: &Path, rel: &Path, exec: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mut current = ws_path.to_path_buf();
@@ -1885,7 +1885,7 @@ fn set_worktree_exec_bit(ws_path: &Path, rel: &Path, exec: bool) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_worktree_exec_bit(_ws_path: &Path, _rel: &Path, _exec: bool) -> Result<()> {
+pub(super) fn set_worktree_exec_bit(_ws_path: &Path, _rel: &Path, _exec: bool) -> Result<()> {
     Ok(())
 }
 
