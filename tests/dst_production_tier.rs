@@ -475,6 +475,11 @@ fn execute_op(repo: &TestRepo, op: &Op) -> OpOutcome {
                 args.push("--recovery-snapshots");
                 args.push("--older-than");
                 args.push(&older);
+                // bn-wxg28: the op models an explicit user sweep; without
+                // --force a young-pin / --older-than 0 drop is refused (a
+                // no-op). Live workspaces' pins stay excluded (no
+                // --include-live), matching `gc_eligible_recovery_snapshots`.
+                args.push("--force");
             }
             judged(repo.maw_raw_exact(&args))
         }
@@ -1860,7 +1865,9 @@ fn bn_1xmk_regression_is_green() {
 /// conflict must be GREEN — the user drained the recover queue (Oracle A
 /// releases exactly the swept destroy snapshot's content), and the dirty trunk
 /// bytes survive on disk as the `default` side of the conflict. Non-vacuity:
-/// the sweep really released a witness and really removed every recovery ref.
+/// the sweep really released a witness and really removed every destroyed
+/// workspace's recovery ref, while (bn-wxg28) the live `default` workspace's
+/// dirty-trunk pin survives because the sweep ran without `--include-live`.
 #[cfg(feature = "assurance")]
 #[test]
 fn bn_m7kjy_explicit_snapshot_drain_is_green() {
@@ -1875,9 +1882,23 @@ fn bn_m7kjy_explicit_snapshot_drain_is_green() {
         run.gc_released_witnesses >= 1,
         "non-vacuity: the sweep must have released ws-a's destroy-snapshot content"
     );
+    // bn-wxg28: `--older-than 0 --force` sweeps every pin of a workspace
+    // that no longer exists, and keeps the live `default` workspace's
+    // dirty-trunk pin (no --include-live).
     assert!(
-        run.recovery_refs.is_empty(),
-        "non-vacuity: --older-than 0 must have swept every recovery ref: {:?}",
+        run.recovery_refs
+            .iter()
+            .all(|r| r.starts_with("refs/manifold/recovery/default/")),
+        "non-vacuity: --older-than 0 --force must have swept every destroyed \
+         workspace's recovery ref: {:?}",
+        run.recovery_refs
+    );
+    assert!(
+        run.recovery_refs
+            .iter()
+            .any(|r| r.starts_with("refs/manifold/recovery/default/")),
+        "bn-wxg28: the live default workspace's dirty-trunk pin must survive \
+         gc without --include-live: {:?}",
         run.recovery_refs
     );
 }

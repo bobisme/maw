@@ -1073,8 +1073,9 @@ pub fn bn_286g_regression_plan() -> ScenarioPlan {
 ///   escape-weight-8 faulted run) — the sweep is entitled to drop it; and
 /// - a merge of `ws-b` hit a local-vs-merge conflict with uncommitted trunk
 ///   bytes on the same path, leaving them as the `default` side of diff3
-///   markers on disk AND in a `recovery/default/*` pin (seed 12) — the sweep
-///   drops the pin, the bytes survive on disk as conflict-as-data.
+///   markers on disk AND in a `recovery/default/*` pin (seed 12) — the bytes
+///   survive on disk as conflict-as-data, and (bn-wxg28) the sweep keeps the
+///   live `default` workspace's pin (no `--include-live`).
 ///
 /// Both must be GREEN under every oracle.
 #[must_use]

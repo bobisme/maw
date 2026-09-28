@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## Unreleased
+
+**Recovery snapshots**
+- **`maw gc --recovery-snapshots` no longer deletes recovery pins of workspaces that still exist (bn-wxg28).** Previously it removed every `refs/manifold/recovery/*` ref older than the threshold, including the default workspace's dirty-trunk pins (`recovery/default/*`) and `materialize-*` pins of live workspaces. Such a pin can be the only copy of edits a merge or sync displaced. These pins are now kept and listed; the new `--include-live` flag includes them.
+- **Risky sweeps need `--force` (bn-wxg28).** A sweep that would drop anything with `--older-than 0`, a pin younger than 1 day, or a live workspace's pin deletes nothing without `--force`. It exits non-zero and lists each ref it would drop with its workspace and pin age, plus the exact preview (`--dry-run`) and `--force` commands. `--dry-run` shows the same list and says when `--force` is needed. The everyday sweep of old pins of destroyed workspaces needs no `--force`. **Scripts that ran `maw gc --recovery-snapshots --older-than 0` must add `--force`.**
+
 ## v1.0.0-pre.17 (2026-09-27)
 
 Seventeenth dogfood pre-release, focused on crash recovery, the replay of uncommitted trunk edits across a merge, fail-closed configuration, and the integrity of the SG1 soak (the v1.0 release gate). It includes a fix for a `ws sync` failure reported from the bones repo. A pre-release sweep (one slice run by codex / gpt-6-astra) found and fixed further defects in code added this cycle. **Upgrading is recommended.**

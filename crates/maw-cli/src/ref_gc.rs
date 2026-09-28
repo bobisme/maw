@@ -19,6 +19,17 @@
 //! committer time of the pinned commit. The pinned commit's own age is not
 //! the pin's age: `destroy --force` of a clean workspace pins an existing,
 //! possibly months-old commit (bn-3maj).
+//!
+//! # Safety policy (bn-wxg28)
+//!
+//! - Pins of workspaces that still exist (the default workspace's dirty-trunk
+//!   pins `recovery/default/*`, `materialize-*` pins of a live agent
+//!   workspace, ...) are skipped unless the caller passes `include_live`
+//!   (`--include-live`). Such a pin can be the only copy of displaced edits.
+//! - A sweep that would drop anything while `older_than_days == 0`, or that
+//!   would drop a pin younger than [`YOUNG_PIN_SECS`] or a pin of a live
+//!   workspace, refuses without `force` and lists what it would drop
+//!   ([`GcRefused`]). `dry_run` never refuses; it lists the same refs.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -50,6 +61,183 @@ pub struct RefGcReport {
     pub destroy_records_deleted: usize,
     /// `(workspace, record filename)` of every destroy record pruned.
     pub deleted_destroy_records: Vec<(String, String)>,
+    /// Details of every recovery ref deleted (or, in a dry run, that would
+    /// be), in the same order as `deleted_recovery_refs`.
+    pub dropped_pins: Vec<PinInfo>,
+    /// Recovery refs of still-existing workspaces that were kept because
+    /// `include_live` was off (bn-wxg28). Counted in `recovery_refs_kept`.
+    pub skipped_live_pins: Vec<PinInfo>,
+    /// Why this sweep needs `--force` (empty when it does not). Set on a dry
+    /// run so the preview can say so; a real run without `force` fails with
+    /// [`GcRefused`] instead.
+    pub force_reasons: Vec<String>,
+}
+
+/// Pins younger than this (seconds) are "young": dropping one needs `--force`.
+pub const YOUNG_PIN_SECS: u64 = 86_400;
+
+/// One recovery ref considered by the sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinInfo {
+    /// Full ref name (`refs/manifold/recovery/<ws>/<leaf>`).
+    pub ref_name: String,
+    /// Workspace the pin belongs to.
+    pub workspace: String,
+    /// Whether that workspace currently exists.
+    pub live: bool,
+    /// Pin age in seconds, when known.
+    pub age_secs: Option<u64>,
+}
+
+impl PinInfo {
+    fn is_young(&self) -> bool {
+        self.age_secs.is_some_and(|a| a < YOUNG_PIN_SECS)
+    }
+
+    /// `<ref>  (workspace <ws>[, LIVE], age <age>)` for listings.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let age = self
+            .age_secs
+            .map_or_else(|| "unknown".to_string(), format_age);
+        let live = if self.live { ", LIVE workspace" } else { "" };
+        format!(
+            "{}  (workspace {}{live}, pin age {age})",
+            self.ref_name, self.workspace
+        )
+    }
+}
+
+/// Options for the recovery-snapshot sweep ([`run_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryGcOptions {
+    /// Drop pins created at least this many days ago.
+    pub older_than_days: u64,
+    /// Report only; never delete, never refuse.
+    pub dry_run: bool,
+    /// Also consider pins of workspaces that still exist.
+    pub include_live: bool,
+    /// Allow a risky drop (see the module docs).
+    pub force: bool,
+}
+
+/// A recovery-snapshot sweep refused because it needs `--force` (bn-wxg28).
+#[derive(Debug, Clone)]
+pub struct GcRefused {
+    /// Pins the sweep would have dropped.
+    pub would_drop: Vec<PinInfo>,
+    /// Why `--force` is required.
+    pub reasons: Vec<String>,
+    /// The options of the refused run (to print the exact next commands).
+    pub opts: RecoveryGcOptions,
+}
+
+impl std::fmt::Display for GcRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "gc --recovery-snapshots refused: it would drop {} recovery snapshot(s) and needs \
+             --force because:",
+            self.would_drop.len()
+        )?;
+        for r in &self.reasons {
+            writeln!(f, "  - {r}")?;
+        }
+        writeln!(f, "Snapshots it would drop (nothing was deleted):")?;
+        for p in &self.would_drop {
+            writeln!(f, "  {}", p.describe())?;
+        }
+        writeln!(
+            f,
+            "A recovery snapshot can be the only copy of destroyed or displaced work."
+        )?;
+        writeln!(f, "  Inspect: maw ws recover")?;
+        writeln!(f, "  Preview: {}", gc_command(&self.opts, true, false))?;
+        write!(
+            f,
+            "  To drop them anyway: {}",
+            gc_command(&self.opts, false, true)
+        )
+    }
+}
+
+impl std::error::Error for GcRefused {}
+
+/// The `maw gc --recovery-snapshots ...` command line for `opts`.
+fn gc_command(opts: &RecoveryGcOptions, dry_run: bool, force: bool) -> String {
+    let mut cmd = String::from("maw gc --recovery-snapshots");
+    if opts.older_than_days != 30 {
+        cmd.push_str(" --older-than ");
+        cmd.push_str(&opts.older_than_days.to_string());
+    }
+    if opts.include_live {
+        cmd.push_str(" --include-live");
+    }
+    if dry_run {
+        cmd.push_str(" --dry-run");
+    }
+    if force {
+        cmd.push_str(" --force");
+    }
+    cmd
+}
+
+/// Human-readable age: `45s`, `12m`, `5h`, `3d`.
+fn format_age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3_600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+/// Whether workspace `ws` currently exists. The default workspace is the repo
+/// root in the consolidated layout (no `.maw/workspaces/default/`), so it is
+/// resolved through `default_target_path`, never `workspace_path` alone.
+fn workspace_is_live(root: &Path, ws: &str, default_names: &[String]) -> bool {
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    if flavor.workspace_path(root, ws).exists() {
+        return true;
+    }
+    default_names.iter().any(|d| d == ws) && flavor.default_target_path(root, ws).exists()
+}
+
+/// Names that denote the default workspace: `default`, plus the configured
+/// default workspace name when `.maw.toml` is readable.
+fn default_workspace_names(root: &Path) -> Vec<String> {
+    let mut names = vec!["default".to_string()];
+    if let Ok(cfg) = crate::workspace::MawConfig::load(root) {
+        let d = cfg.default_workspace().to_string();
+        if !names.contains(&d) {
+            names.push(d);
+        }
+    }
+    names
+}
+
+/// Why dropping `drops` needs `--force` (empty = safe without it).
+fn force_reasons(drops: &[PinInfo], older_than_days: u64) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if drops.is_empty() {
+        return reasons;
+    }
+    if older_than_days == 0 {
+        reasons.push("--older-than 0 drops every recovery snapshot, however new".to_string());
+    }
+    let young = drops.iter().filter(|p| p.is_young()).count();
+    if young > 0 {
+        reasons.push(format!(
+            "{young} snapshot(s) were pinned less than 1 day ago"
+        ));
+    }
+    let live = drops.iter().filter(|p| p.live).count();
+    if live > 0 {
+        reasons.push(format!(
+            "{live} snapshot(s) belong to workspaces that still exist (--include-live)"
+        ));
+    }
+    reasons
 }
 
 /// Count stale head refs (refs for workspaces that no longer exist).
@@ -225,6 +413,24 @@ pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// Run ref GC with the legacy library defaults: live-workspace pins are
+/// skipped and no `--force` gate applies (callers that want the CLI's safety
+/// policy use [`run_with`]).
+///
+/// See [`run_with`] for what is deleted.
+#[allow(clippy::missing_errors_doc)]
+pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcReport> {
+    run_with(
+        root,
+        &RecoveryGcOptions {
+            older_than_days,
+            dry_run,
+            include_live: false,
+            force: true,
+        },
+    )
+}
+
 /// Run ref GC: delete stale head refs and old recovery refs, and keep destroy
 /// records coherent with the recovery refs they claim (bn-3uou).
 ///
@@ -233,6 +439,12 @@ pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
 ///   `older_than_days` days ago (default: 30). Pin creation time comes from
 ///   the ref-name timestamp, else the claiming destroy record, else the
 ///   pinned commit's committer time (bn-3maj).
+/// - Pins of workspaces that still exist are kept unless `include_live`
+///   (bn-wxg28).
+/// - If the drop set is non-empty and `older_than_days == 0`, or it contains a
+///   pin younger than [`YOUNG_PIN_SECS`] or a live workspace's pin, a
+///   non-dry run without `force` deletes NOTHING and fails with [`GcRefused`]
+///   (bn-wxg28).
 /// - Destroy records (the `maw ws recover` audit trail under
 ///   `.maw/manifold/artifacts/ws/<name>/destroy/`) are pruned in lockstep so
 ///   the system never lands in the incoherent "record claims a snapshot whose
@@ -246,16 +458,19 @@ pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
 ///
 /// If `dry_run` is true, nothing is deleted but the report shows what would be.
 #[allow(clippy::missing_errors_doc)]
-pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcReport> {
+pub fn run_with(root: &Path, opts: &RecoveryGcOptions) -> Result<RefGcReport> {
+    let RecoveryGcOptions {
+        older_than_days,
+        dry_run,
+        include_live,
+        force,
+    } = *opts;
     let repo =
         maw_git::GixRepo::open(root).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
 
     let mut report = RefGcReport::default();
 
-    // --- Head refs ---
-    prune_dangling_head_refs(&repo, root, dry_run, &mut report)?;
-
-    // --- Recovery refs ---
+    // --- Recovery refs: plan (nothing is deleted until the force gate) ---
     let recovery_prefix = "refs/manifold/recovery/";
     let recovery_refs = repo
         .list_refs(recovery_prefix)
@@ -283,28 +498,65 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
     // last resort for legacy/hand-made refs — the commit time. With no
     // evidence at all the ref is kept.
     let record_claim_times = destroy_record_claim_times(root)?;
+    let default_names = default_workspace_names(root);
 
     for (ref_name, oid) in &recovery_refs {
-        let pin_ts = pin_created_at_from_ref_name(ref_name.as_str())
-            .or_else(|| record_claim_times.get(ref_name.as_str()).copied())
+        let name = ref_name.as_str();
+        let workspace = name
+            .strip_prefix(recovery_prefix)
+            .and_then(|rest| rest.rsplit_once('/'))
+            .map_or("", |(ws, _)| ws)
+            .to_string();
+        // bn-wxg28: a pin whose workspace cannot be parsed is treated as
+        // live (fail closed: never swept by default).
+        let live = workspace.is_empty() || workspace_is_live(root, &workspace, &default_names);
+        let pin_ts = pin_created_at_from_ref_name(name)
+            .or_else(|| record_claim_times.get(name).copied())
             .or_else(|| get_commit_timestamp(&repo, *oid));
+        let info = PinInfo {
+            ref_name: name.to_string(),
+            workspace,
+            live,
+            age_secs: pin_ts.map(|ts| now.saturating_sub(ts)),
+        };
         match pin_ts {
             Some(ts) if ts <= cutoff => {
-                report
-                    .deleted_recovery_refs
-                    .push(ref_name.as_str().to_string());
-                if !dry_run {
-                    refs::delete_ref(root, ref_name.as_str()).map_err(|e| {
-                        anyhow::anyhow!("failed to delete recovery ref {}: {e}", ref_name.as_str())
-                    })?;
+                if live && !include_live {
+                    report.recovery_refs_kept += 1;
+                    report.skipped_live_pins.push(info);
+                } else {
+                    report.dropped_pins.push(info);
                 }
-                report.recovery_refs_deleted += 1;
             }
             Some(_) | None => {
                 // Recent enough or unknown pin age — keep conservatively.
                 report.recovery_refs_kept += 1;
             }
         }
+    }
+
+    // --- bn-wxg28 force gate: refuse BEFORE deleting anything ---
+    report.force_reasons = force_reasons(&report.dropped_pins, older_than_days);
+    if !dry_run && !force && !report.force_reasons.is_empty() {
+        return Err(anyhow::Error::new(GcRefused {
+            would_drop: report.dropped_pins,
+            reasons: report.force_reasons,
+            opts: *opts,
+        }));
+    }
+
+    // --- Head refs ---
+    prune_dangling_head_refs(&repo, root, dry_run, &mut report)?;
+
+    // --- Recovery refs: delete ---
+    for info in &report.dropped_pins {
+        if !dry_run {
+            refs::delete_ref(root, &info.ref_name).map_err(|e| {
+                anyhow::anyhow!("failed to delete recovery ref {}: {e}", info.ref_name)
+            })?;
+        }
+        report.deleted_recovery_refs.push(info.ref_name.clone());
+        report.recovery_refs_deleted += 1;
     }
 
     // --- Destroy records (coherence with recovery refs) ---
@@ -455,21 +707,72 @@ fn get_commit_timestamp(repo: &maw_git::GixRepo, oid: maw_git::GitOid) -> Option
     u64::try_from(info.committer_time).ok()
 }
 
+/// Fail with [`GcRefused`] if running `opts` would need `--force` (bn-wxg28).
+///
+/// Read-only. `maw gc` calls this before ANY phase (epoch GC included)
+/// deletes something, so a refused run is a no-op.
+#[allow(clippy::missing_errors_doc)]
+pub fn check_force_gate(root: &Path, opts: &RecoveryGcOptions) -> Result<()> {
+    if opts.dry_run || opts.force {
+        return Ok(());
+    }
+    let preview = run_with(
+        root,
+        &RecoveryGcOptions {
+            dry_run: true,
+            ..*opts
+        },
+    )?;
+    if preview.force_reasons.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(GcRefused {
+        would_drop: preview.dropped_pins,
+        reasons: preview.force_reasons,
+        opts: *opts,
+    }))
+}
+
 /// CLI entry point for `maw gc --recovery-snapshots`.
 #[allow(clippy::missing_errors_doc)]
-pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
-    let report = run(root, older_than_days, dry_run)?;
+pub fn run_cli(root: &Path, opts: &RecoveryGcOptions) -> Result<()> {
+    let report = run_with(root, opts)?;
+    let older_than_days = opts.older_than_days;
+    let dry_run = opts.dry_run;
+
+    let live_note = || {
+        if !report.skipped_live_pins.is_empty() {
+            println!(
+                "Kept {} recovery snapshot(s) of workspaces that still exist \
+                 (to include them: {}):",
+                report.skipped_live_pins.len(),
+                gc_command(
+                    &RecoveryGcOptions {
+                        include_live: true,
+                        dry_run: true,
+                        ..*opts
+                    },
+                    true,
+                    false
+                )
+            );
+            for p in &report.skipped_live_pins {
+                println!("  {}", p.describe());
+            }
+        }
+    };
 
     if report.head_refs_deleted == 0
         && report.recovery_refs_deleted == 0
         && report.destroy_records_deleted == 0
     {
         println!("No stale refs found. Nothing to clean up.");
+        live_note();
         return Ok(());
     }
 
     if dry_run {
-        println!("Ref GC preview (dry run):");
+        println!("Ref GC preview (dry run, nothing deleted):");
         if !report.stale_head_names.is_empty() {
             println!(
                 "  Would delete {} stale head ref(s):",
@@ -479,14 +782,14 @@ pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
                 println!("    refs/manifold/head/{name}");
             }
         }
-        if !report.deleted_recovery_refs.is_empty() {
+        if !report.dropped_pins.is_empty() {
             println!(
                 "  Would delete {} recovery snapshot(s) older than {older_than_days} day(s) \
-                 ({} newer kept):",
+                 ({} kept):",
                 report.recovery_refs_deleted, report.recovery_refs_kept
             );
-            for r in &report.deleted_recovery_refs {
-                println!("    {r}");
+            for p in &report.dropped_pins {
+                println!("    {}", p.describe());
             }
         }
         if !report.deleted_destroy_records.is_empty() {
@@ -499,7 +802,17 @@ pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
                 println!("    {ws}/{file}");
             }
         }
-        println!("To apply: maw gc --recovery-snapshots");
+        live_note();
+        if report.force_reasons.is_empty() {
+            println!("To apply: {}", gc_command(opts, false, false));
+        } else {
+            println!("Applying this needs --force because:");
+            for r in &report.force_reasons {
+                println!("  - {r}");
+            }
+            println!("Inspect first: maw ws recover");
+            println!("To apply: {}", gc_command(opts, false, true));
+        }
     } else {
         // Recovery refs (the snapshot pins) and destroy records (the
         // `maw ws recover` audit trail) are pruned together so they never
@@ -507,12 +820,16 @@ pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
         // count actually drop after a GC.
         println!(
             "Pruned {} stale head ref(s); removed {} recovery snapshot(s) and {} destroy \
-             record(s) older than {older_than_days} day(s) ({} newer snapshot(s) kept).",
+             record(s) older than {older_than_days} day(s) ({} snapshot(s) kept).",
             report.head_refs_deleted,
             report.recovery_refs_deleted,
             report.destroy_records_deleted,
             report.recovery_refs_kept
         );
+        for p in &report.dropped_pins {
+            println!("  removed {}", p.describe());
+        }
+        live_note();
     }
 
     Ok(())
@@ -1158,5 +1475,205 @@ mod tests {
             None
         );
         assert_eq!(pin_created_at_from_ref_name("refs/heads/main"), None);
+    }
+
+    // --- bn-wxg28: live-workspace pins + force gate ---
+
+    const OLD_TS: &str = "2020-01-01T00-00-00.000000000Z";
+
+    fn opts(older_than_days: u64, include_live: bool, force: bool) -> RecoveryGcOptions {
+        RecoveryGcOptions {
+            older_than_days,
+            dry_run: false,
+            include_live,
+            force,
+        }
+    }
+
+    fn write_pin(root: &Path, oid: &str, ws: &str, leaf: &str) -> String {
+        let git_oid = maw_core::model::types::GitOid::new(oid).expect("oid");
+        let name = format!("refs/manifold/recovery/{ws}/{leaf}");
+        refs::write_ref(root, &name, &git_oid).expect("write pin");
+        name
+    }
+
+    fn refused(err: &anyhow::Error) -> &GcRefused {
+        err.downcast_ref::<GcRefused>()
+            .unwrap_or_else(|| panic!("expected GcRefused, got: {err:#}"))
+    }
+
+    #[test]
+    fn old_pin_of_live_workspace_is_kept_by_default() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join("ws/alive")).expect("mk ws");
+        let pin = write_pin(root, &oid, "alive", &format!("materialize-{OLD_TS}"));
+
+        // Old enough to sweep, no --force needed for an old pin, but it
+        // belongs to a live workspace: kept.
+        let report = run_with(root, &opts(30, false, false)).expect("gc");
+        assert_eq!(report.recovery_refs_deleted, 0);
+        assert_eq!(report.skipped_live_pins.len(), 1);
+        assert_eq!(report.skipped_live_pins[0].ref_name, pin);
+        assert!(refs::read_ref(root, &pin).expect("read").is_some());
+    }
+
+    #[test]
+    fn include_live_without_force_refuses_and_deletes_nothing() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join("ws/alive")).expect("mk ws");
+        let pin = write_pin(root, &oid, "alive", OLD_TS);
+        // A dangling head ref: a refused run must not prune it either.
+        refs::write_ref(
+            root,
+            &refs::workspace_head_ref("ghost"),
+            &maw_core::model::types::GitOid::new(&oid).expect("oid"),
+        )
+        .expect("head ref");
+
+        let err = run_with(root, &opts(30, true, false)).expect_err("must refuse");
+        let r = refused(&err);
+        assert_eq!(r.would_drop.len(), 1);
+        assert!(r.would_drop[0].live);
+        let msg = err.to_string();
+        assert!(msg.contains(&pin), "{msg}");
+        assert!(msg.contains("workspace alive, LIVE workspace"), "{msg}");
+        assert!(
+            msg.contains("maw gc --recovery-snapshots --include-live --force"),
+            "{msg}"
+        );
+        assert!(refs::read_ref(root, &pin).expect("read").is_some());
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("ghost"))
+                .expect("read")
+                .is_some(),
+            "a refused gc must delete nothing"
+        );
+    }
+
+    #[test]
+    fn include_live_with_force_drops_live_pin() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join("ws/alive")).expect("mk ws");
+        let pin = write_pin(root, &oid, "alive", OLD_TS);
+        let report = run_with(root, &opts(30, true, true)).expect("gc");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert!(refs::read_ref(root, &pin).expect("read").is_none());
+    }
+
+    #[test]
+    fn older_than_zero_without_force_refuses_even_for_old_pins() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let pin = write_pin(root, &oid, "gone", OLD_TS);
+        let err = run_with(root, &opts(0, false, false)).expect_err("must refuse");
+        let r = refused(&err);
+        assert!(
+            r.reasons.iter().any(|x| x.contains("--older-than 0")),
+            "{:?}",
+            r.reasons
+        );
+        assert!(err.to_string().contains("--older-than 0 --force"), "{err}");
+        assert!(refs::read_ref(root, &pin).expect("read").is_some());
+    }
+
+    #[test]
+    fn young_destroyed_pin_refuses_without_force_and_keeps_record() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let ts = crate::workspace::now_timestamp_iso8601_precise().replace(':', "-");
+        let pin = seed_destroyed_with_ref(root, "fresh", &oid, &ts);
+
+        let err = run_with(root, &opts(0, false, false)).expect_err("must refuse");
+        let r = refused(&err);
+        assert_eq!(r.would_drop.len(), 1);
+        assert!(r.would_drop[0].is_young());
+        assert!(
+            r.reasons.iter().any(|x| x.contains("less than 1 day")),
+            "{:?}",
+            r.reasons
+        );
+        assert!(refs::read_ref(root, &pin).expect("read").is_some());
+        assert_eq!(
+            destroy_record::list_record_files(root, "fresh")
+                .expect("list")
+                .len(),
+            1,
+            "refused gc must keep the destroy record"
+        );
+
+        // With --force it goes, record in lockstep.
+        let report = run_with(root, &opts(0, false, true)).expect("forced gc");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert_eq!(report.destroy_records_deleted, 1);
+        assert!(refs::read_ref(root, &pin).expect("read").is_none());
+    }
+
+    #[test]
+    fn young_pin_reason_is_independent_of_older_than() {
+        let young = PinInfo {
+            ref_name: "refs/manifold/recovery/w/x".into(),
+            workspace: "w".into(),
+            live: false,
+            age_secs: Some(YOUNG_PIN_SECS - 1),
+        };
+        let old = PinInfo {
+            age_secs: Some(YOUNG_PIN_SECS),
+            ..young.clone()
+        };
+        assert_eq!(force_reasons(&[young], 7).len(), 1);
+        assert!(force_reasons(&[old.clone()], 7).is_empty());
+        assert!(
+            force_reasons(&[], 0).is_empty(),
+            "nothing to drop, nothing to refuse"
+        );
+        let live = PinInfo { live: true, ..old };
+        assert_eq!(force_reasons(&[live], 7).len(), 1);
+    }
+
+    #[test]
+    fn old_destroyed_pin_is_collected_without_force() {
+        // Negative control: the everyday sweep of an old, destroyed
+        // workspace's pin needs no --force.
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let pin = seed_destroyed_with_ref(root, "gone", &oid, OLD_TS);
+        let report = run_with(root, &opts(30, false, false)).expect("gc");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert_eq!(report.destroy_records_deleted, 1);
+        assert!(report.force_reasons.is_empty());
+        assert!(refs::read_ref(root, &pin).expect("read").is_none());
+    }
+
+    #[test]
+    fn dry_run_never_refuses_but_reports_force_reasons() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let pin = write_pin(root, &oid, "gone", OLD_TS);
+        let report = run_with(
+            root,
+            &RecoveryGcOptions {
+                dry_run: true,
+                ..opts(0, false, false)
+            },
+        )
+        .expect("dry run");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert!(!report.force_reasons.is_empty());
+        assert!(refs::read_ref(root, &pin).expect("read").is_some());
+    }
+
+    #[test]
+    fn default_workspace_is_live_at_consolidated_root() {
+        // Consolidated layout: the default workspace is the repo root and has
+        // no `.maw/workspaces/default/` directory.
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path();
+        fs::create_dir_all(root.join(".maw/manifold")).expect("mk");
+        let names = vec!["default".to_string()];
+        assert!(workspace_is_live(root, "default", &names));
+        assert!(!workspace_is_live(root, "gone", &names));
     }
 }

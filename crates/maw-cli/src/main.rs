@@ -364,14 +364,24 @@ enum Commands {
     /// warning). Head refs owned by a live in-flight merge are preserved.
     ///
     /// With --recovery-snapshots: additionally removes old recovery snapshots
-    /// whose commits are older than --older-than days (default: 30), AND prunes
-    /// each destroyed workspace's matching destroy record in lockstep so the
-    /// two never disagree (a swept ref never leaves a record claiming an
-    /// unpinned snapshot). Records whose recovery ref was already swept by an
-    /// older `maw gc --refs` are cleaned up too when older than --older-than.
-    /// This is what makes `maw doctor`'s "abandoned-with-snapshot" count
-    /// actually drop. Newer snapshots (and records for live workspaces) are
-    /// kept.
+    /// whose pins were created more than --older-than days ago (default: 30),
+    /// AND prunes each destroyed workspace's matching destroy record in
+    /// lockstep so the two never disagree (a swept ref never leaves a record
+    /// claiming an unpinned snapshot). Records whose recovery ref was already
+    /// swept by an older `maw gc --refs` are cleaned up too when older than
+    /// --older-than. This is what makes `maw doctor`'s "abandoned-with-snapshot"
+    /// count actually drop. Newer snapshots (and records for live workspaces)
+    /// are kept.
+    ///
+    /// Safety rules for --recovery-snapshots:
+    ///   - Snapshots of workspaces that still exist (the default workspace's
+    ///     dirty-trunk pins refs/manifold/recovery/default/*, materialize-*
+    ///     pins of a live workspace) are kept unless you pass --include-live.
+    ///     They can be the only copy of edits a merge or sync displaced.
+    ///   - A run that would drop anything with --older-than 0, or drop a
+    ///     snapshot pinned less than 1 day ago, or a live workspace's
+    ///     snapshot, deletes nothing and lists the refs (workspace, pin age)
+    ///     it would drop. Re-run with --force to drop them.
     ///
     /// Examples:
     ///   maw gc                              # epoch GC + dangling head-ref cleanup
@@ -379,7 +389,9 @@ enum Commands {
     ///   maw gc --recovery-snapshots         # remove old snapshots + their records
     ///   maw gc --recovery-snapshots --dry-run        # preview snapshot cleanup
     ///   maw gc --recovery-snapshots --older-than 7   # remove snapshots older than 7 days
-    ///   maw gc --recovery-snapshots --older-than 0   # drain the whole recover queue
+    ///   maw gc --recovery-snapshots --older-than 0 --dry-run   # list the whole recover queue
+    ///   maw gc --recovery-snapshots --older-than 0 --force     # drain the whole recover queue
+    ///   maw gc --recovery-snapshots --include-live --dry-run   # also list live workspaces' pins
     #[command(verbatim_doc_comment)]
     Gc {
         /// Preview removals without deleting anything
@@ -394,6 +406,19 @@ enum Commands {
         /// For recovery snapshots: remove if older than this many days (default: 30)
         #[arg(long, default_value = "30")]
         older_than: u64,
+
+        /// With --recovery-snapshots: also remove snapshots of workspaces that
+        /// still exist (e.g. refs/manifold/recovery/default/* dirty-trunk
+        /// pins). Needs --force to apply.
+        #[arg(long, requires = "recovery_snapshots")]
+        include_live: bool,
+
+        /// With --recovery-snapshots: allow dropping snapshots pinned less
+        /// than 1 day ago, live workspaces' snapshots, or everything with
+        /// --older-than 0. Without it such a run deletes nothing and lists
+        /// what it would drop.
+        #[arg(long, requires = "recovery_snapshots")]
+        force: bool,
     },
 
     /// Generate shell completions
@@ -574,6 +599,39 @@ fn parse_cli_with_vocab_hints() -> Cli {
     }
 }
 
+/// `maw gc` (see [`Commands::Gc`]).
+fn run_gc(
+    dry_run: bool,
+    recovery_snapshots: bool,
+    opts: ref_gc::RecoveryGcOptions,
+) -> anyhow::Result<()> {
+    let root = workspace::repo_root()?;
+    // bn-13rc: the gc sweep prunes epoch/recovery refs and records —
+    // hold the repo-level epoch lock across all phases. A dry run only
+    // reports, so it stays lock-free (read-only).
+    let _epoch_lock = if dry_run {
+        None
+    } else {
+        Some(epoch_lock::EpochLock::acquire(&root, "gc")?)
+    };
+    // bn-wxg28: decide the recovery-snapshot force gate before ANY
+    // gc phase deletes something, so a refused run is a no-op.
+    if recovery_snapshots {
+        ref_gc::check_force_gate(&root, &opts)?;
+    }
+    epoch_gc::run_cli(&root, dry_run)?;
+    if recovery_snapshots {
+        ref_gc::run_cli(&root, &opts)?;
+    } else {
+        // bn-cm63: plain `maw gc` self-heals dangling oplog head refs
+        // (e.g. leaked by a destroy-vs-merge race) so the documented
+        // cleanup actually clears the `maw doctor` warning. The
+        // recovery-ref age sweep stays exclusive to `maw gc --recovery-snapshots`.
+        ref_gc::run_head_refs_cli(&root, dry_run)?;
+    }
+    Ok(())
+}
+
 fn main() {
     let _telemetry = telemetry::init();
     // bn-263u: seed the failpoint registry from `MAW_FP` so the *shipped*
@@ -641,27 +699,18 @@ fn main() {
             dry_run,
             recovery_snapshots,
             older_than,
-        } => workspace::repo_root().and_then(|root| {
-            // bn-13rc: the gc sweep prunes epoch/recovery refs and records —
-            // hold the repo-level epoch lock across all phases. A dry run only
-            // reports, so it stays lock-free (read-only).
-            let _epoch_lock = if dry_run {
-                None
-            } else {
-                Some(epoch_lock::EpochLock::acquire(&root, "gc")?)
-            };
-            epoch_gc::run_cli(&root, dry_run)?;
-            if recovery_snapshots {
-                ref_gc::run_cli(&root, older_than, dry_run)?;
-            } else {
-                // bn-cm63: plain `maw gc` self-heals dangling oplog head refs
-                // (e.g. leaked by a destroy-vs-merge race) so the documented
-                // cleanup actually clears the `maw doctor` warning. The
-                // recovery-ref age sweep stays exclusive to `maw gc --recovery-snapshots`.
-                ref_gc::run_head_refs_cli(&root, dry_run)?;
-            }
-            Ok(())
-        }),
+            include_live,
+            force,
+        } => run_gc(
+            dry_run,
+            recovery_snapshots,
+            ref_gc::RecoveryGcOptions {
+                older_than_days: older_than,
+                dry_run,
+                include_live,
+                force,
+            },
+        ),
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "maw", &mut std::io::stdout());
             Ok(())

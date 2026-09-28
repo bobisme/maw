@@ -45,8 +45,9 @@ fn gc_prunes_ref_and_record_together_and_doctor_count_drops() {
     let env = doctor(&repo);
     assert_eq!(check(&env, "abandoned-with-snapshot")["status"], "warn");
 
-    // Prune everything old-or-equal (older-than 0 drains the queue).
-    let out = repo.maw_ok(&["gc", "--recovery-snapshots", "--older-than", "0"]);
+    // Prune everything old-or-equal (older-than 0 drains the queue; it
+    // needs --force since bn-wxg28).
+    let out = repo.maw_ok(&["gc", "--recovery-snapshots", "--older-than", "0", "--force"]);
     assert!(
         out.contains("destroy record(s)"),
         "gc output should report record pruning, got: {out}"
