@@ -2,6 +2,34 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.17 (2026-09-27)
+
+Seventeenth dogfood pre-release, focused on crash recovery, the replay of uncommitted trunk edits across a merge, fail-closed configuration, and the integrity of the SG1 soak (the v1.0 release gate). It includes a fix for a `ws sync` failure reported from the bones repo. A pre-release sweep (one slice run by codex / gpt-6-astra) found and fixed further defects in code added this cycle. **Upgrading is recommended.**
+
+**Merge crash recovery**
+- **A merge that crashed after its commit step is recovered instead of wedging the repo (bn-1fcox).** Previously the journal could only be deleted by hand, and FF-absorb, `doctor --repair`, `epoch sync` and `undo` all refused while it existed. `maw ws merge --recover` now finishes a merge whose ref update provably landed (op record, sibling rebase, target checkout, `--destroy` of sources still at their frozen HEAD, journal cleared) and aborts one that provably did not; it refuses and keeps the journal when the refs prove neither. `--abort` finishes an already-landed merge (and points at `maw undo`), and the next `ws merge` recovers automatically. Every refusal message now points at `--recover`. `fsck --repair` no longer deletes post-commit journals.
+- **A crash between the target checkout and the replay no longer strands your edits in a recovery ref (bn-15fzo, bn-1bkr0).** A durable checkout intent lets the next run replay the original edits, including after a second crash during recovery. The intent is now written before any tree change, residual edits are pinned before cleanup, and a corrupt intent stops recovery instead of being treated as absent.
+- Recovered merges report and record like live merges: no false local-vs-merge conflict, no duplicated Merge op, the target's Snapshot op is written, and skipped post-merge hooks are printed with their commands (bn-28s78, bn-1losw). If the manifold config is invalid, recovery warns and skips the sibling rebase instead of applying defaults.
+
+**Your uncommitted trunk edits across a merge**
+- **An executable bit committed by a merged workspace is no longer reset to 644 (bn-3fcbu).** Your own mode change still wins.
+- **Symlink/file and file/directory type changes no longer abort the replay (bn-2ygs0, bn-3jqfk).** They are reported as `type_change` / `directory_change` conflicts that keep the merged side on disk and print one exact restore or inspect command for yours. The fidelity check no longer writes through a symlink, and the pre-merge capture and fallback recovery pin store a dirty symlink as a symlink rather than as its target's contents.
+
+**Sync**
+- **Syncing a workspace whose commits move a directory works again (bn-1ijl).** gix's rename tracker reports a whole-directory rename in addition to the per-file renames; maw read the directory as a blob and failed with "blob expected, found tree", leaving the workspace unable to merge. Directory-level renames are dropped (their files are still reported). A submodule replaced by a regular file no longer loses the file's bytes.
+
+**Configuration fails closed**
+- **An invalid `.maw/manifold/config.toml` or `.maw.toml` makes commands that change state refuse (bn-hcbc8, bn-qi5br).** Previously they silently used defaults — e.g. `ws merge` absorbed trunk commits with default policy and `epoch sync` re-pointed the epoch at `main`. Refusals name the file, line and parse error with a fix line; read-only commands warn once. Recovery commands never refuse because of config on the consolidated layout (`recover --restore-file`), and `recover --to` / `migrate` refuse before changing anything (bn-15ebo). Unknown `.maw.toml` keys warn with the nearest valid key (bn-1losw).
+
+**LFS**
+- **Smudge decodes exactly what git-lfs smudge decodes (bn-hcbc8)**, so non-canonical pointers written by other tools are materialized, while size mismatches and extension pointers stay as pointers as git-lfs leaves them. maw never discards bytes past a pointer's first 1024 bytes (a deliberate difference from git-lfs).
+
+**Other**
+- `maw ws destroy` explains an "unmerged changes" refusal when the content is already in the epoch (e.g. cherry-picked) and suggests `--force`, which still snapshots (bn-2eszz). `maw ws history default` works on the consolidated layout, and `maw ops log` orders same-millisecond ops stably (bn-15fzo).
+
+**SG1 soak (v1.0 gate) integrity**
+- The pre.6 soak campaign (96% of 1e8 op-steps) is abandoned and not counted: its two "violations" were disk-quota errors, its driver counted harness errors as clean, and its in-process destroy never ran (an invalid recovery ref name was rejected and ignored), so destroy, recover and the gc recovery drain were never exercised (bn-30v6e, bn-25pac). The driver now fails closed with a `HarnessError` verdict and a per-seed vacuity guard, infra I/O errors are retried rather than counted, pinned regression seeds must reproduce the named oracle finding, op-steps are counted exactly, and a violation can never be reported as DONE or overwritten by an infra halt (bn-2qamr). Two new crash points guarding the fixes above are crash-tested in DST (bn-1sbjf). The campaign restarts on this release's harness.
+
 ## v1.0.0-pre.16 (2026-09-27)
 
 Sixteenth dogfood pre-release, focused on formal verification. The existing Kani proofs, merge property tests and Stateright protocol model had silently stopped compiling or running; they are revived, wired into `just check` and a new `verify` CI workflow, and extended to the code that actually produced past defects: path predicates, the FF-absorb sibling decision logic, the LFS pointer codec, merge-phase transitions, and the multi-process protocol. That work, a `cargo mutants` pass and a three-way pre-release sweep (one run by codex / gpt-6-astra) found and fixed several data-loss and corruption defects, most of them present since pre.10 or earlier. **Upgrading is strongly recommended.**
