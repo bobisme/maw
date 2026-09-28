@@ -80,7 +80,9 @@ fn write_index_tree(repo: &GixRepo) -> Result<GitOid, GitError> {
 
 pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
     // 1. Check if worktree is dirty. If clean, nothing to stash.
-    let dirty = repo.repo.is_dirty().map_err(|e| GitError::BackendError {
+    // bn-1dlkd: through the status fallback, so a tree gix cannot walk
+    // (a symlinked leading path component) still answers.
+    let dirty = crate::status_impl::is_dirty(repo).map_err(|e| GitError::BackendError {
         message: format!("failed to check dirty state: {e}"),
     })?;
     if !dirty {

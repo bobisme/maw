@@ -1229,6 +1229,32 @@ pub(super) enum DiskSide {
 }
 
 impl DiskSide {
+    /// Capture the entry at `rel` inside the worktree `ws_path`, the way git
+    /// sees it: an entry behind a symlinked (or non-directory) parent
+    /// component does not exist — `d/inner.txt` after `rm -r d && ln -s x d`
+    /// is a deletion, never the bytes of `x/inner.txt`. (bn-1dlkd)
+    pub(super) fn capture_at(ws_path: &Path, rel: &Path) -> Result<Self> {
+        let components: Vec<_> = rel.components().collect();
+        let Some((_, parents)) = components.split_last() else {
+            bail!("refusing to capture an empty path in {}", ws_path.display());
+        };
+        let mut current = ws_path.to_path_buf();
+        for component in parents {
+            let std::path::Component::Normal(name) = component else {
+                bail!("refusing to capture non-normal path {}", rel.display());
+            };
+            current.push(name);
+            match current.symlink_metadata() {
+                Ok(meta) if meta.is_dir() => {}
+                // A symlink or a file where a parent directory would go.
+                Ok(_) => return Ok(Self::Absent),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
+                Err(e) => return Err(e).with_context(|| format!("stat {}", current.display())),
+            }
+        }
+        Self::capture(&ws_path.join(rel))
+    }
+
     pub(super) fn capture(full: &Path) -> Result<Self> {
         let meta = match full.symlink_metadata() {
             Ok(meta) => meta,
@@ -1358,7 +1384,7 @@ fn classify_symlink_overlaps(
             continue;
         }
         let base = read_tree_side(&repo, base_oid, &rel)?;
-        let ours_on_disk = DiskSide::capture(&ws_path.join(path))?;
+        let ours_on_disk = DiskSide::capture_at(ws_path, path)?;
         out.push(SymlinkOverlap {
             path: path.clone(),
             base,

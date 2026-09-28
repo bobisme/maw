@@ -122,13 +122,13 @@ fn item_is_common_excluded(
     false
 }
 
-pub fn is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
+fn gix_is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
     repo.repo.is_dirty().map_err(|e| GitError::BackendError {
         message: e.to_string(),
     })
 }
 
-pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+fn gix_status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
     // Force per-file emission for untracked entries (matches the porcelain
     // `git status --porcelain` behaviour and `git ls-files --others
     // --exclude-standard`). The gix default collapses untracked
@@ -189,7 +189,7 @@ pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
 /// Combines the HEAD→index (staged) diff with the index→worktree
 /// (unstaged + untracked) diff, then reduces each path to its single net
 /// status relative to HEAD.
-pub fn status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+fn gix_status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
     use std::collections::BTreeMap;
 
     // The default status platform carries `head_tree: Some(None)`, so
@@ -308,7 +308,7 @@ const fn net_head_to_worktree(
 /// This avoids walking the entire directory tree for untracked files, which
 /// is the dominant cost in large repos. Returns only modifications, deletions,
 /// and type changes to tracked files — no untracked files.
-pub fn status_tracked_only(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+fn gix_status_tracked_only(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
     let platform = repo
         .repo
         .status(gix::progress::Discard)
@@ -473,7 +473,7 @@ fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<Statu
 /// repo-relative paths that are not currently tracked.
 ///
 /// Replaces: `git ls-files --others --exclude-standard`.
-pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
+fn gix_list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
     // Force per-file emission. The gix default (`UntrackedFiles::Collapsed`)
     // collapses an untracked subdirectory into a single directory entry
     // (e.g. `newdir/`), losing the leaf paths — exactly the bug bn-p5z5
@@ -514,6 +514,238 @@ pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
         }
     }
     Ok(paths)
+}
+
+// ---------------------------------------------------------------------------
+// git-CLI fallback (bn-1dlkd)
+// ---------------------------------------------------------------------------
+//
+// gix's index-vs-worktree walk refuses to lstat *through* a symlinked leading
+// path component (`gix_status::SymlinkCheck`: "Cannot step through symlink to
+// perform an lstat") and reports it as a fatal `Error::Io` that aborts the
+// WHOLE status run — so a tracked directory replaced by a symlink (`rm -r d
+// && ln -s x d`) made every status query fail. The merge's dirty-trunk
+// snapshot and its in-memory fallback capture both depended on it, captured
+// nothing, and the force checkout then wiped every uncommitted trunk edit.
+//
+// git itself handles this case (`has_symlink_leading_path`: an entry behind a
+// symlinked parent is simply deleted, the symlink is untracked), so when gix
+// fails we ask git. The result has the same shape and net semantics as the
+// gix path. Only if BOTH fail does the caller see an error — and callers on
+// the merge path then fail closed instead of treating the tree as clean.
+
+/// Which status question the CLI fallback answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CliStatusMode {
+    /// HEAD→worktree net status incl. staged + untracked (`status_head_to_worktree`).
+    HeadToWorktree,
+    /// Index→worktree incl. untracked (`status`).
+    IndexToWorktree,
+    /// Index→worktree, tracked files only (`status_tracked_only`).
+    TrackedOnly,
+}
+
+/// A `git` command bound to this repo's worktree, isolated from any
+/// ambient `GIT_*` environment that could redirect it to another repo.
+fn git_cli(repo: &GixRepo) -> Result<std::process::Command, GitError> {
+    let workdir = repo
+        .workdir
+        .as_ref()
+        .ok_or_else(|| GitError::BackendError {
+            message: "repository has no working directory".to_string(),
+        })?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(workdir)
+        .arg("--no-optional-locks")
+        .arg("--git-dir")
+        .arg(repo.repo.git_dir())
+        .arg("--work-tree")
+        .arg(workdir);
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ] {
+        cmd.env_remove(var);
+    }
+    Ok(cmd)
+}
+
+fn run_git_cli(mut cmd: std::process::Command, what: &str) -> Result<Vec<u8>, GitError> {
+    let out = cmd.output().map_err(|e| GitError::BackendError {
+        message: format!("failed to run git {what}: {e}"),
+    })?;
+    if !out.status.success() {
+        return Err(GitError::BackendError {
+            message: format!(
+                "git {what} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        });
+    }
+    Ok(out.stdout)
+}
+
+/// One porcelain status letter as a [`FileStatus`] (`None` = unchanged).
+const fn porcelain_letter(c: u8) -> Option<FileStatus> {
+    match c {
+        b'M' | b'T' | b'U' => Some(FileStatus::Modified),
+        b'A' | b'C' => Some(FileStatus::Added),
+        b'D' => Some(FileStatus::Deleted),
+        b'R' => Some(FileStatus::Renamed),
+        _ => None,
+    }
+}
+
+/// Parse `git status --porcelain=v1 -z --no-renames` output.
+///
+/// Fails closed on a non-UTF-8 path: this fallback feeds the pre-merge
+/// capture, and silently dropping a dirty path there would let a later
+/// checkout overwrite it uncaptured (bn-1dlkd).
+fn parse_porcelain_z(stdout: &[u8], mode: CliStatusMode) -> Result<Vec<StatusEntry>, GitError> {
+    let mut entries = Vec::new();
+    for record in stdout.split(|b| *b == 0) {
+        if record.len() < 4 || record[2] != b' ' {
+            continue;
+        }
+        let (x, y) = (record[0], record[1]);
+        let path = std::str::from_utf8(&record[3..])
+            .map_err(|_| non_utf8_path_error(&record[3..]))?
+            .trim_end_matches('/')
+            .to_owned();
+        let status = if x == b'?' && y == b'?' {
+            if mode == CliStatusMode::TrackedOnly {
+                continue;
+            }
+            Some(FileStatus::Added)
+        } else if x == b'!' {
+            None
+        } else {
+            match mode {
+                CliStatusMode::HeadToWorktree => {
+                    net_head_to_worktree(porcelain_letter(x), porcelain_letter(y))
+                }
+                CliStatusMode::IndexToWorktree | CliStatusMode::TrackedOnly => porcelain_letter(y),
+            }
+        };
+        if let Some(status) = status {
+            entries.push(StatusEntry { path, status });
+        }
+    }
+    Ok(entries)
+}
+
+fn non_utf8_path_error(raw: &[u8]) -> GitError {
+    GitError::BackendError {
+        message: format!(
+            "git status fallback found a non-UTF-8 path ({}); refusing to report a partial status",
+            String::from_utf8_lossy(raw)
+        ),
+    }
+}
+
+fn cli_status(repo: &GixRepo, mode: CliStatusMode) -> Result<Vec<StatusEntry>, GitError> {
+    let mut cmd = git_cli(repo)?;
+    cmd.args([
+        "-c",
+        "core.quotePath=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--no-renames",
+        "--ignore-submodules=none",
+    ]);
+    cmd.arg(if mode == CliStatusMode::TrackedOnly {
+        "--untracked-files=no"
+    } else {
+        "--untracked-files=all"
+    });
+    parse_porcelain_z(&run_git_cli(cmd, "status")?, mode)
+}
+
+/// Run the gix implementation; on error, answer with git (bn-1dlkd).
+fn with_cli_fallback<T>(
+    what: &str,
+    gix: impl FnOnce() -> Result<T, GitError>,
+    cli: impl FnOnce() -> Result<T, GitError>,
+) -> Result<T, GitError> {
+    match gix() {
+        Ok(v) => Ok(v),
+        Err(gix_err) => {
+            tracing::warn!("gix {what} failed ({gix_err}); falling back to git CLI");
+            cli().map_err(|cli_err| GitError::BackendError {
+                message: format!("{gix_err}; git CLI fallback also failed: {cli_err}"),
+            })
+        }
+    }
+}
+
+/// Whether HEAD/index/worktree differ in tracked content (untracked files
+/// do not count). Falls back to git when gix cannot walk the tree.
+pub fn is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
+    with_cli_fallback(
+        "is_dirty",
+        || gix_is_dirty(repo),
+        || {
+            let mut cmd = git_cli(repo)?;
+            cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=no"]);
+            Ok(!run_git_cli(cmd, "status")?.is_empty())
+        },
+    )
+}
+
+/// Index→worktree status incl. untracked files (see [`gix_status`]).
+pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+    with_cli_fallback(
+        "status",
+        || gix_status(repo),
+        || cli_status(repo, CliStatusMode::IndexToWorktree),
+    )
+}
+
+/// Net HEAD→worktree status incl. staged + untracked (see
+/// [`gix_status_head_to_worktree`]). Falls back to git when gix cannot walk
+/// the tree, e.g. a tracked directory replaced by a symlink (bn-1dlkd).
+pub fn status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+    with_cli_fallback(
+        "status_head_to_worktree",
+        || gix_status_head_to_worktree(repo),
+        || cli_status(repo, CliStatusMode::HeadToWorktree),
+    )
+}
+
+/// Tracked-only index→worktree status (see [`gix_status_tracked_only`]).
+pub fn status_tracked_only(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+    with_cli_fallback(
+        "status_tracked_only",
+        || gix_status_tracked_only(repo),
+        || cli_status(repo, CliStatusMode::TrackedOnly),
+    )
+}
+
+/// Untracked, non-ignored file paths (see [`gix_list_untracked`]).
+pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
+    with_cli_fallback(
+        "list_untracked",
+        || gix_list_untracked(repo),
+        || {
+            let mut cmd = git_cli(repo)?;
+            cmd.args(["ls-files", "-z", "--others", "--exclude-standard"]);
+            run_git_cli(cmd, "ls-files")?
+                .split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    std::str::from_utf8(p)
+                        .map(|s| s.trim_end_matches('/').to_owned())
+                        .map_err(|_| non_utf8_path_error(p))
+                })
+                .collect()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -844,5 +1076,112 @@ mod tests_bn_p5z5 {
              stages 1/2/3), not once per stage entry; got {n}",
         );
         drop(dir);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests_bn_1dlkd {
+    //! bn-1dlkd: a tracked directory replaced by a symlink must not make
+    //! status fail (gix aborts on a symlinked leading path component).
+
+    use super::*;
+    use crate::test_support::{commit_all, init_test_repo_with_commit};
+
+    fn sorted(mut v: Vec<StatusEntry>) -> Vec<(String, FileStatus)> {
+        v.sort_by(|a, b| a.path.cmp(&b.path));
+        v.into_iter().map(|e| (e.path, e.status)).collect()
+    }
+
+    /// `d/inner.txt` tracked; `d` replaced by a symlink to a real directory
+    /// holding its own `inner.txt` (so a status that read through the link
+    /// would see a *modified* file, not a deletion).
+    fn dir_replaced_by_symlink() -> (tempfile::TempDir, GixRepo) {
+        let (dir, root, _) = init_test_repo_with_commit();
+        std::fs::create_dir(root.join("d")).expect("mkdir");
+        std::fs::write(root.join("d/inner.txt"), "inner\n").expect("write");
+        std::fs::write(root.join("other.txt"), "other\n").expect("write");
+        let _ = commit_all(&root, "seed");
+        std::fs::write(root.join("other.txt"), "other\nedit\n").expect("edit");
+        std::fs::remove_file(root.join("d/inner.txt")).expect("rm");
+        std::fs::remove_dir(root.join("d")).expect("rmdir");
+        std::fs::create_dir(root.join("x")).expect("mkdir x");
+        std::fs::write(root.join("x/inner.txt"), "target\n").expect("write x");
+        std::os::unix::fs::symlink("x", root.join("d")).expect("symlink");
+        let repo = GixRepo::open(&root).expect("open");
+        (dir, repo)
+    }
+
+    #[test]
+    fn head_to_worktree_sees_symlinked_dir_like_git() {
+        let (_dir, repo) = dir_replaced_by_symlink();
+        assert_eq!(
+            sorted(status_head_to_worktree(&repo).expect("status must not fail")),
+            vec![
+                ("d".to_owned(), FileStatus::Added),
+                ("d/inner.txt".to_owned(), FileStatus::Deleted),
+                ("other.txt".to_owned(), FileStatus::Modified),
+                ("x/inner.txt".to_owned(), FileStatus::Added),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_worktree_status_and_tracked_only_do_not_fail() {
+        let (_dir, repo) = dir_replaced_by_symlink();
+        assert_eq!(
+            sorted(status(&repo).expect("status")),
+            vec![
+                ("d".to_owned(), FileStatus::Added),
+                ("d/inner.txt".to_owned(), FileStatus::Deleted),
+                ("other.txt".to_owned(), FileStatus::Modified),
+                ("x/inner.txt".to_owned(), FileStatus::Added),
+            ]
+        );
+        assert_eq!(
+            sorted(status_tracked_only(&repo).expect("tracked only")),
+            vec![
+                ("d/inner.txt".to_owned(), FileStatus::Deleted),
+                ("other.txt".to_owned(), FileStatus::Modified),
+            ]
+        );
+        assert!(is_dirty(&repo).expect("is_dirty"));
+        let mut untracked = list_untracked(&repo).expect("untracked");
+        untracked.sort();
+        assert_eq!(untracked, vec!["d".to_owned(), "x/inner.txt".to_owned()]);
+    }
+
+    /// The CLI fallback feeds the pre-merge capture: a path it cannot
+    /// represent must fail the whole status, never be silently dropped.
+    #[test]
+    fn porcelain_parse_fails_closed_on_non_utf8_path() {
+        let out = b" M ok.txt\0 M bad-\xff.txt\0";
+        assert!(parse_porcelain_z(out, CliStatusMode::HeadToWorktree).is_err());
+        assert!(parse_porcelain_z(out, CliStatusMode::TrackedOnly).is_err());
+    }
+
+    #[test]
+    fn porcelain_parse_nets_staged_and_unstaged() {
+        let out = b"M  staged.txt\0 M unstaged.txt\0AD added-then-gone.txt\0MD mod-then-gone.txt\0?? new/f.txt\0?? nested/\0D  gone.txt\0";
+        let head = parse_porcelain_z(out, CliStatusMode::HeadToWorktree).expect("parse");
+        assert_eq!(
+            sorted(head),
+            vec![
+                ("gone.txt".to_owned(), FileStatus::Deleted),
+                ("mod-then-gone.txt".to_owned(), FileStatus::Deleted),
+                ("nested".to_owned(), FileStatus::Added),
+                ("new/f.txt".to_owned(), FileStatus::Added),
+                ("staged.txt".to_owned(), FileStatus::Modified),
+                ("unstaged.txt".to_owned(), FileStatus::Modified),
+            ]
+        );
+        let tracked = parse_porcelain_z(out, CliStatusMode::TrackedOnly).expect("parse");
+        assert_eq!(
+            sorted(tracked),
+            vec![
+                ("added-then-gone.txt".to_owned(), FileStatus::Deleted),
+                ("mod-then-gone.txt".to_owned(), FileStatus::Deleted),
+                ("unstaged.txt".to_owned(), FileStatus::Modified),
+            ]
+        );
     }
 }

@@ -7455,8 +7455,8 @@ pub fn update_default_workspace(
     // already reset it, and the checkout may have run), so there is no
     // in-memory pre-merge content to verify against; the intent's snapshot is
     // the authority.
-    let pre_merge_dirty = if resume.is_some() {
-        Vec::new()
+    let (pre_merge_dirty, capture_incomplete) = if resume.is_some() {
+        (Vec::new(), None)
     } else {
         capture_pre_merge_dirty(default_ws_path)
     };
@@ -7515,8 +7515,35 @@ pub fn update_default_workspace(
             // then force-checkout and repair committed-unchanged files from
             // memory so an untouched dirty trunk file survives byte-for-byte.
             eprintln!("  WARNING: snapshot_working_copy failed: {e:#}");
+            // bn-1dlkd: the force checkout below discards everything on disk
+            // that is not in the in-memory capture. If that capture is
+            // incomplete (e.g. the same status failure that broke the
+            // snapshot), or it could not be pinned, fail CLOSED: leave the
+            // worktree untouched and keep the journal for `--recover`.
+            if let Some(why) = &capture_incomplete {
+                return Err(refuse_uncaptured_checkout(
+                    default_ws_path,
+                    ws_name,
+                    branch,
+                    epoch_after,
+                    &format!(
+                        "the snapshot failed ({e:#}) and the in-memory capture is incomplete ({why})"
+                    ),
+                ));
+            }
             durable_recovery_ref =
                 pin_pre_merge_recovery_ref(repo_root, ws_name, &anchor_epoch, &pre_merge_dirty);
+            if !pre_merge_dirty.is_empty() && durable_recovery_ref.is_none() {
+                return Err(refuse_uncaptured_checkout(
+                    default_ws_path,
+                    ws_name,
+                    branch,
+                    epoch_after,
+                    &format!(
+                        "the snapshot failed ({e:#}) and the recovery pin of the in-memory capture failed"
+                    ),
+                ));
+            }
             eprintln!("  Falling back to force checkout (recovering trunk edits from memory)...");
             force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
             lfs_post_checkout(default_ws_path, epoch_after);
@@ -7817,8 +7844,12 @@ fn resume_interrupted_checkout(
         .unwrap_or("none — it was clean");
     eprintln!("  resuming an interrupted update of '{ws_name}' (its pre-merge edits: {source})");
 
-    let residual_dirty = capture_pre_merge_dirty(ws_path);
-    match snapshot_working_copy_preserving_tree(ws_path, repo_root, ws_name) {
+    let (residual_dirty, residual_incomplete) = capture_pre_merge_dirty(ws_path);
+    // FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT (bn-1dlkd): `error` drives the
+    // resume's snapshot-failed branch, as it does the live update's.
+    match maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
+        .and_then(|()| snapshot_working_copy_preserving_tree(ws_path, repo_root, ws_name))
+    {
         Ok(Some(residual)) => {
             let residual_tree = tree_of(ws_path, &residual.oid);
             let expected = residual_tree.is_some()
@@ -7841,9 +7872,33 @@ fn resume_interrupted_checkout(
         Ok(None) => {}
         Err(e) => {
             eprintln!("  WARNING: snapshot of the interrupted tree failed: {e:#}");
-            if let Some(pin) =
-                pin_pre_merge_recovery_ref(repo_root, ws_name, epoch_after, &residual_dirty)
-            {
+            // bn-1dlkd: same fail-closed rule as the live update — never
+            // force-checkout over residual edits that were not captured and
+            // pinned. The intent stays for the next `--recover`.
+            if let Some(why) = &residual_incomplete {
+                return Err(refuse_uncaptured_checkout(
+                    ws_path,
+                    ws_name,
+                    branch,
+                    epoch_after,
+                    &format!(
+                        "the snapshot failed ({e:#}) and the in-memory capture is incomplete ({why})"
+                    ),
+                ));
+            }
+            let pin = pin_pre_merge_recovery_ref(repo_root, ws_name, epoch_after, &residual_dirty);
+            if !residual_dirty.is_empty() && pin.is_none() {
+                return Err(refuse_uncaptured_checkout(
+                    ws_path,
+                    ws_name,
+                    branch,
+                    epoch_after,
+                    &format!(
+                        "the snapshot failed ({e:#}) and the recovery pin of the in-memory capture failed"
+                    ),
+                ));
+            }
+            if let Some(pin) = pin {
                 eprintln!("  Its content is pinned at {pin}.");
             }
             force_checkout_fallback(ws_path, ws_name, branch, text_mode);
@@ -8013,16 +8068,28 @@ type PreMergeDirty = Vec<(PathBuf, DiskSide)>;
 /// Capture the trunk's uncommitted entries in memory (see [`PreMergeDirty`]).
 /// Read against the *current* HEAD, which the caller has already anchored at
 /// the workspace's base epoch, so this is the true set of user edits relative
-/// to that base. Best-effort: a path that cannot be read is skipped (never
-/// recorded as a deletion) rather than aborting the merge (the COMMIT has
-/// already succeeded).
-fn capture_pre_merge_dirty(ws_path: &Path) -> PreMergeDirty {
-    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
-        return Vec::new();
+/// to that base. A path that cannot be read is skipped (never recorded as a
+/// deletion) rather than aborting the merge (the COMMIT has already
+/// succeeded).
+///
+/// bn-1dlkd: returns, next to the capture, why it is INCOMPLETE (`Some`):
+/// the status could not be read (an empty capture then means "unknown", not
+/// "clean") or some dirty path could not be read. A caller that would
+/// overwrite the worktree on the strength of this capture alone must refuse
+/// when it is incomplete.
+fn capture_pre_merge_dirty(ws_path: &Path) -> (PreMergeDirty, Option<String>) {
+    if let Err(e) = maw::fp!("FP_UPDATE_DEFAULT_CAPTURE") {
+        return (Vec::new(), Some(format!("{e:#}")));
+    }
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(repo) => repo,
+        Err(e) => return (Vec::new(), Some(format!("cannot open the worktree: {e}"))),
     };
-    let Ok(entries) = repo.status_head_to_worktree() else {
-        return Vec::new();
+    let entries = match repo.status_head_to_worktree() {
+        Ok(entries) => entries,
+        Err(e) => return (Vec::new(), Some(format!("cannot read its status: {e}"))),
     };
+    let mut incomplete: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for entry in entries {
         let rel = PathBuf::from(&entry.path);
@@ -8035,15 +8102,58 @@ fn capture_pre_merge_dirty(ws_path: &Path) -> PreMergeDirty {
         {
             continue;
         }
-        match DiskSide::capture(&ws_path.join(&rel)) {
+        match DiskSide::capture_at(ws_path, &rel) {
             Ok(entry) => out.push((rel, entry)),
-            Err(e) => tracing::warn!(
-                "bn-1xmk: could not capture uncommitted '{}' before merge: {e:#}",
-                rel.display()
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    "bn-1xmk: could not capture uncommitted '{}' before merge: {e:#}",
+                    rel.display()
+                );
+                incomplete.push(format!("cannot read '{}': {e:#}", rel.display()));
+            }
         }
     }
-    out
+    let incomplete = (!incomplete.is_empty()).then(|| incomplete.join("; "));
+    (out, incomplete)
+}
+
+/// bn-1dlkd: refuse to overwrite a target worktree whose uncommitted state
+/// was not completely captured and pinned. Nothing on disk is touched; the
+/// merge journal (and any checkout intent) stays, so `maw ws merge --recover`
+/// finishes the update once the cause is fixed. Prints the actionable
+/// explanation and returns the error the caller propagates (non-zero exit).
+fn refuse_uncaptured_checkout(
+    ws_path: &Path,
+    ws_name: &str,
+    branch: &str,
+    epoch_after: &str,
+    why: &str,
+) -> anyhow::Error {
+    let short = &epoch_after[..epoch_after.len().min(12)];
+    let ws = shell_quote_path(ws_path);
+    eprintln!();
+    eprintln!("  ERROR: '{ws_name}' was NOT updated to the merged commit: its uncommitted");
+    eprintln!("  edits could not be completely captured, and maw never overwrites a");
+    eprintln!("  worktree whose edits it has not preserved.");
+    eprintln!("  Cause: {why}");
+    eprintln!();
+    eprintln!("  The merge COMMIT succeeded: '{branch}' is at {short}. Every file in");
+    eprintln!(
+        "  {} is exactly as maw found it (HEAD is detached; nothing",
+        ws_path.display()
+    );
+    eprintln!("  was checked out, reset or cleaned).");
+    eprintln!();
+    eprintln!("  To finish the update:");
+    eprintln!("    1. fix what maw could not read (e.g. a tracked directory replaced by a");
+    eprintln!("       symlink or special file), or set your edits aside:");
+    eprintln!("         git -C {ws} stash push -u");
+    eprintln!("    2. maw ws merge --recover");
+    eprintln!("    3. (if you stashed) git -C {ws} stash pop");
+    anyhow::anyhow!(
+        "target workspace '{ws_name}' was not updated to {short} (uncommitted edits not \
+         completely captured: {why}); the merge journal is kept — run `maw ws merge --recover`"
+    )
 }
 
 /// Pin a durable recovery ref pointing at an existing commit/stash OID under
@@ -8128,13 +8238,14 @@ fn pin_pre_merge_recovery_ref(
                 repo.write_blob(bytes),
             ),
         };
-        if let Ok(oid) = blob {
-            edits.push(maw_git::TreeEdit::Upsert {
-                path: path_str,
-                mode,
-                oid,
-            });
-        }
+        // bn-1dlkd: a blob that cannot be written makes the pin incomplete;
+        // report failure rather than pin a snapshot missing that edit.
+        let oid = blob.ok()?;
+        edits.push(maw_git::TreeEdit::Upsert {
+            path: path_str,
+            mode,
+            oid,
+        });
     }
     removals.append(&mut edits);
     let edits = removals;
@@ -8237,6 +8348,27 @@ fn merge_changed_path(
         || super::working_copy::is_directory_blocked_at(repo, epoch_after, path) != Some(false)
 }
 
+/// Whether `path` belongs to a file <-> directory collision group of the dirty
+/// trunk (bn-1dlkd): some uncommitted entry at, above or below `path` is a
+/// file or symlink where the merged tree has a directory (or a file where one
+/// of its parents would go). The replay leaves the whole group on the merged
+/// side and reports it (bn-3jqfk `directory_change`); e.g. after
+/// `rm -r d && ln -s x d` the deletion of `d/inner.txt` is part of the
+/// symlink's change. Repairing only the deletion from memory would leave an
+/// empty `d/` that is neither side, and contradict the report.
+fn in_directory_collision_group(
+    repo: &maw_git::GixRepo,
+    epoch_after: &str,
+    path: &Path,
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
+) -> bool {
+    pre_merge_dirty.iter().any(|(other, entry)| {
+        *entry != DiskSide::Absent
+            && (path.starts_with(other) || other.starts_with(path))
+            && super::working_copy::is_directory_blocked_at(repo, epoch_after, other) != Some(false)
+    })
+}
+
 /// Post-replay fidelity check: every pre-merge-dirty trunk path whose committed
 /// content the merge did NOT change must end up with exactly the user's
 /// uncommitted bytes on disk. Any raw-byte mismatch is repaired from the
@@ -8261,14 +8393,16 @@ fn verify_trunk_replay_fidelity(
         // Only files the merge left committed-unchanged are unambiguously owned
         // by the user's uncommitted edits. If the merge changed the committed
         // content, the driver-aware 3-way replay owns the outcome.
-        if merge_changed_path(&repo, anchor_epoch, epoch_after, path) {
+        if merge_changed_path(&repo, anchor_epoch, epoch_after, path)
+            || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty)
+        {
             continue;
         }
 
         let full = ws_path.join(path);
         // bn-3jqfk: compare whole entries without following a symlink (a
         // symlink is its link text, not its target's bytes).
-        let final_entry = match DiskSide::capture(&full) {
+        let final_entry = match DiskSide::capture_at(ws_path, path) {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::warn!(
@@ -8438,8 +8572,9 @@ fn report_fallback_unreplayed(
     let unreplayed: Vec<&(PathBuf, DiskSide)> = pre_merge_dirty
         .iter()
         .filter(|(path, entry)| {
-            merge_changed_path(&repo, anchor_epoch, epoch_after, path)
-                && DiskSide::capture(&ws_path.join(path)).ok().as_ref() != Some(entry)
+            (merge_changed_path(&repo, anchor_epoch, epoch_after, path)
+                || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty))
+                && DiskSide::capture_at(ws_path, path).ok().as_ref() != Some(entry)
         })
         .collect();
     if unreplayed.is_empty() {
@@ -8453,8 +8588,9 @@ fn report_fallback_unreplayed(
     eprintln!("  The merged version is on disk. Your version is in the recovery pin:");
     for (path, entry) in unreplayed {
         let quoted = shell_quote_path(path);
-        let blocked =
-            super::working_copy::is_directory_blocked_at(&repo, epoch_after, path) != Some(false);
+        let blocked = super::working_copy::is_directory_blocked_at(&repo, epoch_after, path)
+            != Some(false)
+            || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty);
         eprintln!("    {}", path.display());
         eprintln!(
             "      yours (uncommitted): {}",

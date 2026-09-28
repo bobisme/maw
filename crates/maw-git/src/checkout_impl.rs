@@ -630,7 +630,13 @@ fn remove_stale_files(
             continue;
         }
 
-        if path.is_dir() {
+        // bn-1dlkd: the entry's OWN type — `path.is_dir()` follows symlinks,
+        // so a tracked symlink to a directory was walked as a directory: the
+        // stale link itself was never removed (its `remove_dir` fails), and
+        // the walk descended through the link, where a tracked path under a
+        // user's symlink (e.g. `d/inner.txt` after `rm -r d && ln -s x d`)
+        // would delete `x/inner.txt` outside the tracked tree.
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             remove_stale_files(workdir, &path, tree_paths, tracked_paths)?;
             // Remove directory if it became empty (ignore errors — may not be empty).
             let _ = std::fs::remove_dir(&path);
@@ -1338,6 +1344,64 @@ mod tests {
         assert!(
             status.is_empty(),
             "worktree must be clean after checkout: {status:?}"
+        );
+    }
+
+    /// bn-1dlkd: a tracked symlink to a directory that the target tree
+    /// deletes is removed, even when the target makes its link target a
+    /// directory (the stale-file walk used to follow the link as a dir).
+    #[cfg(unix)]
+    #[test]
+    fn checkout_removes_stale_symlink_to_directory() {
+        let (_dir, root, _) = crate::test_support::init_test_repo_with_commit();
+        fs::create_dir(root.join("shared")).unwrap();
+        std::os::unix::fs::symlink("t", root.join("shared/s")).unwrap();
+        let c1 = crate::test_support::commit_all(&root, "c1: s -> t");
+        fs::remove_file(root.join("shared/s")).unwrap();
+        fs::create_dir(root.join("shared/t")).unwrap();
+        fs::write(root.join("shared/t/inner.txt"), "inner\n").unwrap();
+        let c2 = crate::test_support::commit_all(&root, "c2: rm s, add t/");
+        git(&root, &["checkout", "--quiet", "--force", "--detach", &c1]);
+        let repo = GixRepo::open(&root).expect("open");
+        super::checkout_detach(&repo, c2.parse().expect("oid"), &root).expect("checkout c2");
+        assert!(
+            root.join("shared/s").symlink_metadata().is_err(),
+            "the stale symlink must be removed"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("shared/t/inner.txt")).unwrap(),
+            "inner\n"
+        );
+    }
+
+    /// bn-1dlkd: the stale-file walk never descends through a symlink. A user
+    /// replaced tracked dir `d` with a link to untracked `x`; a checkout to a
+    /// tree without `d/inner.txt` must not delete `x/inner.txt` through it.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_never_deletes_through_a_symlinked_directory() {
+        let (_dir, root, _) = crate::test_support::init_test_repo_with_commit();
+        fs::create_dir(root.join("d")).unwrap();
+        fs::write(root.join("d/inner.txt"), "inner\n").unwrap();
+        let _c1 = crate::test_support::commit_all(&root, "c1: d/inner.txt");
+        git(&root, &["rm", "-q", "-r", "d"]);
+        git(&root, &["commit", "-q", "-m", "c2: rm d"]);
+        let c2 = git(&root, &["rev-parse", "HEAD"]);
+        git(
+            &root,
+            &["checkout", "--quiet", "--force", "--detach", "HEAD~1"],
+        );
+        fs::remove_file(root.join("d/inner.txt")).unwrap();
+        fs::remove_dir(root.join("d")).unwrap();
+        fs::create_dir(root.join("x")).unwrap();
+        fs::write(root.join("x/inner.txt"), "user\n").unwrap();
+        std::os::unix::fs::symlink("x", root.join("d")).unwrap();
+        let repo = GixRepo::open(&root).expect("open");
+        super::checkout_tree(&repo, c2.parse().expect("oid"), &root).expect("checkout c2");
+        assert_eq!(
+            fs::read_to_string(root.join("x/inner.txt")).unwrap(),
+            "user\n",
+            "a file behind the user's symlink must never be deleted"
         );
     }
 
