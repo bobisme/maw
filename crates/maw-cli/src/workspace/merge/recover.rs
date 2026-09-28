@@ -389,8 +389,20 @@ fn finalize(
     // commit report up to date; sources are skipped as in-progress).
     let backend = get_backend()?;
     if obs.updates_epoch {
-        let manifold_cfg = crate::workspace::load_manifold_config(root).unwrap_or_default();
-        if manifold_cfg.merge.auto_rebase_siblings {
+        // bn-15ebo: recovery must not refuse on an invalid config, but it
+        // must not silently apply default policy either. Skip the sibling
+        // rebase (a later `maw ws sync` catches siblings up) and say so.
+        let auto_rebase = match crate::workspace::load_manifold_config(root) {
+            Ok(cfg) => cfg.merge.auto_rebase_siblings,
+            Err(e) => {
+                eprintln!(
+                    "  WARNING: invalid maw config ({e:#}); skipping sibling auto-rebase. \
+                     Fix the config, then run: maw ws sync --all"
+                );
+                false
+            }
+        };
+        if auto_rebase {
             let reports = crate::workspace::sync::auto_rebase::auto_rebase_siblings(
                 root,
                 &backend,
@@ -441,7 +453,7 @@ fn finalize(
         // the pre-merge state, so a patch set of it would record the merge's
         // own changes as user edits.
         if !checkout_done
-            && !super::checkout_intent::pending_for(root, &target_ws, candidate.as_str())
+            && !super::checkout_intent::pending_for(root, &target_ws, candidate.as_str())?
             && let Some(target_id) = &target_id
             && target_ops(root, target_id, candidate) == TargetOps::AtHead
             && let Ok(patch_set) =

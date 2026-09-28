@@ -505,16 +505,27 @@ pub fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyCon
 // TODO(gix): replace CLI calls with GitRepo trait methods when git add -A, stash create,
 // reset, reset --hard, and clean -fd are supported. Currently gix stash_create only
 // captures index state (not working tree modifications).
-#[expect(
-    clippy::too_many_lines,
-    reason = "snapshot lifecycle stays in one ordered, failure-safe flow"
-)]
 #[instrument(skip_all, fields(workspace = ws_name))]
 pub fn snapshot_working_copy(
     ws_path: &Path,
     repo_root: &Path,
     ws_name: &str,
 ) -> Result<Option<SnapshotRef>> {
+    let snapshot = snapshot_working_copy_preserving_tree(ws_path, repo_root, ws_name)?;
+    if let Some(snapshot) = &snapshot {
+        clean_snapshotted_working_copy(ws_path, snapshot)?;
+    }
+    Ok(snapshot)
+}
+
+/// Capture and pin dirty content without changing the worktree. Merge must
+/// persist its replay intent before calling `clean_snapshotted_working_copy`.
+pub(super) fn snapshot_working_copy_preserving_tree(
+    ws_path: &Path,
+    repo_root: &Path,
+    ws_name: &str,
+) -> Result<Option<SnapshotRef>> {
+    const ADMIN_EXCLUDES: [&str; 4] = [".maw", "repo.git", ".manifold", ".git"];
     // Step 1: Check for dirty state via `status_head_to_worktree()`.
     //
     // We avoid gix's `is_dirty()` because it does not detect untracked
@@ -563,7 +574,6 @@ pub fn snapshot_working_copy(
     // subsequent `git reset --hard` / `git clean -fd` DELETE the git directory,
     // destroying the repository (bn-3bkn). For non-default workspaces these
     // paths don't exist at the worktree root, so the protection is a no-op.
-    const ADMIN_EXCLUDES: [&str; 4] = [".maw", "repo.git", ".manifold", ".git"];
 
     // Step 2: Stage all files (including untracked) so stash captures them.
     // (Plain `git add -A` skips gitignored paths without erroring.)
@@ -637,6 +647,16 @@ pub fn snapshot_working_copy(
     manifold_refs::write_ref(repo_root, &ref_name, &oid)
         .map_err(|e| anyhow::anyhow!("failed to pin snapshot ref: {e}"))?;
 
+    Ok(Some(SnapshotRef {
+        oid: stash_oid,
+        ref_name,
+    }))
+}
+
+/// Clean only after the caller has durably recorded how to replay `snapshot`.
+pub(super) fn clean_snapshotted_working_copy(ws_path: &Path, snapshot: &SnapshotRef) -> Result<()> {
+    const ADMIN_EXCLUDES: [&str; 4] = [".maw", "repo.git", ".manifold", ".git"];
+    let ref_name = &snapshot.ref_name;
     // Step 5: Clean the working tree so the subsequent checkout succeeds.
     //
     // `git stash create` does NOT modify the working tree or index — it only
@@ -683,16 +703,15 @@ pub fn snapshot_working_copy(
         );
     }
 
+    maw::fp!("FP_SNAPSHOT_AFTER_CLEAN")?;
+
     tracing::info!(
         ref_name = %ref_name,
-        oid = %stash_oid,
+        oid = %snapshot.oid,
         "snapshot pinned, working tree cleaned"
     );
 
-    Ok(Some(SnapshotRef {
-        oid: stash_oid,
-        ref_name,
-    }))
+    Ok(())
 }
 
 /// Checkout a workspace to a target commit or branch (native, no shell-out).

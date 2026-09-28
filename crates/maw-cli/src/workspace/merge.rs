@@ -7269,8 +7269,8 @@ pub fn update_default_workspace(
     source_workspace_names: &[String],
 ) -> Result<()> {
     use super::working_copy::{
-        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot_with_merge_protection,
-        snapshot_working_copy,
+        SnapshotReplayResult, checkout_to, clean_snapshotted_working_copy, cleanup_snapshot,
+        replay_snapshot_with_merge_protection, snapshot_working_copy_preserving_tree,
     };
 
     let record_workspace_epoch = || {
@@ -7297,7 +7297,7 @@ pub fn update_default_workspace(
     // is then NOT the pre-merge state; the intent's snapshot, relative to the
     // intent's anchor, is. Resume from it instead of anchoring at
     // `epoch_before` against a tree that may already be the merged one.
-    let resume = match checkout_intent::read(repo_root, ws_name) {
+    let resume = match checkout_intent::read(repo_root, ws_name)? {
         Some(intent) if intent.epoch_after == epoch_after => Some(intent),
         Some(stale) => {
             // An interrupted checkout of a different commit. Its snapshot is
@@ -7456,17 +7456,20 @@ pub fn update_default_workspace(
     let mut durable_recovery_ref: Option<String> = None;
 
     // bn-15fzo: resuming, the snapshot is the one the interrupted run took.
-    let resumed = resume.as_ref().map(|intent| {
-        resume_interrupted_checkout(
-            default_ws_path,
-            repo_root,
-            ws_name,
-            branch,
-            epoch_after,
-            intent,
-            text_mode,
-        )
-    });
+    let resumed = resume
+        .as_ref()
+        .map(|intent| {
+            resume_interrupted_checkout(
+                default_ws_path,
+                repo_root,
+                ws_name,
+                branch,
+                epoch_after,
+                intent,
+                text_mode,
+            )
+        })
+        .transpose()?;
     let resuming = resumed.is_some();
 
     // Step 1: SNAPSHOT — capture dirty state if any.
@@ -7475,8 +7478,9 @@ pub fn update_default_workspace(
     // bn-15fzo: when resuming, the snapshot is the one the interrupted run took.
     let snapshot = match resumed.map_or_else(
         || {
-            maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
-                .and_then(|()| snapshot_working_copy(default_ws_path, repo_root, ws_name))
+            maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT").and_then(|()| {
+                snapshot_working_copy_preserving_tree(default_ws_path, repo_root, ws_name)
+            })
         },
         |(snap, pinned)| {
             durable_recovery_ref = pinned;
@@ -7530,9 +7534,9 @@ pub fn update_default_workspace(
             });
     }
 
-    // bn-15fzo: from here until the epoch ref is written, the tree is not the
-    // pre-merge state (the snapshot reset it). Record what a resumed run needs
-    // (best-effort, like the rest of this post-COMMIT step).
+    // Persist replay intent BEFORE snapshot cleanup changes the tree. An
+    // interrupted cleanup must resume from this snapshot, not snapshot the
+    // partially cleaned tree as if it were the user's original edits.
     if !resuming {
         let intent = checkout_intent::CheckoutIntent {
             epoch_after: epoch_after.to_owned(),
@@ -7540,8 +7544,10 @@ pub fn update_default_workspace(
             snapshot: snapshot.as_ref().map(|s| s.oid.clone()),
             recovery_ref: durable_recovery_ref.clone(),
         };
-        if let Err(e) = checkout_intent::write(repo_root, ws_name, &intent) {
-            tracing::warn!("failed to record the target checkout intent: {e:#}");
+        checkout_intent::write(repo_root, ws_name, &intent)
+            .context("cannot record target checkout intent; keep the merge journal and retry maw ws merge --recover")?;
+        if let Some(snapshot) = &snapshot {
+            clean_snapshotted_working_copy(default_ws_path, snapshot)?;
         }
     }
 
@@ -7779,9 +7785,10 @@ fn resume_interrupted_checkout(
     epoch_after: &str,
     intent: &checkout_intent::CheckoutIntent,
     text_mode: bool,
-) -> (Option<super::working_copy::SnapshotRef>, Option<String>) {
+) -> Result<(Option<super::working_copy::SnapshotRef>, Option<String>)> {
     use super::working_copy::{
-        SnapshotRef, cleanup_snapshot, snapshot_ref_name, snapshot_working_copy,
+        SnapshotRef, clean_snapshotted_working_copy, cleanup_snapshot, snapshot_ref_name,
+        snapshot_working_copy_preserving_tree,
     };
 
     let source = intent
@@ -7792,7 +7799,7 @@ fn resume_interrupted_checkout(
     eprintln!("  resuming an interrupted update of '{ws_name}' (its pre-merge edits: {source})");
 
     let residual_dirty = capture_pre_merge_dirty(ws_path);
-    match snapshot_working_copy(ws_path, repo_root, ws_name) {
+    match snapshot_working_copy_preserving_tree(ws_path, repo_root, ws_name) {
         Ok(Some(residual)) => {
             let residual_tree = tree_of(ws_path, &residual.oid);
             let expected = residual_tree.is_some()
@@ -7803,13 +7810,14 @@ fn resume_interrupted_checkout(
                         .is_some_and(|snap| tree_of(ws_path, snap) == residual_tree));
             if !expected {
                 let pin = pin_recovery_ref_from_oid(repo_root, ws_name, &residual.oid)
-                    .unwrap_or_else(|| residual.oid.clone());
+                    .context("cannot pin edits made since the interrupted checkout; retry maw ws merge --recover")?;
                 eprintln!(
                     "  WARNING: '{ws_name}' held changes beyond the interrupted update \
                      (a partial replay, or edits made since). They are pinned at {pin}; \
                      the pre-merge edits are replayed from {source}."
                 );
             }
+            clean_snapshotted_working_copy(ws_path, &residual)?;
         }
         Ok(None) => {}
         Err(e) => {
@@ -7845,7 +7853,7 @@ fn resume_interrupted_checkout(
     {
         tracing::warn!("failed to clean up snapshot ref: {e}");
     }
-    (snapshot, intent.recovery_ref.clone())
+    Ok((snapshot, intent.recovery_ref.clone()))
 }
 
 /// Print the dirty-replay type conflicts (bn-2ygs0): a symlink vs a file (or

@@ -298,3 +298,162 @@ fn clean_target_crash_after_checkout_records_no_bogus_snapshot() {
         "a\n"
     );
 }
+
+/// Cleanup of the snapshot must not precede the durable replay intent.
+#[test]
+fn crash_after_snapshot_cleanup_recovers_user_edits() {
+    for during_recovery in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        setup(root);
+        let crash = if during_recovery {
+            let first = merge_a(root, Some("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT=abort"));
+            assert!(!first.status.success(), "{}", combined(&first));
+            maw_raw(
+                root,
+                &["ws", "merge", "--recover"],
+                Some("FP_SNAPSHOT_AFTER_CLEAN=abort"),
+            )
+        } else {
+            merge_a(root, Some("FP_SNAPSHOT_AFTER_CLEAN=abort"))
+        };
+        assert!(!crash.status.success(), "{}", combined(&crash));
+        assert!(journal(root).exists());
+        let text = maw(root, &["ws", "merge", "--recover"]);
+        assert_target_state(root, &text);
+        assert!(!journal(root).exists(), "{text}");
+    }
+}
+
+#[test]
+fn corrupt_checkout_intent_refuses_recovery_without_touching_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let crash = merge_a(root, Some("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort"));
+    assert!(!crash.status.success(), "{}", combined(&crash));
+    let intent = root.join(".maw/manifold/target-checkout-default.json");
+    let saved = std::fs::read(&intent).expect("intent");
+    std::fs::write(&intent, "{broken").expect("corrupt intent");
+    let before = git_raw(root, &["status", "--porcelain"]);
+    let result = maw_raw(root, &["ws", "merge", "--recover"], None);
+    assert!(
+        !result.status.success(),
+        "recovery must refuse an unreadable intent: {}",
+        combined(&result)
+    );
+    assert!(journal(root).exists());
+    assert_eq!(std::fs::read_to_string(&intent).unwrap(), "{broken");
+    assert_eq!(git_raw(root, &["status", "--porcelain"]), before);
+    std::fs::write(intent, saved).expect("restore intent");
+    let text = maw(root, &["ws", "merge", "--recover"]);
+    assert_target_state(root, &text);
+}
+
+#[test]
+fn checkout_intent_write_failure_keeps_dirty_tree_for_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let crash = merge_a(root, Some("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT=abort"));
+    assert!(!crash.status.success(), "{}", combined(&crash));
+    let blocker = root.join(".maw/manifold/.target-checkout-default.json.tmp");
+    std::fs::create_dir(&blocker).expect("block intent write");
+    let out = maw_raw(root, &["ws", "merge", "--recover"], None);
+    assert!(
+        !out.status.success(),
+        "intent failure must stop checkout: {}",
+        combined(&out)
+    );
+    assert!(journal(root).exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "user edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.txt")).unwrap(),
+        "untracked user file\n"
+    );
+    std::fs::remove_dir(blocker).expect("unblock intent write");
+    let text = maw(root, &["ws", "merge", "--recover"]);
+    assert_target_state(root, &text);
+}
+
+/// Edits made after the first crash need their own durable recovery pin.
+#[test]
+fn recovery_recrash_preserves_edits_made_after_first_crash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let crash = merge_a(root, Some("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort"));
+    assert!(!crash.status.success(), "{}", combined(&crash));
+    std::fs::write(root.join("after-crash.txt"), "work after the first crash\n").unwrap();
+    let crash2 = maw_raw(
+        root,
+        &["ws", "merge", "--recover"],
+        Some("FP_SNAPSHOT_AFTER_CLEAN=abort"),
+    );
+    assert!(!crash2.status.success(), "{}", combined(&crash2));
+    let text = maw(root, &["ws", "merge", "--recover"]);
+    assert_target_state(root, &text);
+    let pins = git_raw(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/manifold/recovery/default/",
+        ],
+    );
+    assert!(
+        pins.lines().any(|pin| {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args(["show", &format!("{pin}:after-crash.txt")])
+                .output()
+                .unwrap();
+            out.status.success() && out.stdout == b"work after the first crash\n"
+        }),
+        "edits made after crash must remain durably recoverable after another crash\n{pins}\n{text}"
+    );
+}
+
+/// bn-15ebo / bn-1bkr0: finishing a landed merge must not refuse on an invalid
+/// manifold config, but it must not silently apply default policy either. The
+/// sibling auto-rebase is skipped (and said so) instead of running with the
+/// default `auto_rebase_siblings = true` the user may have turned off.
+#[test]
+fn recover_with_invalid_manifold_config_skips_sibling_rebase_and_says_so() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    maw(root, &["ws", "create", "s", "--from", "main"]);
+    let s = ws_path(root, "s");
+    std::fs::write(s.join("s.txt"), "s\n").expect("write s.txt");
+    maw(root, &["exec", "s", "--", "git", "add", "-A"]);
+    maw(root, &["exec", "s", "--", "git", "commit", "-m", "s work"]);
+    let s_head_before = git_out(&s, &["rev-parse", "HEAD"]);
+
+    let crash = merge_a(root, Some("FP_COMMIT_AFTER_EPOCH_CAS=abort"));
+    assert!(!crash.status.success(), "{}", combined(&crash));
+    assert!(journal(root).exists(), "the crash must leave the journal");
+
+    std::fs::write(
+        root.join(".maw").join("manifold").join("config.toml"),
+        "[merge\nauto_rebase_siblings = true\n",
+    )
+    .expect("corrupt manifold config");
+
+    let out = maw_raw(root, &["ws", "merge", "--recover"], None);
+    let text = combined(&out);
+    assert!(out.status.success(), "recover must not refuse:\n{text}");
+    assert!(!journal(root).exists(), "journal cleared:\n{text}");
+    assert!(
+        text.contains("skipping sibling auto-rebase"),
+        "recover must say it skipped the sibling rebase:\n{text}"
+    );
+    assert_eq!(
+        git_out(&s, &["rev-parse", "HEAD"]),
+        s_head_before,
+        "sibling must not be rebased under an invalid config:\n{text}"
+    );
+}

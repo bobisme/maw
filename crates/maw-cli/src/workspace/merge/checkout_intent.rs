@@ -10,8 +10,8 @@
 //! own changes as "user edits", and never replayed the user's real edits
 //! (they survived only in a recovery ref).
 //!
-//! The intent is written after the snapshot is pinned and before the
-//! checkout, and removed right after the epoch ref is written. When
+//! The intent is written after the snapshot is pinned and before any
+//! snapshot cleanup or checkout, and removed right after the epoch ref is written. When
 //! `update_default_workspace` finds an intent for the same merged commit it
 //! resumes from it: the pre-merge state is the intent's snapshot relative to
 //! the intent's anchor, not whatever the interrupted run left on disk.
@@ -45,31 +45,28 @@ fn intent_path(repo_root: &Path, ws_name: &str) -> PathBuf {
         .join(format!("target-checkout-{ws_name}.json"))
 }
 
-/// Read the intent for `ws_name`, if any. An unreadable or corrupt record is
-/// reported and treated as absent (the snapshot it named stays pinned).
-pub fn read(repo_root: &Path, ws_name: &str) -> Option<CheckoutIntent> {
+/// Read the intent for `ws_name`, if any. Only a missing record is absent.
+/// Unreadable or corrupt intent must stop recovery before it touches the tree.
+pub fn read(repo_root: &Path, ws_name: &str) -> Result<Option<CheckoutIntent>> {
     let path = intent_path(repo_root, ws_name);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            tracing::warn!("cannot read {}: {e}", path.display());
-            return None;
+            return Err(e)
+                .with_context(|| format!("cannot read checkout intent {}", path.display()));
         }
     };
-    match serde_json::from_str(&text) {
-        Ok(intent) => Some(intent),
-        Err(e) => {
-            tracing::warn!("ignoring corrupt {}: {e}", path.display());
-            None
-        }
-    }
+    serde_json::from_str(&text)
+        .with_context(|| format!("cannot parse checkout intent {}; preserve it and repair it before retrying maw ws merge --recover", path.display()))
+        .map(Some)
 }
 
 /// Whether an interrupted target checkout of `epoch_after` into `ws_name`
-/// is pending.
-pub fn pending_for(repo_root: &Path, ws_name: &str, epoch_after: &str) -> bool {
-    read(repo_root, ws_name).is_some_and(|i| i.epoch_after == epoch_after)
+/// is pending. Propagate intent errors so callers cannot snapshot an
+/// interrupted checkout as new user work.
+pub fn pending_for(repo_root: &Path, ws_name: &str, epoch_after: &str) -> Result<bool> {
+    Ok(read(repo_root, ws_name)?.is_some_and(|i| i.epoch_after == epoch_after))
 }
 
 /// Durably write the intent (temp file, fsync, rename, fsync dir).
@@ -120,7 +117,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         std::fs::create_dir_all(root.join(".maw/manifold")).expect("mkdir");
-        assert_eq!(read(root, "default"), None);
+        assert_eq!(read(root, "default").expect("read"), None);
         let intent = CheckoutIntent {
             epoch_after: "b".repeat(40),
             anchor: "a".repeat(40),
@@ -128,12 +125,12 @@ mod tests {
             recovery_ref: Some("refs/manifold/recovery/default/x".into()),
         };
         write(root, "default", &intent).expect("write");
-        assert_eq!(read(root, "default"), Some(intent));
-        assert!(pending_for(root, "default", &"b".repeat(40)));
-        assert!(!pending_for(root, "default", &"d".repeat(40)));
-        assert!(!pending_for(root, "other", &"b".repeat(40)));
+        assert_eq!(read(root, "default").expect("read"), Some(intent));
+        assert!(pending_for(root, "default", &"b".repeat(40)).expect("pending"));
+        assert!(!pending_for(root, "default", &"d".repeat(40)).expect("pending"));
+        assert!(!pending_for(root, "other", &"b".repeat(40)).expect("pending"));
         clear(root, "default");
         clear(root, "default");
-        assert_eq!(read(root, "default"), None);
+        assert_eq!(read(root, "default").expect("read"), None);
     }
 }
