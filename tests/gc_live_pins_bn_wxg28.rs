@@ -123,3 +123,59 @@ fn force_and_include_live_require_recovery_snapshots() {
     let err = repo.maw_fails(&["gc", "--include-live"]);
     assert!(err.contains("--recovery-snapshots"), "{err}");
 }
+
+/// bn-1m3lx: plain `maw gc` (and `--recovery-snapshots`) must not treat the
+/// default workspace as "destroyed". In the consolidated layout it lives at
+/// the repo root, not `.maw/workspaces/default/`; gc used to prune its
+/// oplog head + epoch + state refs as "dangling", which erased the op log,
+/// so `maw undo` could no longer undo the last merge ("Nothing to undo").
+#[test]
+fn gc_keeps_default_workspace_refs_and_undo_survives() {
+    for layout in manifold_common::Layout::ALL {
+        let repo = TestRepo::with_layout(layout);
+        repo.create_workspace("feat");
+        repo.add_file("feat", "feat.txt", "feature\n");
+        repo.maw_ok(&[
+            "ws",
+            "merge",
+            "feat",
+            "--into",
+            "default",
+            "--destroy",
+            "-m",
+            "feat",
+        ]);
+        let owned = [
+            "refs/manifold/head/default",
+            "refs/manifold/epoch/ws/default",
+        ];
+        let before: Vec<String> = owned
+            .iter()
+            .map(|r| repo.git(&["for-each-ref", "--format=%(refname) %(objectname)", r]))
+            .collect();
+        assert!(before.iter().all(|r| !r.is_empty()), "{before:?}");
+        repo.maw_ok(&["undo", "--dry-run"]);
+
+        for args in [&["gc"][..], &["gc", "--recovery-snapshots"][..]] {
+            let out = repo.maw_ok(args);
+            let after: Vec<String> = owned
+                .iter()
+                .map(|r| repo.git(&["for-each-ref", "--format=%(refname) %(objectname)", r]))
+                .collect();
+            assert_eq!(
+                before,
+                after,
+                "[{}] `maw {}` deleted the default workspace's refs: {out}",
+                layout.label(),
+                args.join(" ")
+            );
+            let undo = repo.maw_ok(&["undo", "--dry-run"]);
+            assert!(
+                undo.contains("Undo plan"),
+                "[{}] undo lost after `maw {}`: {undo}",
+                layout.label(),
+                args.join(" ")
+            );
+        }
+    }
+}

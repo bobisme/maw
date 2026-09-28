@@ -253,6 +253,7 @@ pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
         .list_refs(refs::HEAD_PREFIX)
         .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
 
+    let default_names = default_workspace_names(root);
     let mut count = 0;
     for (ref_name, _oid) in &head_refs {
         let ws_name = ref_name
@@ -262,9 +263,7 @@ pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
         if ws_name.is_empty() {
             continue;
         }
-        let ws_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
-            .workspace_path(root, ws_name);
-        if !ws_dir.exists() {
+        if !workspace_is_live(root, ws_name, &default_names) {
             count += 1;
         }
     }
@@ -328,6 +327,7 @@ fn prune_dangling_head_refs(
         .map_err(|e| anyhow::anyhow!("list_refs failed for head refs: {e}"))?;
 
     let protected = live_merge_source_names(root);
+    let default_names = default_workspace_names(root);
 
     for (ref_name, _oid) in &head_refs {
         let ws_name = ref_name
@@ -337,9 +337,11 @@ fn prune_dangling_head_refs(
         if ws_name.is_empty() {
             continue;
         }
-        let ws_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
-            .workspace_path(root, ws_name);
-        if ws_dir.exists() {
+        // bn-1m3lx: the default workspace is the repo root in the
+        // consolidated layout (no `.maw/workspaces/default/`). A bare
+        // `workspace_path` check called it "destroyed" and deleted its oplog
+        // head + epoch + state refs, erasing `maw undo`'s history.
+        if workspace_is_live(root, ws_name, &default_names) {
             continue;
         }
         if protected.contains(ws_name) {
@@ -1663,6 +1665,27 @@ mod tests {
         assert_eq!(report.recovery_refs_deleted, 1);
         assert!(!report.force_reasons.is_empty());
         assert!(refs::read_ref(root, &pin).expect("read").is_some());
+    }
+
+    #[test]
+    fn default_head_ref_is_not_dangling_at_consolidated_root() {
+        // bn-1m3lx: the default workspace lives at the repo root in the
+        // consolidated layout; its oplog head is not "dangling".
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".maw/manifold")).expect("mk");
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("oid");
+        refs::write_ref(root, &refs::workspace_head_ref("default"), &git_oid).expect("head");
+        refs::write_ref(root, &refs::workspace_head_ref("gone"), &git_oid).expect("head");
+
+        assert_eq!(count_stale_head_refs(root).expect("count"), 1);
+        let report = run_head_refs_only(root, false).expect("gc");
+        assert_eq!(report.stale_head_names, vec!["gone"]);
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("default"))
+                .expect("read")
+                .is_some()
+        );
     }
 
     #[test]
