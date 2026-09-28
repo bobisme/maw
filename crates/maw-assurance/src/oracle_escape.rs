@@ -469,15 +469,22 @@ const WHOLE_SNAPSHOT_NOTICES: &[&str] = &[
     // bn-15fzo: a stale checkout intent for a different commit — "left its
     // pre-merge edits pinned at <ref>".
     "pre-merge edits pinned at",
-    // bn-15fzo/bn-1bkr0 resume: edits made in the default worktree AFTER the
-    // crash (or a partial replay) are pinned and cleaned before the resumed
-    // replay — "held changes beyond the interrupted update ... They are
-    // pinned at <ref>". Like the stale-intent notice above it names the ref
-    // for the whole set, not per path (bn-1h9ue triage F1: surfaced by the
-    // dirty-trunk soak; accepted here by that analogy, per-path restore
-    // commands filed as a UX follow-up).
-    "held changes beyond the interrupted update",
 ];
+
+/// bn-15fzo/bn-1bkr0 resume: edits made in the default worktree AFTER the
+/// crash (or a partial replay) are pinned and cleaned before the resumed
+/// replay — "held changes beyond the interrupted update ... They are pinned
+/// at <ref>; the pre-merge edits are replayed from <source>." Like the
+/// stale-intent notice it names the ref for the whole set, not per path
+/// (bn-1h9ue triage F1; per-path restore commands filed as a UX follow-up).
+///
+/// It is NOT a whole-snapshot notice (bn-3adck): the same message promises
+/// the pre-merge edits are REPLAYED. So it acknowledges only entries the
+/// crash did not displace — edits made since the crash — never a deferred
+/// pre-merge entry, which the resumed replay must put back (or report per
+/// path). Treating it as whole-snapshot let a resume that silently dropped
+/// pre-merge edits pass whenever the user had also edited after the crash.
+const RESIDUAL_NOTICE: &str = "held changes beyond the interrupted update";
 
 /// Phrases by which maw tells the user their version of a path is back on
 /// disk (the bn-1xmk replay-divergence notice: "Your version was restored from
@@ -615,11 +622,27 @@ impl TrunkDirtyDisplacement {
         output: &str,
         crashed: bool,
     ) -> Vec<EscapeViolation> {
+        self.check_after(repo_root, matches!(op, Op::Merge { .. }), output, crashed)
+    }
+
+    /// [`Self::check_step`] with the op class given directly: `merge` = the op
+    /// ran a merge's target update (or its recovery) — the op class that can
+    /// displace an entry, restore a deferred one, and so render a verdict on
+    /// one still on disk. A driver whose modelled merge was a no-op (no
+    /// source tip: nothing ran) passes `false` (bn-3adck: counting those as
+    /// verdicts inflated `judged`, the non-vacuity counter).
+    pub fn check_after(
+        &mut self,
+        repo_root: &Path,
+        merge: bool,
+        output: &str,
+        crashed: bool,
+    ) -> Vec<EscapeViolation> {
         if self.pending.is_empty() {
             return Vec::new();
         }
         let default_ws = LayoutFlavor::detect(repo_root).default_target_path(repo_root, "default");
-        let recovery_op = matches!(op, Op::Merge { .. }) && !crashed;
+        let recovery_op = merge && !crashed;
         let mut recovery_blobs: Option<BTreeSet<String>> = None;
 
         let mut violations = Vec::new();
@@ -638,7 +661,7 @@ impl TrunkDirtyDisplacement {
                 }
                 continue;
             }
-            let report = classify_report(output, path);
+            let report = classify_report(output, path, !was_deferred);
             if report == Report::Displaced {
                 self.reported += 1;
                 self.judged += 1;
@@ -748,13 +771,18 @@ pub(crate) fn has_whole_snapshot_notice(output: &str) -> bool {
 
 /// [`classify_report`] for the in-proc replay model (bn-1h9ue): one
 /// definition of "the output reported `path` with a way back".
+///
+/// The replay model judges the user's PRE-merge entries, which
+/// [`RESIDUAL_NOTICE`] never acknowledges (bn-3adck).
 pub(crate) fn report_for(output: &str, path: &str) -> Report {
-    classify_report(output, path)
+    classify_report(output, path, false)
 }
 
 /// How `output` accounts for `path`, which is NOT on disk as recorded (see
 /// [`WHOLE_SNAPSHOT_NOTICES`] / [`RECOVERY_HANDLES`] / [`ON_DISK_CLAIMS`]).
-fn classify_report(output: &str, path: &str) -> Report {
+/// `residual_ok`: whether [`RESIDUAL_NOTICE`] may acknowledge `path` (only an
+/// entry recorded after the crash the resumed update is recovering from).
+fn classify_report(output: &str, path: &str, residual_ok: bool) -> Report {
     if output.is_empty() {
         return Report::Silent;
     }
@@ -763,7 +791,9 @@ fn classify_report(output: &str, path: &str) -> Report {
     if claims_on_disk(output, path) {
         return Report::ClaimedOnDisk;
     }
-    if WHOLE_SNAPSHOT_NOTICES.iter().any(|m| output.contains(m)) {
+    if WHOLE_SNAPSHOT_NOTICES.iter().any(|m| output.contains(m))
+        || (residual_ok && output.contains(RESIDUAL_NOTICE))
+    {
         return Report::Displaced;
     }
     let names_path = output.lines().any(|line| line_names_path(line, path));
@@ -1869,6 +1899,46 @@ mod tests {
         fs::write(root.join("ws/default/hot.txt"), "user edit\n").unwrap();
         assert!(strict.check_step(root, &merge_op(), "", false).is_empty());
         assert_eq!(strict.judged(), 1);
+    }
+
+    /// bn-3adck: the resume's residual notice ("held changes beyond the
+    /// interrupted update ... pinned at <ref>; the pre-merge edits are
+    /// replayed from <source>") acknowledges only edits made SINCE the crash.
+    /// A pre-merge entry the crash displaced (deferred) must still come back
+    /// — the same message promises it is replayed.
+    #[test]
+    fn residual_notice_acknowledges_only_post_crash_edits() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let residual = "  resuming an interrupted update of 'default' (its pre-merge edits: \
+                        refs/manifold/recovery/default/2026-09-28T00-00-00Z)\n  WARNING: \
+                        'default' held changes beyond the interrupted update (a partial \
+                        replay, or edits made since). They are pinned at \
+                        refs/manifold/recovery/default/2026-09-28T00-00-01Z; the pre-merge \
+                        edits are replayed from refs/manifold/recovery/default/2026-09-28T00-00-00Z.\n";
+        let mut strict = TrunkDirtyDisplacement::new();
+        strict.record_dirty("pre.txt", "pre-merge edit\n");
+        // The crash displaced the pre-merge edit: deferred.
+        assert!(strict.check_step(root, &merge_op(), "", true).is_empty());
+        // The user edits another path after the crash.
+        strict.record_dirty("post.txt", "post-crash edit\n");
+        // The resume pins + cleans the post-crash edit (acknowledged) but
+        // does NOT put the pre-merge edit back: that is a violation.
+        let v = strict.check_step(root, &merge_op(), residual, false);
+        assert!(
+            matches!(
+                v.as_slice(),
+                [EscapeViolation::TrunkDirtyDisplaced { path, after_crash: true, .. }]
+                    if path == "pre.txt"
+            ),
+            "{v:?}"
+        );
+        assert_eq!(strict.reported(), 1, "post.txt is acknowledged");
+
+        // The replay model never reads the residual notice as whole-snapshot.
+        assert!(!has_whole_snapshot_notice(residual));
+        assert_eq!(report_for(residual, "pre.txt"), Report::Silent);
     }
 
     /// bn-3jqfk: a retargeted symlink must come back as a link to the user's

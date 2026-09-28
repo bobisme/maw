@@ -95,12 +95,42 @@ use maw_core::refs;
 /// every call site to pass a `LayoutFlavor`.
 fn ws_dir_exists(repo_root: &Path, name: &str) -> bool {
     let flavor = LayoutFlavor::detect(repo_root);
-    if matches!(flavor, LayoutFlavor::ConsolidatedMawDir) && name == "default" {
-        // The root checkout IS the default workspace under the
-        // consolidated layout; always treat it as present.
-        return repo_root.is_dir();
+    if flavor.workspace_path(repo_root, name).is_dir() {
+        return true;
     }
-    flavor.workspace_path(repo_root, name).is_dir()
+    // The default workspace lives at `default_target_path` — the repo root
+    // itself under the consolidated layout. bn-3adck: under ANY name that
+    // denotes it (`default` or the configured one), as `ref_gc`'s
+    // `workspace_is_live` decides after bn-1m3lx; only `default` used to be
+    // recognised, so a configured default's oplog head read as dangling.
+    default_workspace_names(repo_root).iter().any(|d| d == name)
+        && flavor.default_target_path(repo_root, name).is_dir()
+}
+
+/// Names that denote the default workspace: `default`, plus the `[repo]
+/// default_workspace` of the first readable `.maw.toml` on the layout's
+/// search path (independent re-derivation of maw-cli's
+/// `ref_gc::default_workspace_names` / `MawConfig::load`).
+fn default_workspace_names(repo_root: &Path) -> Vec<String> {
+    let mut names = vec!["default".to_owned()];
+    let flavor = LayoutFlavor::detect(repo_root);
+    let configured = flavor
+        .maw_toml_search_paths(repo_root, "default")
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .and_then(|body| body.parse::<toml::Table>().ok())
+        .and_then(|t| {
+            t.get("repo")?
+                .get("default_workspace")?
+                .as_str()
+                .map(str::to_owned)
+        });
+    if let Some(name) = configured
+        && !names.contains(&name)
+    {
+        names.push(name);
+    }
+    names
 }
 
 /// Layout-aware path to the `.manifold/` directory used for the merge-state
@@ -985,6 +1015,43 @@ mod tests {
             )),
             "Oracle B must fire B1 on the bn-cm63 reproduction; got: {vs:?}"
         );
+    }
+
+    /// bn-3adck (aligned with `ref_gc` after bn-1m3lx): on the consolidated
+    /// layout the default workspace is the repo root — under `default` OR a
+    /// `[repo] default_workspace` configured in `.maw.toml` — so its oplog
+    /// head is never dangling. Oracle B and its `doctor_verdict` replica must
+    /// agree with `ref_gc::count_stale_head_refs` / `workspace_is_live`.
+    #[test]
+    fn default_workspace_head_is_live_at_consolidated_root_bn_3adck() {
+        for custom in [None, Some("trunk")] {
+            let (dir, oid) = setup_repo();
+            let root = dir.path();
+            fs::remove_dir_all(root.join("ws")).unwrap();
+            fs::remove_dir_all(root.join(".manifold")).unwrap();
+            fs::create_dir_all(root.join(".maw/manifold")).unwrap();
+            fs::create_dir_all(root.join(".maw/workspaces")).unwrap();
+            let default = custom.unwrap_or("default");
+            if let Some(name) = custom {
+                fs::write(
+                    root.join(".maw.toml"),
+                    format!("[repo]\ndefault_workspace = \"{name}\"\n"),
+                )
+                .unwrap();
+            }
+            write_ref(root, &refs::workspace_head_ref(default), &oid);
+            write_ref(root, &refs::workspace_head_ref("gone"), &oid);
+
+            let dangling: Vec<String> = check(root)
+                .into_iter()
+                .filter_map(|v| match v {
+                    OracleBViolation::DanglingHeadRef { workspace, .. } => Some(workspace),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(dangling, vec!["gone".to_owned()], "custom={custom:?}");
+            assert_eq!(doctor_verdict(root).stale_head_refs, 1, "custom={custom:?}");
+        }
     }
 
     /// **bn-cm63 LIVE-MERGE false-positive protection.**

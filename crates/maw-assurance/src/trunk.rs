@@ -41,7 +41,49 @@
 //! - Crash recovery is modelled as "the next merge first re-runs the
 //!   interrupted target update" — what `maw ws merge`'s auto-recovery does
 //!   (`recover.rs`: anchor at the merged commit once the workspace epoch ref
-//!   names it, else at the crashed merge's `epoch_before`).
+//!   names it, else at the crashed merge's `epoch_before`). A crash in the
+//!   plan's LAST merge is recovered by an end-of-drive drain
+//!   (`InProcDriver::drain_trunk`, bn-3adck) — before it, ~16% of 64-step soak
+//!   seeds ended with a pending update nobody recovered or judged.
+//! - Only two crash windows are inside the production update
+//!   (`FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` = the handled snapshot-failed
+//!   fallback, `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` = abort between checkout
+//!   and replay). Every other fault is modelled as "died before the update
+//!   began". A crash INSIDE the replay (a partial replay) is not reachable
+//!   here.
+//!
+//! # Oracle blind spots (documented, bn-3adck sweep)
+//!
+//! What a clean seed does NOT prove, so coverage is not overstated:
+//!
+//! - **Both sides changed a regular file's bytes, no markers on disk**:
+//!   [`judge_replay`] accepts ANY bytes (it does not model diff3), and the
+//!   byte oracles only accept the user's exact bytes or markers carrying
+//!   them. So a replay that silently drops the user's hunks there is caught
+//!   only by `TrunkDirtyDisplacement` — and NOT when the user's content
+//!   already carried diff3 markers from an earlier unresolved conflict:
+//!   `TrunkTier::write` does not record those with the byte oracles, so that
+//!   path has no byte-level judge at all.
+//! - **Exec bit when the path was absent (or a symlink) at the anchor**: not
+//!   judged (no base mode to 3-way against).
+//! - **file<->directory paths** (`df_involved`): skipped by the replay
+//!   model, left to the byte oracles.
+//! - **A recovery of a TAINTED pending update** (the trunk was edited while
+//!   it was pending): not judged by the replay model; only the byte oracles
+//!   judge it.
+//! - **Whole-snapshot notices** (`replay_snapshot failed`, a stale intent's
+//!   `pre-merge edits pinned at`): acknowledge every user-changed path. The
+//!   resume's residual notice (`held changes beyond the interrupted
+//!   update`) acknowledges only entries edited SINCE the crash (bn-3adck).
+//! - **"Reported"** (`oracle_escape::classify_report`) is a heuristic: some
+//!   output line names the path as a token AND some recovery handle appears
+//!   ANYWHERE in the same output — not necessarily next to the path (the
+//!   production conflict list and its `maw ws resolve` commands are separate
+//!   paragraphs). A progress line that happened to name a displaced path
+//!   while another path's conflict printed a handle would acknowledge it;
+//!   no such line exists in the target update's output today.
+//! - Byte oracles record only UTF-8 file content and symlink targets; mode
+//!   changes and non-UTF-8 content are judged by the replay model alone.
 #![cfg(feature = "oracles")]
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
@@ -201,9 +243,18 @@ impl TrunkUpdater for SelfExecUpdater {
             ),
             None => (true, None),
         };
-        if result.is_none() && !req.maw_fp.as_deref().is_some_and(|s| s.contains("=abort")) {
-            // Died without a result and no crash was requested: the helper
-            // itself failed (not built with the helper test, panicked, …).
+        // A crash is ONLY the requested one: an armed `abort` failpoint that
+        // killed the process with SIGABRT. Any other death without a result —
+        // the helper not built into this binary (libtest exits 0 with no
+        // matching test), a panic in the production update (exit 101), a
+        // spawn/parse failure — is a harness error even while an `abort` is
+        // armed (bn-3adck: a panic before the armed site used to read as the
+        // requested crash, so the next merge "recovered" it and a production
+        // panic never surfaced).
+        if result.is_none()
+            && !(req.maw_fp.as_deref().is_some_and(|s| s.contains("=abort"))
+                && killed_by_sigabrt(out.status))
+        {
             return Err(std::io::Error::other(format!(
                 "trunk-update helper died unexpectedly (status {}): {}",
                 out.status,
@@ -216,6 +267,15 @@ impl TrunkUpdater for SelfExecUpdater {
             error,
         })
     }
+}
+
+/// Whether the process was killed by SIGABRT (what `std::process::abort`, and
+/// so an armed `abort` failpoint, does).
+#[cfg(unix)]
+fn killed_by_sigabrt(status: std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    const SIGABRT: i32 = 6;
+    status.signal() == Some(SIGABRT)
 }
 
 /// Helper-process side of [`SelfExecUpdater`]. A no-op unless [`REQUEST_ENV`]
@@ -883,6 +943,68 @@ mod tests {
         let j = judge_replay(&b, &u, &m, &m, "");
         assert!(j.mismatches.is_empty());
         assert_eq!(j.judged, 0);
+    }
+
+    /// bn-3adck: only a SIGABRT death while an `abort` failpoint is armed is
+    /// the requested crash. A panic (exit 101) or a clean exit without a
+    /// result marker (the helper test missing from the binary) is a harness
+    /// error even with the abort armed.
+    #[cfg(unix)]
+    #[test]
+    fn self_exec_crash_is_only_a_requested_sigabrt() {
+        let t = tempfile::TempDir::new().unwrap();
+        // `/bin/sh <script> <libtest args...>`: the script stands in for the
+        // test binary. Run through `sh` rather than exec'd directly — a
+        // freshly written executable can hit ETXTBSY while a concurrent test
+        // forks with its write fd still open.
+        let helper = |name: &str, body: &str| {
+            let p = t.path().join(name);
+            std::fs::write(&p, format!("{body}\n")).unwrap();
+            SelfExecUpdater {
+                exe: PathBuf::from("/bin/sh"),
+                test_name: p.to_string_lossy().into_owned(),
+            }
+        };
+        let req = |fp: Option<&str>| TrunkUpdateRequest {
+            default_ws_path: t.path().to_path_buf(),
+            repo_root: t.path().to_path_buf(),
+            branch: "main".to_owned(),
+            epoch_before: "a".to_owned(),
+            epoch_after: "b".to_owned(),
+            sources: vec!["ws-1".to_owned()],
+            maw_fp: fp.map(str::to_owned),
+        };
+        let abort = Some("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort");
+
+        // The requested crash: SIGABRT with the abort armed.
+        let sigabrt = helper("abrt.sh", "echo 'some progress'\nkill -ABRT $$");
+        let out = sigabrt.update(&req(abort)).expect("a requested crash");
+        assert!(out.crashed && out.error.is_none(), "{out:?}");
+        // The same death with no abort armed is not a crash.
+        assert!(sigabrt.update(&req(None)).is_err());
+
+        // A panic in the production update (libtest exit 101) is never the
+        // requested crash.
+        let panic = helper(
+            "panic.sh",
+            "echo \"thread 'x' panicked at boom\" >&2\nexit 101",
+        );
+        assert!(panic.update(&req(abort)).is_err(), "panic read as crash");
+        assert!(panic.update(&req(None)).is_err());
+
+        // libtest found no helper test: exit 0, no marker.
+        let missing = helper("missing.sh", "echo 'running 0 tests'\nexit 0");
+        assert!(
+            missing.update(&req(abort)).is_err(),
+            "missing helper read as crash"
+        );
+
+        // A reported result is always honoured.
+        let ok = helper("ok.sh", "echo '[sg1-trunk-update] result=ok'");
+        assert!(ok.update(&req(abort)).unwrap().completed());
+        let err = helper("err.sh", "echo '[sg1-trunk-update] result=err boom'");
+        let e = err.update(&req(None)).unwrap();
+        assert_eq!(e.error.as_deref(), Some("boom"));
     }
 
     #[test]

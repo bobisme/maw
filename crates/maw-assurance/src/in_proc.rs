@@ -444,6 +444,9 @@ struct TrunkTier {
     step_output: String,
     /// This step's (last) target update did not complete.
     step_crashed: bool,
+    /// This step's merge ran its own target update (or died at/before it) —
+    /// `false` for a modelled no-op merge (bn-3adck).
+    step_ran_update: bool,
     /// First replay-model mismatch of this step.
     step_mismatch: Option<ReplayMismatch>,
     /// First displacement found when judging this step's recovery.
@@ -510,6 +513,9 @@ pub struct DriveStats {
     pub replay_judgements: usize,
     /// Per-path verdicts of the replay reference model.
     pub replay_checks: usize,
+    /// End-of-drive recoveries of a target update the last merge's crash left
+    /// pending (bn-3adck; see `InProcDriver::drain_trunk`).
+    pub trunk_drains: usize,
 }
 
 impl DriveStats {
@@ -582,6 +588,7 @@ impl DriveStats {
         self.trunk_updates += other.trunk_updates;
         self.trunk_crashes += other.trunk_crashes;
         self.dirty_trunk_merges += other.dirty_trunk_merges;
+        self.trunk_drains += other.trunk_drains;
         self.displacement_checks += other.displacement_checks;
         self.replay_judgements += other.replay_judgements;
         self.replay_checks += other.replay_checks;
@@ -663,6 +670,7 @@ impl InProcDriver {
             pending: None,
             step_output: String::new(),
             step_crashed: false,
+            step_ran_update: false,
             step_mismatch: None,
             step_displaced: None,
             pending_len_before_recovery: 0,
@@ -784,6 +792,15 @@ impl InProcDriver {
                     };
                 }
             }
+        }
+        // bn-3adck: a target update the last merge's crash left pending is
+        // recovered and judged before the seed can count as clean.
+        if let Some(verdict) = self.drain_trunk() {
+            return DriveOutcome {
+                verdict,
+                steps_replayed,
+                stats: self.final_stats(),
+            };
         }
         // Final oracle check (always — catches plants at tail and is the
         // only check done in fast mode).
@@ -1192,34 +1209,12 @@ impl InProcDriver {
         let _ = into; // we only model `Target::Default`
         // bn-1h9ue: `maw ws merge` first recovers an interrupted merge —
         // here, the target update a crash left unfinished.
-        if let Some(t) = self.trunk.as_mut()
-            && t.recover(root, &mut self.stats)?
-        {
-            // The recovery is its own op as far as the user is concerned: its
-            // output reports (or claims) what IT did to the dirty trunk, before
-            // this merge's own update starts. Judge the displacement oracle on
-            // it now, so a later claim by this merge's update (about the
-            // post-recovery state) is not read against the pre-crash entries.
-            let recovering = Op::Merge {
-                srcs: srcs.to_vec(),
-                into: into.clone(),
-                destroy,
-            };
-            let before = t.displacement.judged();
-            let v = t
-                .displacement
-                .check_step(root, &recovering, &t.step_output, false);
-            self.stats.displacement_checks +=
-                usize::try_from(t.displacement.judged().saturating_sub(before))
-                    .unwrap_or(usize::MAX);
-            if t.step_displaced.is_none() {
-                t.step_displaced = v.into_iter().next();
-            }
-            if t.pending_len_before_recovery > 0 {
-                self.stats.dirty_trunk_merges += 1;
-            }
-            t.step_output.clear();
-        }
+        let recovering = Op::Merge {
+            srcs: srcs.to_vec(),
+            into: into.clone(),
+            destroy,
+        };
+        self.recover_trunk(root, &recovering)?;
         // The merge's effect: advance main + refs/manifold/epoch/current
         // to the last source's tip; bump the per-ws epoch refs of
         // non-sources to mark them stale; optionally destroy sources.
@@ -1280,6 +1275,84 @@ impl InProcDriver {
         // setup that a follow-up `Op::Destroy { ws }` (or a planted
         // `DanglingHeadRef` defect) will then turn into a B1 violation.
         Ok(())
+    }
+
+    /// Finish a target update a crash left pending, as the next `maw ws
+    /// merge`'s journal recovery does, and judge the displacement oracle on
+    /// the recovery's own output (`recovering` is the merge op that runs it).
+    /// A no-op when nothing is pending or the trunk tier is off.
+    fn recover_trunk(&mut self, root: &Path, recovering: &Op) -> std::io::Result<()> {
+        let Some(t) = self.trunk.as_mut() else {
+            return Ok(());
+        };
+        if !t.recover(root, &mut self.stats)? {
+            return Ok(());
+        }
+        // The recovery is its own op as far as the user is concerned: its
+        // output reports (or claims) what IT did to the dirty trunk, before
+        // this merge's own update starts. Judge the displacement oracle on
+        // it now, so a later claim by this merge's update (about the
+        // post-recovery state) is not read against the pre-crash entries.
+        let before = t.displacement.judged();
+        let v = t
+            .displacement
+            .check_step(root, recovering, &t.step_output, false);
+        self.stats.displacement_checks +=
+            usize::try_from(t.displacement.judged().saturating_sub(before)).unwrap_or(usize::MAX);
+        if t.step_displaced.is_none() {
+            t.step_displaced = v.into_iter().next();
+        }
+        if t.pending_len_before_recovery > 0 {
+            self.stats.dirty_trunk_merges += 1;
+        }
+        t.step_output.clear();
+        Ok(())
+    }
+
+    /// bn-3adck: end-of-drive drain. A crash in the plan's LAST merge left
+    /// its target update pending with no later merge to recover it, so its
+    /// deferred displacements and the recovery itself were never judged — a
+    /// seed counted clean on a replay nobody checked. Run the recovery the
+    /// user's next `maw ws merge` would run and judge it like any other.
+    /// `None` = nothing pending, or clean.
+    fn drain_trunk(&mut self) -> Option<StepVerdict> {
+        let root = self.repo.path().to_path_buf();
+        let t = self.trunk.as_mut()?;
+        t.pending.as_ref()?;
+        t.begin_step();
+        let recovering = Op::Merge {
+            srcs: Vec::new(),
+            into: Target::Default,
+            destroy: false,
+        };
+        if let Err(err) = self.recover_trunk(&root, &recovering) {
+            infra::raise_if_infra_io(&err, "in-proc trunk drain");
+            return Some(StepVerdict::HarnessError(HarnessErrorClass::new(
+                "trunk_drain",
+                err.to_string(),
+            )));
+        }
+        self.stats.trunk_drains += 1;
+        let t = self.trunk.as_mut()?;
+        // Same severity order as `check_trunk`: lost bytes, then a replay
+        // mismatch, then the recovery's silent displacement.
+        let lost = t.preservation.check(&root);
+        let mismatch = t.step_mismatch.take();
+        let displaced = t.step_displaced.take();
+        if lost.is_empty()
+            && let Some(m) = mismatch
+        {
+            return Some(StepVerdict::Trunk(TrunkClass::from_mismatch(&m)));
+        }
+        let first = lost.into_iter().next().or(displaced)?;
+        if matches!(first, EscapeViolation::GitError { .. }) {
+            infra::raise_if_infra_text(&first.to_string(), "trunk drain oracle");
+            return Some(StepVerdict::HarnessError(HarnessErrorClass::new(
+                "trunk_oracle",
+                first.to_string(),
+            )));
+        }
+        Some(StepVerdict::Trunk(TrunkClass::from_escape(&first)))
     }
 
     fn do_sync(&self, _root: &Path, _ws: &WsId) -> std::io::Result<()> {
@@ -1585,16 +1658,18 @@ impl InProcDriver {
         let root = self.repo.path().to_path_buf();
         let t = self.trunk.as_mut()?;
         let mismatch = t.step_mismatch.take();
-        if matches!(step.op, Op::Merge { .. })
-            && !t.step_crashed
-            && t.displacement.pending_len() > 0
-        {
+        // bn-3adck: only a merge whose target update actually ran (or died)
+        // this step is a merge as far as the trunk is concerned. A modelled
+        // no-op merge (no source tip) ran nothing — it neither displaces nor
+        // restores, and must not count as a dirty-trunk merge or a verdict.
+        let merged = matches!(step.op, Op::Merge { .. }) && t.step_ran_update;
+        if merged && !t.step_crashed && t.displacement.pending_len() > 0 {
             self.stats.dirty_trunk_merges += 1;
         }
         let before = t.displacement.judged();
         let displaced = t
             .displacement
-            .check_step(&root, &step.op, &t.step_output, t.step_crashed);
+            .check_after(&root, merged, &t.step_output, t.step_crashed);
         self.stats.displacement_checks +=
             usize::try_from(t.displacement.judged().saturating_sub(before)).unwrap_or(usize::MAX);
         let lost = t.preservation.check(&root);
@@ -1612,7 +1687,7 @@ impl InProcDriver {
             .or(recovery_displaced.as_ref())
             .or_else(|| displaced.first())
         else {
-            if matches!(step.op, Op::Merge { .. })
+            if merged
                 && t.pending.is_none()
                 && let Err(e) = t.settle_committed()
             {
@@ -1638,6 +1713,7 @@ impl TrunkTier {
     fn begin_step(&mut self) {
         self.step_output.clear();
         self.step_crashed = false;
+        self.step_ran_update = false;
         self.step_mismatch = None;
         self.step_displaced = None;
         self.pending_len_before_recovery = 0;
@@ -1865,6 +1941,7 @@ impl TrunkTier {
         fault: &FaultSpec,
         stats: &mut DriveStats,
     ) -> std::io::Result<()> {
+        self.step_ran_update = true;
         // The anchor is the epoch the default worktree was last updated to:
         // `prev_main` (every completed update ends there, and a pending one
         // was recovered at the start of this merge).
@@ -2661,6 +2738,7 @@ mod fail_closed_tests {
             displacement_checks: 2,
             replay_judgements: 1,
             replay_checks: 3,
+            trunk_drains: 0,
         };
         assert_eq!(ok.vacuity(), None);
         // bn-1h9ue: merged over a dirty trunk but judged no entry; judged an
@@ -3042,6 +3120,74 @@ mod trunk_tier_tests {
         assert_eq!(calls[2].epoch_before, calls[0].epoch_after);
         assert_eq!(out.stats.trunk_crashes, 1);
         assert_eq!(out.stats.replay_judgements, 2);
+    }
+
+    /// bn-3adck: a crash in the plan's LAST merge used to leave its target
+    /// update pending forever — no later merge recovered it, so neither the
+    /// recovery nor its deferred displacements were ever judged and the seed
+    /// counted clean. The end-of-drive drain runs that recovery and judges
+    /// it: a recovery that loses the dirty trunk must trip, in both modes.
+    #[test]
+    fn crash_in_last_merge_is_drained_and_judged() {
+        let crash = FaultSpec::Failpoint {
+            name: "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT".into(),
+            phase: "cleanup".into(),
+        };
+        let mut ops = vec![dirty("trunk/new-0.txt", "precious\n", EditKind::Write)];
+        ops.extend(merge_round(0, "one\n", crash.clone()));
+        for fast in [false, true] {
+            // Loses the dirty trunk (reset + clean, no pin) when it recovers.
+            let up = FakeUpdater::new(true, false);
+            let mut d = InProcDriver::with_trunk_updater(up.clone()).unwrap();
+            let p = plan(ops.clone());
+            let out = if fast { d.drive_fast(&p) } else { d.drive(&p) };
+            assert_eq!(
+                trunk_kind(&out.verdict),
+                Some("TrunkDirtyLost"),
+                "fast={fast}: {:?} {:?}",
+                out.verdict,
+                out.stats
+            );
+            let calls = up.calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 2, "crashed run + drain recovery: {calls:#?}");
+            assert_eq!(calls[1].maw_fp, None, "the drain runs unfaulted");
+            assert_eq!(out.stats.trunk_drains, 1);
+        }
+        // A well-behaved recovery drains clean and is judged.
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up).unwrap();
+        let out = d.drive(&plan(merge_round(0, "one\n", crash)));
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        assert_eq!(out.stats.trunk_drains, 1);
+        assert_eq!(out.stats.replay_judgements, 1, "{:?}", out.stats);
+    }
+
+    /// bn-3adck: a modelled no-op merge (its source has no tip) runs no
+    /// target update, so it is neither a dirty-trunk merge nor a verdict on
+    /// the dirty entries — the evidence counters must not claim otherwise.
+    #[test]
+    fn noop_merge_is_not_trunk_evidence() {
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up.clone()).unwrap();
+        let ops = vec![
+            dirty("trunk/new-0.txt", "precious\n", EditKind::Write),
+            (
+                Op::Merge {
+                    srcs: vec![ws(3)],
+                    into: Target::Default,
+                    destroy: false,
+                },
+                FaultSpec::None,
+            ),
+        ];
+        let out = d.drive(&plan(ops));
+        assert!(up.calls.lock().unwrap().is_empty(), "nothing to update");
+        assert_eq!(out.stats.dirty_trunk_merges, 0, "{:?}", out.stats);
+        assert_eq!(out.stats.displacement_checks, 0, "{:?}", out.stats);
     }
 
     /// A merge that dies before its target update (any non-target-update

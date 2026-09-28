@@ -382,7 +382,7 @@ fn evidence_summary(totals: &DriveStats, harness_errors: usize) -> String {
         "oracle_a_checks={} oracle_b_checks={} witnesses={} workspaces_observed={} \
          commits_observed={} trunk_writes={} trunk_updates={} trunk_crashes={} \
          dirty_trunk_merges={} displacement_checks={} replay_judgements={} replay_checks={} \
-         harness_errors={harness_errors}",
+         trunk_drains={} harness_errors={harness_errors}",
         totals.oracle_a_checks,
         totals.oracle_b_checks,
         totals.witnesses,
@@ -395,6 +395,7 @@ fn evidence_summary(totals: &DriveStats, harness_errors: usize) -> String {
         totals.displacement_checks,
         totals.replay_judgements,
         totals.replay_checks,
+        totals.trunk_drains,
     )
 }
 

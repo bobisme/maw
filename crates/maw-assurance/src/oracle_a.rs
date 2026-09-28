@@ -210,10 +210,16 @@ impl OracleA {
     ///
     /// A witness is released iff it is reachable from an eligible ref that gc
     /// actually deleted, is NOT reachable from the post-gc frontier, and is
-    /// NOT reachable from any INELIGIBLE recovery ref that gc deleted. The
-    /// last clause keeps the exception narrow: content gc dropped through a
-    /// ref it had no right to delete (a live workspace's pin, an unclaimed or
-    /// too-young pin) stays witnessed, so Oracle A still fires on it.
+    /// NOT reachable from any INELIGIBLE recovery ref that gc deleted — nor
+    /// from any other frontier root (a workspace ref, an extant workspace's
+    /// HEAD, `main`, …) that was in the previous step's frontier and is gone
+    /// or moved now (bn-3adck: only deleted RECOVERY refs used to count, so a
+    /// sweep that also dropped, say, a live workspace's `refs/manifold/ws/*`
+    /// whose content an eligible pin happened to share — a `maw ws recover
+    /// --to` copy — had that loss released). These clauses keep the exception
+    /// narrow: content gc dropped through a ref it had no right to delete (a
+    /// live workspace's pin, an unclaimed or too-young pin, any non-recovery
+    /// root) stays witnessed, so Oracle A still fires on it.
     ///
     /// Rationale: the user explicitly asked gc to drop those snapshots
     /// (`maw gc --help`: "remove old snapshots + their records";
@@ -247,6 +253,14 @@ impl OracleA {
         if elig.is_empty() {
             return Ok(0);
         }
+        // Every other frontier root the op removed or moved (the previous
+        // step's frontier vs. the post-gc one), except the eligible pins.
+        let post_frontier = compute_frontier(post_state);
+        for (name, oid) in &self.last_frontier {
+            if post_frontier.get(name) != Some(oid) && !eligible.contains_key(name) {
+                inelig.insert(oid.clone());
+            }
+        }
         let reach = |oids: &BTreeSet<String>| -> Result<HashSet<String>, AssuranceViolation> {
             let live: Vec<String> = existing_objects(&self.repo_root, oids)?
                 .into_iter()
@@ -255,7 +269,7 @@ impl OracleA {
         };
         let held = reach(&elig)?;
         let held_inelig = reach(&inelig)?;
-        let frontier: BTreeSet<String> = compute_frontier(post_state).into_values().collect();
+        let frontier: BTreeSet<String> = post_frontier.into_values().collect();
         let still = reach(&frontier)?;
         let to_release: Vec<String> = self
             .witnesses
@@ -1463,6 +1477,42 @@ mod tests {
             0
         );
         assert!(oracle.check_step(&s2, 2).unwrap().violation.is_some());
+    }
+
+    /// bn-3adck negative control: the sweep deletes an eligible pin AND a
+    /// non-recovery frontier ref (here a workspace ref) holding the same
+    /// content — e.g. a `maw ws recover --to` copy of the destroyed
+    /// workspace. Dropping the workspace ref was never within the sweep's
+    /// entitlement, so the content stays witnessed and Oracle A fires.
+    #[test]
+    fn sweep_that_also_drops_a_workspace_ref_still_trips_bn_3adck() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let pin = "refs/manifold/recovery/erin/2026-09-28T02-24-27Z";
+        let (mut oracle, blob, tip) = witnessed_then_pinned(root, "erin", &[pin]);
+        // A recovered copy of erin's work lives on under another workspace.
+        git(root, &["update-ref", "refs/manifold/ws/frank", &tip]);
+        let s_copy = make_state(root, &[]);
+        assert!(oracle.check_step(&s_copy, 2).unwrap().violation.is_none());
+        let pre = recovery_map(root);
+        let eligible = pre.clone();
+        // The sweep drops the eligible pin — and (bug) frank's ref too.
+        git(root, &["update-ref", "-d", pin]);
+        git(root, &["update-ref", "-d", "refs/manifold/ws/frank"]);
+        let s3 = make_state(root, &[]);
+        assert_eq!(
+            oracle
+                .release_swept_snapshots(&pre, &eligible, &s3)
+                .unwrap(),
+            0,
+            "a non-recovery root's loss must not be released"
+        );
+        let v = oracle
+            .check_step(&s3, 3)
+            .unwrap()
+            .violation
+            .expect("must fire");
+        assert!(format!("{v}").contains(&blob[..12]), "{v}");
     }
 
     /// Content still reachable elsewhere after the sweep is not released
