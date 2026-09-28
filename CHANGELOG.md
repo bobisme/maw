@@ -2,11 +2,29 @@
 
 All notable changes to maw.
 
-## Unreleased
+## v1.0.0-pre.18 (2026-09-28)
 
-**Recovery snapshots**
-- **`maw gc --recovery-snapshots` no longer deletes recovery pins of workspaces that still exist (bn-wxg28).** Previously it removed every `refs/manifold/recovery/*` ref older than the threshold, including the default workspace's dirty-trunk pins (`recovery/default/*`) and `materialize-*` pins of live workspaces. Such a pin can be the only copy of edits a merge or sync displaced. These pins are now kept and listed; the new `--include-live` flag includes them.
-- **Risky sweeps need `--force` (bn-wxg28).** A sweep that would drop anything with `--older-than 0`, a pin younger than 1 day, or a live workspace's pin deletes nothing without `--force`. It exits non-zero and lists each ref it would drop with its workspace and pin age, plus the exact preview (`--dry-run`) and `--force` commands. `--dry-run` shows the same list and says when `--force` is needed. The everyday sweep of old pins of destroyed workspaces needs no `--force`. **Scripts that ran `maw gc --recovery-snapshots --older-than 0` must add `--force`.**
+Eighteenth dogfood pre-release. It fixes data-loss bugs found by running the deterministic-simulation tests on the consolidated layout for the first time and by widening the SG1 soak to cover uncommitted trunk edits across merges. Several of these bugs shipped in pre.17 and earlier. **Upgrading is strongly recommended.** One behaviour change affects scripts: `maw gc --recovery-snapshots --older-than 0` now needs `--force`.
+
+**Data loss fixed**
+- **Replacing a tracked trunk directory with a symlink no longer wipes every uncommitted trunk edit (bn-1dlkd).** gix status aborted on the file-type change, so the merge's snapshot failed, its fallback captured nothing, and the forced checkout overwrote the worktree while `maw ws merge` printed `[OK]` and left no recovery ref. Status now falls back to `git status` when gix fails; the merge refuses to touch a worktree whose uncommitted state it could not capture completely (the journal is kept, so `maw ws merge --recover` finishes later); and the directory/symlink change is reported as a conflict with your version pinned.
+- **Checkout no longer deletes files through a symlink (bn-1dlkd).** Its stale-file cleanup followed symlinks, so it could delete files outside the tracked tree through a symlink you created, and it never removed a tracked symlink to a directory.
+- **FF-absorb no longer detaches the consolidated repo root (bn-1jfui).** When the merge then failed after the absorb, your next `git commit` in the root landed off `main`, and the next merge orphaned it.
+- **Untracked files with non-UTF-8 names are no longer deleted by a merge (bn-31ijd, found by the codex sweep).** Status silently skipped such paths. maw now refuses rather than omits: a merge stops with its journal kept, and `--recover` works after the file is renamed. Full non-UTF-8 support is tracked separately.
+- **Plain `maw gc` no longer deletes the default workspace's refs on the consolidated layout (bn-1m3lx).** It treated `refs/manifold/{head,epoch/ws,ws}/default` as dangling, which wiped the default workspace's op log (`maw undo` then reported nothing to undo) while `maw doctor` reported OK.
+
+**Correctness**
+- **A merged change that clears an executable bit (755 to 644) is applied (bn-2nnuz).** Checkout only ever added +x, so every checkout path — the trunk update after a merge, `ws sync`, sibling auto-rebase, advance and recover — left the file executable, and the next commit reverted the merged mode. The snapshot-failed fallback also keeps your own mode change.
+- Printed restore commands quote filenames (bn-31ijd).
+
+**Recovery snapshots (behaviour change)**
+- **`maw gc --recovery-snapshots` keeps pins of workspaces that still exist (bn-wxg28)**, including the default workspace's dirty-trunk pins; `--include-live` drops them too.
+- **Risky sweeps need `--force` (bn-wxg28).** With `--older-than 0`, a pin younger than a day, or a live workspace's pin, gc deletes nothing and lists each ref with its workspace, a LIVE marker and its age, plus the exact commands to inspect, preview (`--dry-run`) or rerun with `--force`. **Scripts that ran `--older-than 0` must add `--force`.**
+
+**Verification (the v1.0 gate)**
+- The production-tier deterministic-simulation tests now run on the consolidated layout (the default since pre.2) as well as legacy v2, with reachable prepare/validate failpoints and real SIGKILLs at commit sites (bn-1jfui).
+- The SG1 soak now drives a real trunk worktree through the production `update_default_workspace`, writes uncommitted trunk edits of every kind, and judges them with preservation, displacement and replay-faithfulness oracles (bn-1h9ue, bn-2zubk). A pre-release review of the harness fixed six ways a seed could pass unjudged or overstate coverage (bn-3adck); the remaining known blind spots are documented in `crates/maw-assurance/src/trunk.rs`. Oracle fixes for gc-drained snapshots and the destroy-record path (bn-m7kjy). The soak campaign restarts on this release's harness.
+- `just check` now runs the assurance-feature clippy lane that CI runs (bn-2zubk).
 
 ## v1.0.0-pre.17 (2026-09-27)
 
