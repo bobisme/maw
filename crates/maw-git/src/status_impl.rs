@@ -160,7 +160,7 @@ fn gix_status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
         if item_is_common_excluded(common.as_ref(), &item) {
             continue;
         }
-        if let Some(entry) = convert_status_item(&item) {
+        if let Some(entry) = convert_status_item(&item)? {
             entries.push(entry);
         }
     }
@@ -224,7 +224,7 @@ fn gix_status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitEr
                 if item_is_common_excluded(common.as_ref(), &iw) {
                     continue;
                 }
-                if let Some(entry) = convert_status_item(&iw) {
+                if let Some(entry) = convert_status_item(&iw)? {
                     acc.entry(entry.path).or_default().1 = Some(entry.status);
                 }
             }
@@ -239,12 +239,14 @@ fn gix_status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitEr
                     ..
                 } = &change
                 {
-                    if let Ok(src) = source_location.to_str() {
-                        acc.entry(src.to_owned()).or_default().0 = Some(FileStatus::Deleted);
-                    }
-                    if let Ok(dst) = location.to_str() {
-                        acc.entry(dst.to_owned()).or_default().0 = Some(FileStatus::Added);
-                    }
+                    let src = source_location
+                        .to_str()
+                        .map_err(|_| non_utf8_path_error(source_location))?;
+                    let dst = location
+                        .to_str()
+                        .map_err(|_| non_utf8_path_error(location))?;
+                    acc.entry(src.to_owned()).or_default().0 = Some(FileStatus::Deleted);
+                    acc.entry(dst.to_owned()).or_default().0 = Some(FileStatus::Added);
                     continue;
                 }
                 let status = match &change {
@@ -254,9 +256,8 @@ fn gix_status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitEr
                     gix::diff::index::ChangeRef::Rewrite { .. } => unreachable!("handled above"),
                 };
                 let (loc, ..) = change.fields();
-                if let Ok(path) = loc.to_str() {
-                    acc.entry(path.to_owned()).or_default().0 = Some(status);
-                }
+                let path = loc.to_str().map_err(|_| non_utf8_path_error(loc))?;
+                acc.entry(path.to_owned()).or_default().0 = Some(status);
             }
         }
     }
@@ -329,7 +330,7 @@ fn gix_status_tracked_only(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError>
         let item = item.map_err(|e| GitError::BackendError {
             message: e.to_string(),
         })?;
-        if let Some(entry) = convert_status_item(&item) {
+        if let Some(entry) = convert_status_item(&item)? {
             entries.push(entry);
         }
     }
@@ -453,9 +454,17 @@ fn stat_matches_by_content(
         .is_ok_and(|actual| actual == expected_oid)
 }
 
-fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<StatusEntry> {
-    let summary = item.summary()?;
-    let path = item.rela_path().to_str().ok()?.to_owned();
+fn convert_status_item(
+    item: &gix::status::index_worktree::Item,
+) -> Result<Option<StatusEntry>, GitError> {
+    let Some(summary) = item.summary() else {
+        return Ok(None);
+    };
+    let path = item
+        .rela_path()
+        .to_str()
+        .map_err(|_| non_utf8_path_error(item.rela_path()))?
+        .to_owned();
 
     let status = match summary {
         Summary::Added | Summary::IntentToAdd | Summary::Copied => FileStatus::Added,
@@ -464,7 +473,7 @@ fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<Statu
         Summary::Renamed => FileStatus::Renamed,
     };
 
-    Some(StatusEntry { path, status })
+    Ok(Some(StatusEntry { path, status }))
 }
 
 /// List untracked files (paths not in the index and not ignored).
@@ -507,10 +516,14 @@ fn gix_list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
         })?;
         if let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item
             && matches!(entry.status, gix::dir::entry::Status::Untracked)
-            && let Ok(path) = entry.rela_path.to_str()
-            && !common.as_ref().is_some_and(|c| c.is_excluded(path))
         {
-            paths.push(path.to_owned());
+            let path = entry
+                .rela_path
+                .to_str()
+                .map_err(|_| non_utf8_path_error(&entry.rela_path))?;
+            if !common.as_ref().is_some_and(|c| c.is_excluded(path)) {
+                paths.push(path.to_owned());
+            }
         }
     }
     Ok(paths)
@@ -642,7 +655,7 @@ fn parse_porcelain_z(stdout: &[u8], mode: CliStatusMode) -> Result<Vec<StatusEnt
 fn non_utf8_path_error(raw: &[u8]) -> GitError {
     GitError::BackendError {
         message: format!(
-            "git status fallback found a non-UTF-8 path ({}); refusing to report a partial status",
+            "git status found a non-UTF-8 path ({}); refusing to report a partial status",
             String::from_utf8_lossy(raw)
         ),
     }
@@ -1086,6 +1099,32 @@ mod tests_bn_1dlkd {
 
     use super::*;
     use crate::test_support::{commit_all, init_test_repo_with_commit};
+
+    #[test]
+    fn gix_status_rejects_non_utf8_paths_in_each_dirty_state() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (_dir, root, _) = init_test_repo_with_commit();
+        let path = root.join(std::ffi::OsStr::from_bytes(b"notes-\xff.txt"));
+        std::fs::write(&path, "notes\n").expect("write");
+        let repo = GixRepo::open(&root).expect("open");
+        assert!(status(&repo).is_err());
+        assert!(status_head_to_worktree(&repo).is_err());
+        assert!(list_untracked(&repo).is_err());
+
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["add", "-A"])
+            .output()
+            .expect("stage");
+        assert!(out.status.success());
+        assert!(status_head_to_worktree(&repo).is_err());
+
+        let _ = commit_all(&root, "track notes");
+        std::fs::write(&path, "edited notes\n").expect("edit");
+        assert!(status_tracked_only(&repo).is_err());
+        assert!(status_head_to_worktree(&repo).is_err());
+    }
 
     fn sorted(mut v: Vec<StatusEntry>) -> Vec<(String, FileStatus)> {
         v.sort_by(|a, b| a.path.cmp(&b.path));

@@ -8495,7 +8495,7 @@ fn verify_trunk_replay_fidelity(
                 eprintln!("  Inspect:  maw ws recover {ws_name}");
                 eprintln!(
                     "  Restore:  maw ws recover --ref {r} --restore-file {}",
-                    path.display()
+                    shell_quote_path(path)
                 );
                 if repaired {
                     // The repair already put the user's bytes back, so the

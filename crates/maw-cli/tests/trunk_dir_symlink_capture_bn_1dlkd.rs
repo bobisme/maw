@@ -225,6 +225,88 @@ fn dir_replaced_by_dangling_symlink_keeps_trunk_edits() {
     assert_preserved(root, &text);
 }
 
+/// A status API with UTF-8 paths must refuse an unrepresentable dirty name,
+/// rather than silently omit it from the snapshot and clean it away.
+#[test]
+fn non_utf8_untracked_file_refuses_merge_cleanup() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let path = root.join(std::ffi::OsStr::from_bytes(b"notes-\xff.txt"));
+    std::fs::write(&path, "irreplaceable notes\n").expect("write notes");
+    std::fs::write(root.join("other.txt"), "user edit\n").expect("dirty tracked file");
+
+    let out = merge_wa(root, None);
+    let text = combined(&out);
+    assert_eq!(
+        std::fs::read(&path).ok(),
+        Some(b"irreplaceable notes\n".to_vec()),
+        "non-UTF-8 user file was lost:\n{text}"
+    );
+    assert!(
+        !out.status.success(),
+        "incomplete capture must refuse:\n{text}"
+    );
+    assert!(
+        text.contains("non-UTF-8"),
+        "cause must be actionable:\n{text}"
+    );
+    assert!(root.join(".maw/manifold/merge-state.json").exists());
+
+    // Once the user gives the file a supported name, the kept journal can
+    // finish the update and preserve both edits.
+    std::fs::rename(&path, root.join("notes.txt")).expect("rename notes");
+    maw(root, &["ws", "merge", "--recover"]);
+    assert_eq!(read(&root.join("notes.txt")), "irreplaceable notes\n");
+    assert_eq!(read(&root.join("other.txt")), "user edit\n");
+    assert_eq!(read(&root.join("new.txt")), "new\n");
+}
+
+/// Fidelity repair must print a command that accepts the path as one shell
+/// argument, including spaces and shell metacharacters.
+#[cfg(feature = "failpoints")]
+#[test]
+fn fallback_fidelity_restore_command_quotes_filename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let filename = "other notes 'draft'.txt";
+    // Make this tracked on both sides so the force checkout erases the edit
+    // and the fidelity repair must put it back and print its recovery command.
+    git_quiet(root, &["mv", "other.txt", filename]);
+    git_quiet(root, &["commit", "-am", "rename notes"]);
+    maw(root, &["epoch", "sync"]);
+    maw(root, &["ws", "sync", "wa"]);
+    std::fs::write(root.join(filename), "user notes\n").expect("edit notes");
+    let out = merge_wa(
+        root,
+        Some("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:injected"),
+    );
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert_eq!(read(&root.join(filename)), "user notes\n", "{text}");
+    let command = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Restore:  "))
+        .expect("fidelity repair must print a restore command");
+    // Put the merged version back so the destination is clean. This lets us
+    // run the printed command verbatim without its optional --force hint.
+    std::fs::write(root.join(filename), "other\n").expect("restore merged bytes");
+    let restored = Command::new("sh")
+        .current_dir(root)
+        .args(["-c", &command.replacen("maw ", &format!("{MAW} "), 1)])
+        .output()
+        .expect("run printed command");
+    assert!(
+        restored.status.success(),
+        "printed command failed: {command}\n{}",
+        combined(&restored)
+    );
+    assert_eq!(read(&root.join(filename)), "user notes\n");
+}
+
 /// The symlink points at a real directory that holds an `inner.txt`: the
 /// capture must not read `d/inner.txt` through the link (it is a deletion
 /// on the user's side), and the link's target must be left alone.
