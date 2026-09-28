@@ -82,8 +82,27 @@
 //! Triage knobs (bn-m7kjy): `DST_SEEDS=5,10,26` replays exactly those seeds
 //! (the plan for a seed is prefix-stable, so a lower `DST_STEPS` shrinks it);
 //! `DST_DEBUG_DIR=<dir>` appends every op, its maw output and the post-op ref
-//! set to `<dir>/seed-<n>.log` and copies each seed's final repo to
-//! `<dir>/repo-<n>` for forensics.
+//! set to `<dir>/seed-<layout>-<n>.log` and copies each seed's final repo to
+//! `<dir>/repo-<layout>-<n>` for forensics.
+//!
+//! # Layouts (bn-1jfui)
+//!
+//! Every tier runs on BOTH repository layouts ([`manifold_common::Layout`]):
+//! the consolidated layout `maw init` creates today (repo root = default
+//! workspace on `main`, `.maw/workspaces/`, `.maw/manifold/`) is the default
+//! test name, and a `_legacy_v2` twin keeps the bare-root `ws/` + `.manifold/`
+//! layout covered. The regression plans run on both. Running on consolidated
+//! first exposed that the oracles' workspace discovery only walked `ws/`
+//! (Oracle A saw zero witnesses — caught by the liveness guard) and a real
+//! FF-absorb bug (the root was left detached, orphaning the user's next trunk
+//! commit), now pinned by the `RootStaysAttached` check.
+//!
+//! Other bn-1jfui knobs: odd seeds configure a passing `[merge.validation]`
+//! so VALIDATE-phase failpoints are live; the faulted tier biases dirty-trunk
+//! merges towards a crash in the target update
+//! (`DST_DIRTY_TRUNK_CRASH_PCT`, default 60; faults only, ops unchanged) and
+//! prints per-site `armed/fired` counts. `DST_ALLOW_NO_DEFERRAL=1` relaxes the
+//! deferred-displacement liveness guard for tiny shrink budgets.
 //!
 //! bn-286g: `DST_TRACES=48 DST_STEPS=48` surfaced the SAME conflict-as-data
 //! gap in the later-added `SiblingRefFaithfulness` escape oracle (seeds
@@ -94,7 +113,7 @@
 mod manifold_common;
 
 #[cfg(feature = "assurance")]
-use manifold_common::TestRepo;
+use manifold_common::{Layout, TestRepo};
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle::capture_state as capture_oracle_state;
 #[cfg(feature = "assurance")]
@@ -118,6 +137,20 @@ fn env_count(var: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// bn-1jfui: configure a `[merge.validation]` command that always passes, in
+/// the layout's manifold `config.toml`.
+#[cfg(feature = "assurance")]
+fn configure_passing_validation(repo: &TestRepo) {
+    use std::io::Write as _;
+    let path = repo.manifold_dir().join("config.toml");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    f.write_all(b"\n[merge.validation]\ncommand = \"true\"\n")
+        .expect("append validation config");
 }
 
 /// Build (once per test process) and locate a `--features failpoints` `maw`
@@ -244,6 +277,14 @@ struct Liveness {
     /// bn-2zubk: displacements left by a crashed op and deferred to the
     /// recovering merge.
     displacements_deferred: u64,
+    /// bn-1jfui: seeds whose repo was configured with a (trivially passing)
+    /// `[merge.validation]` command, so VALIDATE-phase failpoints are live.
+    validation_seeds: u64,
+    /// bn-1jfui: per failpoint site, `(armed, fired)`. An armed site FIRED
+    /// when the op did not exit 0 or its output names the site. A site that
+    /// is armed but never fires is unreachable from the op it was attached
+    /// to (e.g. `FP_CLEANUP_AFTER_CAPTURE` on a merge without `--destroy`).
+    fault_sites: std::collections::BTreeMap<String, (u64, u64)>,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -266,9 +307,10 @@ const fn op_name(op: &Op) -> &'static str {
 }
 
 /// bn-m7kjy triage hook: with `DST_DEBUG_DIR` set, append the op header, its
-/// maw output and the post-op ref set to `<dir>/seed-<seed>.log`. Best-effort.
+/// maw output and the post-op ref set to `<dir>/seed-<layout>-<seed>.log`.
+/// Best-effort.
 #[cfg(feature = "assurance")]
-fn debug_log_step(root: &std::path::Path, seed: u64, header: &str, output: &str) {
+fn debug_log_step(root: &std::path::Path, tag: &str, seed: u64, header: &str, output: &str) {
     let Ok(dir) = std::env::var("DST_DEBUG_DIR") else {
         return;
     };
@@ -283,7 +325,7 @@ fn debug_log_step(root: &std::path::Path, seed: u64, header: &str, output: &str)
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(std::path::Path::new(&dir).join(format!("seed-{seed}.log")))
+        .open(std::path::Path::new(&dir).join(format!("seed-{tag}-{seed}.log")))
     {
         let _ = std::io::Write::write_all(&mut f, entry.as_bytes());
     }
@@ -738,6 +780,14 @@ fn same_length_stale_bytes(original: &str, nonce: u64) -> String {
 /// condition for FF-absorb (`reconcile_epoch_with_branch`).
 ///
 /// Returns `true` (a real commit landed) for liveness accounting.
+///
+/// bn-1jfui: in the CONSOLIDATED layout the root is the default workspace and
+/// is checked out ON `main`, so moving `refs/heads/main` under it with plumbing
+/// would leave the root's index + worktree silently describing a REVERT of the
+/// new commit — a state no user action produces. There the faithful escape is
+/// what a user actually does: `git commit` in the root, of exactly these paths
+/// (`--only`, so any uncommitted dirty-trunk bytes on OTHER paths stay
+/// uncommitted). Either way `main` ends ahead of the epoch with maw unaware.
 #[cfg(feature = "assurance")]
 fn out_of_maw_commit(
     repo: &TestRepo,
@@ -745,6 +795,10 @@ fn out_of_maw_commit(
     msg: &str,
 ) -> bool {
     use std::process::Command;
+
+    if repo.layout() == Layout::Consolidated {
+        return trunk_git_commit(repo, files, msg);
+    }
 
     let root = repo.root();
     let git = |args: &[&str]| -> std::process::Output {
@@ -822,6 +876,42 @@ fn out_of_maw_commit(
     }
     let out = git(&["update-ref", "refs/heads/main", &commit]);
     out.status.success()
+}
+
+/// bn-1jfui: the consolidated-layout out-of-maw trunk commit — a plain
+/// `git commit --only -- <paths>` in the root (= default workspace, on `main`).
+#[cfg(feature = "assurance")]
+fn trunk_git_commit(
+    repo: &TestRepo,
+    files: &[maw::assurance::scenario::FileEdit],
+    msg: &str,
+) -> bool {
+    let root = repo.default_workspace();
+    let before = manifold_common::git_raw(&root, &["rev-parse", "refs/heads/main"]);
+    let mut paths: Vec<&str> = Vec::new();
+    for fe in files {
+        let path = root.join(&fe.path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&path, &fe.content).is_err() {
+            return false;
+        }
+        paths.push(fe.path.as_str());
+    }
+    if paths.is_empty() {
+        return false;
+    }
+    let mut add = vec!["add", "--"];
+    add.extend(&paths);
+    if !manifold_common::git_raw(&root, &add).status.success() {
+        return false;
+    }
+    let mut commit = vec!["commit", "--no-verify", "-m", msg, "--only", "--"];
+    commit.extend(&paths);
+    let ok = manifold_common::git_raw(&root, &commit).status.success();
+    let after = manifold_common::git_raw(&root, &["rev-parse", "refs/heads/main"]);
+    ok && before.stdout != after.stdout
 }
 
 /// Execute one planned op while ARMING a `FaultSpec::Failpoint` as
@@ -940,6 +1030,7 @@ const fn merge_target(into: &Target) -> &'static str {
 #[allow(clippy::too_many_lines)]
 fn run_seed(
     seed: u64,
+    layout: Layout,
     n_steps: usize,
     inject_faults: bool,
     corrupt_weight: u32,
@@ -947,8 +1038,16 @@ fn run_seed(
 ) -> Vec<String> {
     let mut violations = Vec::new();
 
-    let repo = TestRepo::new();
+    let repo = TestRepo::with_layout(layout);
     repo.seed_files(&[("base.txt", "base content\n")]);
+    // bn-1jfui: VALIDATE only runs when `[merge.validation]` is configured, so
+    // without this every generator fault aimed at the validate phase was
+    // inert. Odd seeds get a command that always passes: merge outcomes are
+    // unchanged, but the VALIDATE phase (and its failpoints) is live.
+    if seed % 2 == 1 {
+        configure_passing_validation(&repo);
+        live.validation_seeds += 1;
+    }
 
     // Enable the Advance op (weight 8, comparable to the other op weights) so
     // this tier exercises the production `ws advance` HEAD-movement path. The
@@ -972,14 +1071,18 @@ fn run_seed(
     // workspace is excluded from `CleanMaterialization` until an op rewrites
     // its worktree wholesale, so a high corruption rate would quietly erode the
     // bn-p3m9 gate's coverage.
-    let plan = generate_plan(
-        seed,
-        &ConditionProfile::default()
-            .with_advance_weight(8)
-            .with_escape_weight(escape_weight)
-            .with_corrupt_weight(corrupt_weight),
-        n_steps,
-    );
+    // bn-1jfui: the faulted tier biases dirty-trunk merges towards a crash in
+    // the target update, so a displacement across a crash actually occurs.
+    // Faults only: the ops are byte-identical to the unfaulted tier's.
+    let mut profile = ConditionProfile::default()
+        .with_advance_weight(8)
+        .with_escape_weight(escape_weight)
+        .with_corrupt_weight(corrupt_weight);
+    if inject_faults {
+        let pct = u32::try_from(env_count("DST_DIRTY_TRUNK_CRASH_PCT", 60)).unwrap_or(60);
+        profile = profile.with_dirty_trunk_crash_pct(pct);
+    }
+    let plan = generate_plan(seed, &profile, n_steps);
 
     // Oracle A is incremental: ONE instance per seed/repo, fed every step.
     let mut oracle_a = OracleA::new(repo.root());
@@ -1022,7 +1125,11 @@ fn run_seed(
             // likely crash mid-flight. That is EXPECTED — the oracle judges the
             // post-crash state below.
             live.faults_injected += 1;
-            let (out, crashed, _text) = execute_op_faulted(&repo, op, fp_name);
+            let (out, crashed, text) = execute_op_faulted(&repo, op, fp_name);
+            let fired = crashed || text.contains(fp_name);
+            let entry = live.fault_sites.entry(fp_name.to_owned()).or_default();
+            entry.0 += 1;
+            entry.1 += u64::from(fired);
             (out, crashed)
         } else {
             (execute_op(&repo, op), false)
@@ -1030,6 +1137,7 @@ fn run_seed(
         let succeeded = outcome.succeeded;
         debug_log_step(
             repo.root(),
+            layout.label(),
             seed,
             &format!("step={i} op={op:?} fault={fault_name:?} ok={succeeded} crashed={crashed}"),
             &outcome.output,
@@ -1150,6 +1258,11 @@ fn run_seed(
                 "seed={seed} step={i} op={name} RecordRefCoherence: {v}"
             ));
         }
+        if let Some(v) = root_attachment_violation(&repo) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} RootStaysAttached: {v}"
+            ));
+        }
         // --- bn-3gba clean-materialization oracle ---
         // After every create/sync/absorb/auto-rebase (in fact after EVERY op),
         // every live, expected-clean, non-default workspace's worktree must
@@ -1173,7 +1286,7 @@ fn run_seed(
     }
 
     if let Ok(dir) = std::env::var("DST_DEBUG_DIR") {
-        let dst = std::path::Path::new(&dir).join(format!("repo-{seed}"));
+        let dst = std::path::Path::new(&dir).join(format!("repo-{}-{seed}", layout.label()));
         let _ = std::process::Command::new("cp")
             .arg("-a")
             .arg(repo.root())
@@ -1226,6 +1339,7 @@ fn run_seed(
 #[cfg(feature = "assurance")]
 fn drive_tier(
     label: &str,
+    layout: Layout,
     count: u64,
     n_steps: usize,
     inject_faults: bool,
@@ -1242,7 +1356,14 @@ fn drive_tier(
         |s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect(),
     );
     for seed in seeds {
-        let v = run_seed(seed, n_steps, inject_faults, corrupt_weight, &mut live);
+        let v = run_seed(
+            seed,
+            layout,
+            n_steps,
+            inject_faults,
+            corrupt_weight,
+            &mut live,
+        );
         if !v.is_empty() {
             failing_seeds.push(seed);
             for line in &v {
@@ -1271,7 +1392,7 @@ fn drive_tier(
         1.0
     };
     eprintln!(
-        "{label}: ran {} op-steps across {count} seeds ({} steps/seed); \
+        "{label} [{}]: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
          {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx), {} witnesses released by explicit snapshot sweeps (bn-m7kjy); \
@@ -1279,9 +1400,11 @@ fn drive_tier(
          {} masked corruptions ({} effective), {} masked-removal judgements \
          (overwrite or destroy, bn-2k9e), {} masks re-materialized (bn-22jy); \
          {} displacement judgements ({} reported, {} deferred across a crash, \
-         bn-2zubk); \
+         bn-2zubk); {} seeds with validation configured; \
+         fault sites (armed/fired): {}; \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
+        layout.label(),
         live.ops_attempted,
         n_steps,
         live.ops_succeeded,
@@ -1302,6 +1425,12 @@ fn drive_tier(
         live.displacement_judgements,
         live.displacements_reported,
         live.displacements_deferred,
+        live.validation_seeds,
+        live.fault_sites
+            .iter()
+            .map(|(k, (a, f))| format!("{}={a}/{f}", k.trim_start_matches("FP_")))
+            .collect::<Vec<_>>()
+            .join(" "),
         all_violations.len(),
         n_trials,
         wilson_ub,
@@ -1379,9 +1508,28 @@ fn assert_shared_liveness(live: &Liveness, count: u64, n_steps: usize) {
 
 /// Production-code DST tier: drive real `maw` over seed-generated op streams
 /// and assert the SG1 oracles hold after every op.
+///
+/// bn-1jfui: runs on the CONSOLIDATED layout — what `maw init` creates today
+/// (repo root = default workspace, `.maw/workspaces/`, `.maw/manifold/`).
+/// The legacy v2 layout keeps its own run in
+/// [`dst_production_tier_no_work_lost_legacy_v2`].
 #[cfg(feature = "assurance")]
 #[test]
 fn dst_production_tier_no_work_lost() {
+    unfaulted_tier("dst-production-tier", Layout::Consolidated);
+}
+
+/// [`dst_production_tier_no_work_lost`] on the legacy v2 layout (bare root +
+/// `ws/default/` + `.manifold/`), so repos that predate the consolidated
+/// layout stay covered.
+#[cfg(feature = "assurance")]
+#[test]
+fn dst_production_tier_no_work_lost_legacy_v2() {
+    unfaulted_tier("dst-production-tier", Layout::LegacyV2);
+}
+
+#[cfg(feature = "assurance")]
+fn unfaulted_tier(label: &str, layout: Layout) {
     let count = env_count("DST_TRACES", 16);
     // Default 24 steps/seed: long enough that a healthy fraction of seeds reach
     // Edit -> Commit -> Merge and actually advance the epoch (so the
@@ -1390,8 +1538,7 @@ fn dst_production_tier_no_work_lost() {
     // both knobs via DST_TRACES / DST_STEPS.
     let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
 
-    let (live, all_violations, failing_seeds) =
-        drive_tier("dst-production-tier", count, n_steps, false, 0);
+    let (live, all_violations, failing_seeds) = drive_tier(label, layout, count, n_steps, false, 0);
 
     assert_shared_liveness(&live, count, n_steps);
 
@@ -1410,7 +1557,8 @@ fn dst_production_tier_no_work_lost() {
 
     assert!(
         all_violations.is_empty(),
-        "Oracle violations across {} failing seed(s) {:?}:\n{}",
+        "[{}] Oracle violations across {} failing seed(s) {:?}:\n{}",
+        layout.label(),
         failing_seeds.len(),
         failing_seeds,
         all_violations.join("\n"),
@@ -1441,10 +1589,26 @@ fn dst_production_tier_no_work_lost() {
 /// `epoch_after` into the merge-state journal BEFORE the ref-advancing CAS, so
 /// the journal is coherent at every post-build crash point. This test now
 /// PASSES; it remains `#[ignore]` solely for its weight (see above).
+///
+/// bn-1jfui: runs on the CONSOLIDATED layout (the `maw init` default); the
+/// legacy v2 layout keeps [`dst_production_tier_survives_faults_legacy_v2`].
 #[cfg(feature = "assurance")]
 #[test]
 #[ignore = "heavyweight: builds a --features failpoints maw binary and runs every faulted op as a separate crashing process. Run via just sg1-production-tier-faults"]
 fn dst_production_tier_survives_faults() {
+    faulted_tier("dst-production-tier-faults", Layout::Consolidated);
+}
+
+/// [`dst_production_tier_survives_faults`] on the legacy v2 layout.
+#[cfg(feature = "assurance")]
+#[test]
+#[ignore = "heavyweight: builds a --features failpoints maw binary and runs every faulted op as a separate crashing process. Run via just sg1-production-tier-faults"]
+fn dst_production_tier_survives_faults_legacy_v2() {
+    faulted_tier("dst-production-tier-faults", Layout::LegacyV2);
+}
+
+#[cfg(feature = "assurance")]
+fn faulted_tier(label: &str, layout: Layout) {
     let count = env_count("DST_TRACES", 16);
     // Same 24-step window as the unfaulted `dst_production_tier_no_work_lost`
     // test, which is GREEN at this budget. Pinning the same window means any
@@ -1455,8 +1619,7 @@ fn dst_production_tier_survives_faults() {
     // campaigns raise both knobs via DST_TRACES / DST_STEPS.
     let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
 
-    let (live, all_violations, failing_seeds) =
-        drive_tier("dst-production-tier-faults", count, n_steps, true, 0);
+    let (live, all_violations, failing_seeds) = drive_tier(label, layout, count, n_steps, true, 0);
 
     assert_shared_liveness(&live, count, n_steps);
 
@@ -1474,13 +1637,32 @@ fn dst_production_tier_survives_faults() {
          tier that injects no faults is vacuously green.",
     );
 
+    // bn-1jfui non-vacuity: with the dirty-trunk crash bias on, at least one
+    // crash must land while the user's uncommitted trunk bytes are off disk,
+    // so the recovering merge's restore is actually judged. (Before the bias
+    // this was 0 in every random faulted run; only the targeted bn-1sbjf
+    // test reached it.) Budget-dependent: when shrinking with a small
+    // DST_TRACES / DST_SEEDS set, raise DST_DIRTY_TRUNK_CRASH_PCT or set
+    // DST_ALLOW_NO_DEFERRAL=1.
+    if std::env::var_os("DST_ALLOW_NO_DEFERRAL").is_none() {
+        assert!(
+            live.displacements_deferred > 0,
+            "LIVENESS FAILURE (bn-1jfui): no displacement of dirty trunk bytes \
+             was deferred across a crash ({count} seeds x {n_steps} steps, \
+             faults per site: {:?}). The dirty-trunk crash bias never landed \
+             in the target-update window.",
+            live.fault_sites,
+        );
+    }
+
     // A violation here under faults = a candidate REAL maw recovery/work-loss
     // bug. Leave it RED with full detail; do NOT suppress.
     assert!(
         all_violations.is_empty(),
-        "ORACLE VIOLATION UNDER FAULT INJECTION across {} failing seed(s) {:?} \
+        "[{}] ORACLE VIOLATION UNDER FAULT INJECTION across {} failing seed(s) {:?} \
          — candidate REAL maw recovery/work-loss bug (post-crash state failed \
          the oracle). DO NOT suppress; investigate the seed + op + fault:\n{}",
+        layout.label(),
         failing_seeds.len(),
         failing_seeds,
         all_violations.join("\n"),
@@ -1498,9 +1680,20 @@ fn dst_production_tier_survives_faults() {
 /// This is the acceptance harness for the escape-path oracles: it drives the
 /// REAL maw binary over the exact incident shapes, so reverting a fix makes the
 /// corresponding oracle turn red here within the plan's bounded step count.
+///
+/// bn-1jfui: drives the plan on BOTH layouts (consolidated first); each
+/// violation line is prefixed with the layout it fired on.
 #[cfg(feature = "assurance")]
 fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<String> {
-    drive_regression_plan_reported(plan).violations
+    Layout::ALL
+        .into_iter()
+        .flat_map(|layout| {
+            drive_regression_plan_reported(plan, layout)
+                .violations
+                .into_iter()
+                .map(move |v| format!("[{}] {v}", layout.label()))
+        })
+        .collect()
 }
 
 /// What [`drive_regression_plan_reported`] observed while driving a regression
@@ -1534,8 +1727,11 @@ struct RegressionRun {
 
 /// [`drive_regression_plan`] plus the non-vacuity evidence.
 #[cfg(feature = "assurance")]
-fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan) -> RegressionRun {
-    let repo = TestRepo::new();
+fn drive_regression_plan_reported(
+    plan: &maw::assurance::scenario::ScenarioPlan,
+    layout: Layout,
+) -> RegressionRun {
+    let repo = TestRepo::with_layout(layout);
     repo.seed_files(&[("base.txt", "base content\n")]);
     drive_plan_on(&repo, plan, false, &mut |_, _| Vec::new()).0
 }
@@ -1669,6 +1865,9 @@ fn drive_plan_on(
         for v in check_record_ref_coherence(repo.root()) {
             violations.push(format!("step={i} op={name} RecordRefCoherence: {v}"));
         }
+        if let Some(v) = root_attachment_violation(repo) {
+            violations.push(format!("step={i} op={name} RootStaysAttached: {v}"));
+        }
         for v in masked_oracle.check_step(repo.root(), op) {
             violations.push(format!("step={i} op={name} MaskedStalePreservation: {v}"));
         }
@@ -1691,6 +1890,31 @@ fn drive_plan_on(
         },
         faulted_steps,
     )
+}
+
+/// bn-1jfui: `RootStaysAttached` — in the CONSOLIDATED layout the repo root is
+/// the default workspace and `maw init` checks it out ON the configured branch
+/// (`main`). maw must never leave it detached once an op has finished (no
+/// merge journal, no target-checkout intent on disk): a detached root silently
+/// sends the user's next trunk `git commit` off the branch, and the next merge
+/// orphans it (the FF-absorb bug this oracle was added for). No-op for the
+/// legacy v2 layout, whose `ws/default/` is detached by design.
+#[cfg(feature = "assurance")]
+fn root_attachment_violation(repo: &TestRepo) -> Option<String> {
+    if repo.layout() != Layout::Consolidated
+        || merge_journal_path(repo.root()).exists()
+        || checkout_intent_path(repo.root(), "default").exists()
+    {
+        return None;
+    }
+    let out = manifold_common::git_raw(repo.root(), &["symbolic-ref", "-q", "HEAD"]);
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (head != "refs/heads/main").then(|| {
+        format!(
+            "consolidated root is not on refs/heads/main after the op (HEAD: {})",
+            if head.is_empty() { "detached" } else { &head }
+        )
+    })
 }
 
 /// The merge journal (`merge-state.json`) path for `root`'s layout.
@@ -1822,28 +2046,31 @@ fn bn_rah2_regression_is_green() {
 #[test]
 fn bn_286g_conflicted_sibling_replay_is_green() {
     let plan = maw::assurance::scenario::bn_286g_regression_plan();
-    let run = drive_regression_plan_reported(&plan);
+    for layout in Layout::ALL {
+        let tag = layout.label();
+        let run = drive_regression_plan_reported(&plan, layout);
 
-    assert!(
-        run.conflicted_workspaces.iter().any(|w| w == "ws-sibling"),
-        "NON-VACUITY (bn-286g): the sibling auto-rebase did not produce a \
+        assert!(
+            run.conflicted_workspaces.iter().any(|w| w == "ws-sibling"),
+            "[{tag}] NON-VACUITY (bn-286g): the sibling auto-rebase did not produce a \
          conflict sidecar, so the conflict-as-data path was never exercised. \
          Workspaces with sidecars: {:?}",
-        run.conflicted_workspaces,
-    );
-    assert!(
-        run.saw_conflict_marker_blob,
-        "NON-VACUITY (bn-286g): no conflict-marker blob exists in the repo, \
+            run.conflicted_workspaces,
+        );
+        assert!(
+            run.saw_conflict_marker_blob,
+            "[{tag}] NON-VACUITY (bn-286g): no conflict-marker blob exists in the repo, \
          so no committed blob was ever rewritten — the oracle carveout under \
          test was never reached."
-    );
+        );
 
-    assert!(
-        run.violations.is_empty(),
-        "bn-286g: a conflicting sibling replay is conflict-as-data, not work \
+        assert!(
+            run.violations.is_empty(),
+            "[{tag}] bn-286g: a conflicting sibling replay is conflict-as-data, not work \
          loss; oracle violations:\n{}",
-        run.violations.join("\n"),
-    );
+            run.violations.join("\n"),
+        );
+    }
 }
 
 /// The bn-1xmk regression scenario (dirty tracked trunk file clobbered by
@@ -1872,35 +2099,38 @@ fn bn_1xmk_regression_is_green() {
 #[test]
 fn bn_m7kjy_explicit_snapshot_drain_is_green() {
     let plan = maw::assurance::scenario::bn_m7kjy_regression_plan();
-    let run = drive_regression_plan_reported(&plan);
-    assert!(
-        run.violations.is_empty(),
-        "bn-m7kjy: explicit snapshot drain must be clean; oracle violations:\n{}",
-        run.violations.join("\n"),
-    );
-    assert!(
-        run.gc_released_witnesses >= 1,
-        "non-vacuity: the sweep must have released ws-a's destroy-snapshot content"
-    );
-    // bn-wxg28: `--older-than 0 --force` sweeps every pin of a workspace
-    // that no longer exists, and keeps the live `default` workspace's
-    // dirty-trunk pin (no --include-live).
-    assert!(
-        run.recovery_refs
-            .iter()
-            .all(|r| r.starts_with("refs/manifold/recovery/default/")),
-        "non-vacuity: --older-than 0 --force must have swept every destroyed \
-         workspace's recovery ref: {:?}",
-        run.recovery_refs
-    );
-    assert!(
-        run.recovery_refs
-            .iter()
-            .any(|r| r.starts_with("refs/manifold/recovery/default/")),
-        "bn-wxg28: the live default workspace's dirty-trunk pin must survive \
-         gc without --include-live: {:?}",
-        run.recovery_refs
-    );
+    for layout in Layout::ALL {
+        let tag = layout.label();
+        let run = drive_regression_plan_reported(&plan, layout);
+        assert!(
+            run.violations.is_empty(),
+            "[{tag}] bn-m7kjy: explicit snapshot drain must be clean; oracle violations:\n{}",
+            run.violations.join("\n"),
+        );
+        assert!(
+            run.gc_released_witnesses >= 1,
+            "[{tag}] non-vacuity: the sweep must have released ws-a's destroy-snapshot content"
+        );
+        // bn-wxg28: `--older-than 0 --force` sweeps every pin of a workspace
+        // that no longer exists, and keeps the live `default` workspace's
+        // dirty-trunk pin (no --include-live).
+        assert!(
+            run.recovery_refs
+                .iter()
+                .all(|r| r.starts_with("refs/manifold/recovery/default/")),
+            "[{tag}] non-vacuity: --older-than 0 --force must have swept every destroyed \
+             workspace's recovery ref: {:?}",
+            run.recovery_refs
+        );
+        assert!(
+            run.recovery_refs
+                .iter()
+                .any(|r| r.starts_with("refs/manifold/recovery/default/")),
+            "[{tag}] bn-wxg28: the live default workspace's dirty-trunk pin must survive \
+             gc without --include-live: {:?}",
+            run.recovery_refs
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,44 +2155,47 @@ fn bn_m7kjy_explicit_snapshot_drain_is_green() {
 #[test]
 fn bn_154g_masked_stale_pin_is_green() {
     let plan = maw::assurance::scenario::bn_154g_regression_plan();
-    let run = drive_regression_plan_reported(&plan);
+    for layout in Layout::ALL {
+        let tag = layout.label();
+        let run = drive_regression_plan_reported(&plan, layout);
 
-    assert!(
-        run.masked_paths
-            .iter()
-            .any(|(ws, path)| ws == "ws-victim" && path == "base.txt"),
-        "NON-VACUITY (bn-22jy): the stat-cache mask never took, so `maw ws sync` \
+        assert!(
+            run.masked_paths
+                .iter()
+                .any(|(ws, path)| ws == "ws-victim" && path == "base.txt"),
+            "[{tag}] NON-VACUITY (bn-22jy): the stat-cache mask never took, so `maw ws sync` \
          would have refused on visible dirt and the bn-154g guard was never \
          armed. Masked paths: {:?}",
-        run.masked_paths,
-    );
-    assert_eq!(
-        run.masked_overwrites_judged, 1,
-        "NON-VACUITY (bn-154g): expected the sync's fast-forward checkout to \
+            run.masked_paths,
+        );
+        assert_eq!(
+            run.masked_overwrites_judged, 1,
+            "[{tag}] NON-VACUITY (bn-154g): expected the sync's fast-forward checkout to \
          destroy the masked bytes exactly once; the oracle judged {} overwrite(s). \
          0 means the sync never overwrote the poisoned path (did it refuse?), so \
          the preserve-before-overwrite site was never reached.",
-        run.masked_overwrites_judged,
-    );
+            run.masked_overwrites_judged,
+        );
 
-    assert!(
-        run.violations.is_empty(),
-        "bn-154g: the epoch-bump fast-forward must pin the hidden divergence \
+        assert!(
+            run.violations.is_empty(),
+            "[{tag}] bn-154g: the epoch-bump fast-forward must pin the hidden divergence \
          before its checkout flattens it; oracle violations:\n{}",
-        run.violations.join("\n"),
-    );
+            run.violations.join("\n"),
+        );
 
-    // The EXACT bn-154g observable, not merely "recoverable somewhere":
-    // `preserve_divergence_before_overwrite` pins to
-    // `refs/manifold/recovery/<ws>/materialize-<ts>`.
-    assert!(
-        run.recovery_refs
-            .iter()
-            .any(|r| r.starts_with("refs/manifold/recovery/ws-victim/materialize-")),
-        "bn-154g: expected a `refs/manifold/recovery/ws-victim/materialize-*` pin \
+        // The EXACT bn-154g observable, not merely "recoverable somewhere":
+        // `preserve_divergence_before_overwrite` pins to
+        // `refs/manifold/recovery/<ws>/materialize-<ts>`.
+        assert!(
+            run.recovery_refs
+                .iter()
+                .any(|r| r.starts_with("refs/manifold/recovery/ws-victim/materialize-")),
+            "[{tag}] bn-154g: expected a `refs/manifold/recovery/ws-victim/materialize-*` pin \
          from preserve_divergence_before_overwrite; recovery refs present: {:?}",
-        run.recovery_refs,
-    );
+            run.recovery_refs,
+        );
+    }
 }
 
 /// The corruption-enabled production tier: a modest budget over seed-generated
@@ -1979,15 +2212,31 @@ fn bn_154g_masked_stale_pin_is_green() {
 /// (default 10 — high relative to the core op weights, because a corruption is
 /// only interesting when a LATER op overwrites it, and short plans need the
 /// density).
+///
+/// bn-1jfui: consolidated layout; the legacy v2 run is
+/// [`dst_production_tier_masked_stale_corruption_legacy_v2`].
 #[cfg(feature = "assurance")]
 #[test]
 fn dst_production_tier_masked_stale_corruption() {
+    masked_stale_tier(Layout::Consolidated);
+}
+
+/// [`dst_production_tier_masked_stale_corruption`] on the legacy v2 layout.
+#[cfg(feature = "assurance")]
+#[test]
+fn dst_production_tier_masked_stale_corruption_legacy_v2() {
+    masked_stale_tier(Layout::LegacyV2);
+}
+
+#[cfg(feature = "assurance")]
+fn masked_stale_tier(layout: Layout) {
     let count = env_count("DST_TRACES", 8);
     let n_steps = usize::try_from(env_count("DST_STEPS", 16)).expect("DST_STEPS fits usize");
     let corrupt_weight = u32::try_from(env_count("DST_CORRUPT_WEIGHT", 10)).unwrap_or(10);
 
     let (live, violations, failing_seeds) = drive_tier(
         "dst-production-tier-masked-stale",
+        layout,
         count,
         n_steps,
         false,
@@ -2014,7 +2263,8 @@ fn dst_production_tier_masked_stale_corruption() {
 
     assert!(
         violations.is_empty(),
-        "bn-22jy corruption tier: {} oracle violation(s) across seeds {:?}:\n{}",
+        "[{}] bn-22jy corruption tier: {} oracle violation(s) across seeds {:?}:\n{}",
+        layout.label(),
         violations.len(),
         failing_seeds,
         violations.join("\n"),
@@ -2133,49 +2383,52 @@ fn bn_1sbjf_crash_after_default_checkout_is_recovered() {
         .into_iter()
         .next()
         .expect("tracked dirty write");
-    let repo = TestRepo::new();
-    repo.seed_files(&[("base.txt", "base content\n")]);
+    for layout in Layout::ALL {
+        let tag = layout.label();
+        let repo = TestRepo::with_layout(layout);
+        repo.seed_files(&[("base.txt", "base content\n")]);
 
-    let mut in_window: Option<(bool, bool)> = None;
-    let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
-        if i == 8 {
-            let ws = repo.default_workspace();
-            let merged_on_disk = ws.join("ws-a").join("merged.txt").is_file();
-            let user_edit_on_disk =
-                std::fs::read_to_string(ws.join(&tracked_path)).is_ok_and(|c| c == tracked_dirty);
-            in_window = Some((merged_on_disk, user_edit_on_disk));
-        }
-        Vec::new()
-    });
+        let mut in_window: Option<(bool, bool)> = None;
+        let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
+            if i == 8 {
+                let ws = repo.default_workspace();
+                let merged_on_disk = ws.join("ws-a").join("merged.txt").is_file();
+                let user_edit_on_disk = std::fs::read_to_string(ws.join(&tracked_path))
+                    .is_ok_and(|c| c == tracked_dirty);
+                in_window = Some((merged_on_disk, user_edit_on_disk));
+            }
+            Vec::new()
+        });
 
-    assert_eq!(faulted.len(), 1, "exactly one faulted step");
-    let f = &faulted[0];
-    let ctx = format!(
-        "faulted step {} ({}), exit ok={}\n{}",
-        f.index, f.spec, f.succeeded, f.output
-    );
-    assert_eq!(f.spec, "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort", "{ctx}");
-    assert!(!f.succeeded, "NON-VACUITY: the merge must crash\n{ctx}");
-    assert!(
-        f.journal_after,
-        "NON-VACUITY: the crash must leave the merge journal\n{ctx}"
-    );
-    assert!(
-        f.checkout_intent_after,
-        "NON-VACUITY: the crash must land after the checkout intent was written\n{ctx}"
-    );
-    assert_eq!(
-        in_window,
-        Some((true, false)),
-        "NON-VACUITY: before recovery the target must hold the merged tree \
+        assert_eq!(faulted.len(), 1, "exactly one faulted step");
+        let f = &faulted[0];
+        let ctx = format!(
+            "[{tag}] faulted step {} ({}), exit ok={}\n{}",
+            f.index, f.spec, f.succeeded, f.output
+        );
+        assert_eq!(f.spec, "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort", "{ctx}");
+        assert!(!f.succeeded, "NON-VACUITY: the merge must crash\n{ctx}");
+        assert!(
+            f.journal_after,
+            "NON-VACUITY: the crash must leave the merge journal\n{ctx}"
+        );
+        assert!(
+            f.checkout_intent_after,
+            "NON-VACUITY: the crash must land after the checkout intent was written\n{ctx}"
+        );
+        assert_eq!(
+            in_window,
+            Some((true, false)),
+            "NON-VACUITY: before recovery the target must hold the merged tree \
          (ws-a/merged.txt) with the user's edit only in the snapshot\n{ctx}"
-    );
-    assert!(
-        run.violations.is_empty(),
-        "bn-1sbjf: oracle violations after a crash at FP_CLEANUP_AFTER_DEFAULT_CHECKOUT:\n{}\n{ctx}",
-        run.violations.join("\n"),
-    );
-    assert_bn_1sbjf_target_state(&repo, &plan, &[], &ctx);
+        );
+        assert!(
+            run.violations.is_empty(),
+            "bn-1sbjf: oracle violations after a crash at FP_CLEANUP_AFTER_DEFAULT_CHECKOUT:\n{}\n{ctx}",
+            run.violations.join("\n"),
+        );
+        assert_bn_1sbjf_target_state(&repo, &plan, &[], &ctx);
+    }
 }
 
 /// bn-1sbjf / bn-3jqfk: the DST harness injects `error` at
@@ -2193,80 +2446,83 @@ fn bn_1sbjf_failed_snapshot_fallback_keeps_trunk_edits_and_symlink() {
         "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
     );
     let untracked = maw::assurance::scenario::BN_1SBJF_DIRTY_UNTRACKED_PATH;
-    let repo = TestRepo::new();
-    repo.seed_files(&[("base.txt", "base content\n")]);
-    // A tracked symlink in the epoch the workspaces are created from.
-    std::os::unix::fs::symlink("base.txt", repo.default_workspace().join("link"))
-        .expect("seed symlink");
-    repo.advance_epoch("chore: seed tracked symlink (bn-1sbjf)");
-    let pins_before = recovery_ref_names(repo.root());
+    for layout in Layout::ALL {
+        let tag = layout.label();
+        let repo = TestRepo::with_layout(layout);
+        repo.seed_files(&[("base.txt", "base content\n")]);
+        // A tracked symlink in the epoch the workspaces are created from.
+        std::os::unix::fs::symlink("base.txt", repo.default_workspace().join("link"))
+            .expect("seed symlink");
+        repo.advance_epoch("chore: seed tracked symlink (bn-1sbjf)");
+        let pins_before = recovery_ref_names(repo.root());
 
-    let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
-        if i == 7 {
-            // Retarget the tracked link right before the faulted merge.
-            let link = repo.default_workspace().join("link");
-            std::fs::remove_file(&link).expect("rm link");
-            std::os::unix::fs::symlink(untracked, &link).expect("retarget link");
-            // bn-2zubk: the retargeted link is uncommitted trunk content the
-            // strict displacement oracle must see come back.
-            return vec![("link".to_owned(), untracked.to_owned())];
-        }
-        Vec::new()
-    });
+        let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
+            if i == 7 {
+                // Retarget the tracked link right before the faulted merge.
+                let link = repo.default_workspace().join("link");
+                std::fs::remove_file(&link).expect("rm link");
+                std::os::unix::fs::symlink(untracked, &link).expect("retarget link");
+                // bn-2zubk: the retargeted link is uncommitted trunk content the
+                // strict displacement oracle must see come back.
+                return vec![("link".to_owned(), untracked.to_owned())];
+            }
+            Vec::new()
+        });
 
-    assert_eq!(faulted.len(), 1, "exactly one faulted step");
-    let f = &faulted[0];
-    let ctx = format!(
-        "faulted step {} ({}), exit ok={}\n{}",
-        f.index, f.spec, f.succeeded, f.output
-    );
-    assert_eq!(
-        f.spec, "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected",
-        "{ctx}"
-    );
-    assert!(
-        f.succeeded,
-        "the snapshot-failed fallback is handled: the merge must succeed\n{ctx}"
-    );
-    assert!(
-        f.output.contains("snapshot_working_copy failed"),
-        "NON-VACUITY: the injected error must force the fallback path\n{ctx}"
-    );
-    assert!(!f.journal_after, "the handled merge must finish\n{ctx}");
-    assert!(
-        run.violations.is_empty(),
-        "bn-1sbjf: oracle violations after the snapshot-failed fallback:\n{}\n{ctx}",
-        run.violations.join("\n"),
-    );
+        assert_eq!(faulted.len(), 1, "exactly one faulted step");
+        let f = &faulted[0];
+        let ctx = format!(
+            "[{tag}] faulted step {} ({}), exit ok={}\n{}",
+            f.index, f.spec, f.succeeded, f.output
+        );
+        assert_eq!(
+            f.spec, "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected",
+            "{ctx}"
+        );
+        assert!(
+            f.succeeded,
+            "the snapshot-failed fallback is handled: the merge must succeed\n{ctx}"
+        );
+        assert!(
+            f.output.contains("snapshot_working_copy failed"),
+            "NON-VACUITY: the injected error must force the fallback path\n{ctx}"
+        );
+        assert!(!f.journal_after, "the handled merge must finish\n{ctx}");
+        assert!(
+            run.violations.is_empty(),
+            "bn-1sbjf: oracle violations after the snapshot-failed fallback:\n{}\n{ctx}",
+            run.violations.join("\n"),
+        );
 
-    let link = repo.default_workspace().join("link");
-    assert!(
-        std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
-        "bn-3jqfk: the user's symlink must be back on disk AS a symlink\n{ctx}"
-    );
-    assert_eq!(
-        std::fs::read_link(&link).ok(),
-        Some(std::path::PathBuf::from(untracked)),
-        "bn-3jqfk: the user's symlink retarget was lost\n{ctx}"
-    );
-    // The fallback's recovery pin records the link as a symlink.
-    let new_pins: Vec<String> = recovery_ref_names(repo.root())
-        .into_iter()
-        .filter(|r| !pins_before.contains(r))
-        .collect();
-    let pinned_as_link = new_pins.iter().any(|r| {
-        let entry = manifold_common::git_ok(repo.root(), &["ls-tree", r, "link"]);
-        entry.starts_with("120000 ")
-            && entry.split_whitespace().nth(2).is_some_and(|oid| {
-                manifold_common::git_ok(repo.root(), &["cat-file", "blob", oid]) == untracked
-            })
-    });
-    assert!(
-        pinned_as_link,
-        "bn-3jqfk: no new recovery pin records `link` as a symlink to {untracked}: \
+        let link = repo.default_workspace().join("link");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "bn-3jqfk: the user's symlink must be back on disk AS a symlink\n{ctx}"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).ok(),
+            Some(std::path::PathBuf::from(untracked)),
+            "bn-3jqfk: the user's symlink retarget was lost\n{ctx}"
+        );
+        // The fallback's recovery pin records the link as a symlink.
+        let new_pins: Vec<String> = recovery_ref_names(repo.root())
+            .into_iter()
+            .filter(|r| !pins_before.contains(r))
+            .collect();
+        let pinned_as_link = new_pins.iter().any(|r| {
+            let entry = manifold_common::git_ok(repo.root(), &["ls-tree", r, "link"]);
+            entry.starts_with("120000 ")
+                && entry.split_whitespace().nth(2).is_some_and(|oid| {
+                    manifold_common::git_ok(repo.root(), &["cat-file", "blob", oid]) == untracked
+                })
+        });
+        assert!(
+            pinned_as_link,
+            "bn-3jqfk: no new recovery pin records `link` as a symlink to {untracked}: \
          {new_pins:?}\n{ctx}"
-    );
-    assert_bn_1sbjf_target_state(&repo, &plan, &["link"], &ctx);
+        );
+        assert_bn_1sbjf_target_state(&repo, &plan, &["link"], &ctx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2378,4 +2634,81 @@ fn bn_2zubk_phase_targeted_fault_fires_in_consolidated_repo() {
         Some("bn-2zubk work\n"),
         "the recovered merge must land the workspace's work on the trunk"
     );
+}
+
+/// bn-1jfui (item 4): `SubprocFault` delivers a REAL `SIGKILL` exactly AT each
+/// commit-phase and prepare-phase site, on both layouts.
+///
+/// It used to export `error` for a `SigKill` plan and poll the journal every
+/// 20 ms for the phase: at the commit-phase sites the child exits and clears
+/// its journal within milliseconds (a timing miss), and at
+/// `FP_PREPARE_BEFORE_STATE_WRITE` no journal exists yet, so the kill could
+/// not be delivered at all. Now the site blocks (`hang:<marker>`) and the
+/// marker is the trigger. Each run must be `Recovered` (never
+/// `PhaseNotObserved`), leave no journal, and land the workspace's work on the
+/// trunk. Making `maw_fp_spec_blocking` fall back to the `error` bridge turns
+/// this RED.
+#[cfg(feature = "assurance")]
+#[test]
+#[ignore = "heavyweight: builds a --features failpoints maw binary. Run via just sg1-production-tier-faults"]
+fn bn_1jfui_subproc_sigkill_lands_at_commit_and_prepare_sites() {
+    use maw::assurance::fault::{CrashKind, FaultPlan, SubprocFault, SubprocOutcome};
+
+    let bin = failpoints_maw_bin();
+    let sites = [
+        ("prepare", "FP_PREPARE_BEFORE_STATE_WRITE"),
+        ("prepare", "FP_PREPARE_AFTER_STATE_WRITE"),
+        ("commit", "FP_COMMIT_BEFORE_BRANCH_CAS"),
+        ("commit", "FP_COMMIT_BETWEEN_CAS_OPS"),
+        ("commit", "FP_COMMIT_AFTER_EPOCH_CAS"),
+    ];
+    for layout in Layout::ALL {
+        for (phase, site) in sites {
+            let tag = format!("[{}] {site}", layout.label());
+            let repo = TestRepo::with_layout(layout);
+            repo.seed_files(&[("base.txt", "base content\n")]);
+            repo.maw_ok(&["ws", "create", "victim", "--from", "main"]);
+            repo.add_file("victim", "victim.txt", "victim work (bn-1jfui)\n");
+            repo.maw_ok(&["exec", "victim", "--", "git", "add", "-A"]);
+            repo.maw_ok(&["exec", "victim", "--", "git", "commit", "-m", "victim"]);
+
+            let plan = FaultPlan {
+                seed: 0,
+                phase: phase.to_owned(),
+                failpoint: site.to_owned(),
+                kind: CrashKind::SigKill,
+            };
+            let merge_args: Vec<String> = [
+                "ws",
+                "merge",
+                "victim",
+                "--into",
+                "default",
+                "--message",
+                "bn-1jfui",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+            let outcome = SubprocFault::new(plan, bin, repo.root(), merge_args)
+                .with_observe_timeout(std::time::Duration::from_secs(30))
+                .run()
+                .expect("spawn faulted merge");
+            match &outcome {
+                SubprocOutcome::Recovered { killed_phase, .. } => {
+                    assert_eq!(killed_phase, phase, "{tag}: {outcome:?}");
+                }
+                other => panic!("{tag}: expected a kill AT the site + recovery, got {other:?}"),
+            }
+            assert!(
+                !merge_journal_path(repo.root()).exists(),
+                "{tag}: recovery left the merge journal behind"
+            );
+            assert_eq!(
+                repo.read_file("default", "victim.txt").as_deref(),
+                Some("victim work (bn-1jfui)\n"),
+                "{tag}: the recovered merge must land the workspace's work on the trunk"
+            );
+        }
+    }
 }

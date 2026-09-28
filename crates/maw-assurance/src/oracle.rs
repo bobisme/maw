@@ -279,37 +279,28 @@ fn read_all_refs(root: &Path) -> Result<HashMap<String, String>, AssuranceViolat
     Ok(refs)
 }
 
-/// Discover workspaces by looking at `ws/` subdirectories and HEAD refs.
+/// Discover workspaces by looking at the layout's workspace directories
+/// ([`crate::workspace_dirs`]) and HEAD refs.
 fn discover_workspaces(
     root: &Path,
     refs: &HashMap<String, String>,
 ) -> HashMap<String, WorkspaceStatus> {
     let mut workspaces = HashMap::new();
-    let ws_dir = root.join("ws");
 
-    if ws_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&ws_dir)
-    {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let ws_path = entry.path();
+    // bn-1jfui: layout-aware (`<root>/ws/*` in v2; the root plus
+    // `<root>/.maw/workspaces/*` in the consolidated layout).
+    for (name, ws_path) in crate::workspace_dirs(root) {
+        let head_oid = read_workspace_head(&ws_path);
+        let is_dirty = check_workspace_dirty(&ws_path);
 
-            if !ws_path.is_dir() {
-                continue;
-            }
-
-            let head_oid = read_workspace_head(&ws_path);
-            let is_dirty = check_workspace_dirty(&ws_path);
-
-            workspaces.insert(
-                name,
-                WorkspaceStatus {
-                    head_oid: head_oid.unwrap_or_default(),
-                    is_dirty,
-                    exists: true,
-                },
-            );
-        }
+        workspaces.insert(
+            name,
+            WorkspaceStatus {
+                head_oid: head_oid.unwrap_or_default(),
+                is_dirty,
+                exists: true,
+            },
+        );
     }
 
     // Also check for workspace head refs that might exist without a directory

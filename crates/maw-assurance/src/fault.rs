@@ -200,6 +200,23 @@ impl FaultPlan {
         };
         format!("{}={action}", self.failpoint)
     }
+
+    /// The `MAW_FP` spec [`SubprocFault`] arms (bn-1jfui).
+    ///
+    /// A `SigKill` plan arms `hang:<marker>`: the child writes `marker` when
+    /// it reaches the site and then BLOCKS there, so the harness kills it
+    /// exactly at the boundary. The `error` bridge of [`Self::maw_fp_spec`]
+    /// raced a 20 ms journal poll: at the commit-phase sites the child exits
+    /// and clears its journal within milliseconds, and at
+    /// `FP_PREPARE_BEFORE_STATE_WRITE` there is no journal to observe at all.
+    /// Other kinds keep [`Self::maw_fp_spec`].
+    #[must_use]
+    pub fn maw_fp_spec_blocking(&self, marker: &Path) -> String {
+        match self.kind {
+            CrashKind::SigKill => format!("{}=hang:{}", self.failpoint, marker.display()),
+            CrashKind::Unwind | CrashKind::Panic => self.maw_fp_spec(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,12 +361,12 @@ impl SubprocFault {
     ///
     /// Returns the child (its pid is the process-group id, since `setsid`
     /// makes it the group leader). `stdout`/`stderr` are discarded.
-    fn spawn_detached_merge(&self) -> std::io::Result<Child> {
+    fn spawn_detached_merge(&self, marker: &Path) -> std::io::Result<Child> {
         let mut cmd = Command::new("setsid");
         cmd.arg(&self.maw_bin)
             .args(&self.merge_args)
             .current_dir(&self.repo_root)
-            .env("MAW_FP", self.plan.maw_fp_spec())
+            .env("MAW_FP", self.plan.maw_fp_spec_blocking(marker))
             // SP1 determinism contract: pin git dates so any commit OID the
             // crashed merge produced is a pure function of the seed.
             .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00 +0000")
@@ -370,22 +387,51 @@ impl SubprocFault {
     /// `maw` binary path is wrong) — every *expected* crash path is encoded in
     /// [`SubprocOutcome`], not in `Err`.
     pub fn run(&self) -> std::io::Result<SubprocOutcome> {
-        let mut child = self.spawn_detached_merge()?;
+        // bn-1jfui: a SigKill plan blocks the child AT the site
+        // (`hang:<marker>`); the marker's appearance is the kill trigger.
+        let marker = std::env::temp_dir().join(format!(
+            "maw-fp-reached-{}-{}-{}",
+            std::process::id(),
+            self.plan.seed,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let blocking = self.plan.kind == CrashKind::SigKill;
+        let mut child = self.spawn_detached_merge(&marker)?;
         let pgid = child.id();
 
-        // ---- poll the state-file logical clock, then a REAL group kill ----
+        // ---- wait for the kill trigger, then a REAL group kill ----
+        // SigKill: the child reached the site (marker written) and is blocked
+        // there. Other kinds: poll the state-file logical clock for the phase.
         let deadline = Instant::now() + self.observe_timeout;
         let mut killed_phase: Option<String> = None;
         while Instant::now() < deadline {
-            if let Some(phase) = self.read_phase()
-                && phase == self.plan.phase
-            {
+            let triggered = if blocking {
+                marker.exists()
+            } else {
+                self.read_phase()
+                    .is_some_and(|phase| phase == self.plan.phase)
+            };
+            if triggered {
                 kill_process_group(pgid);
-                killed_phase = Some(phase);
+                killed_phase = Some(self.plan.phase.clone());
+                break;
+            }
+            // A child that exited on its own (the site was never reached, or
+            // an unwind/panic kind finished) can no longer trigger.
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        if blocking && killed_phase.is_none() {
+            // Never reached the site: do not leave a child that might still
+            // hang there (it would sit out `HANG_LIMIT` and then abort).
+            kill_process_group(pgid);
+        }
+        let _ = std::fs::remove_file(&marker);
 
         // SP1 Finding B: reap our own child *unconditionally* and *before*
         // any recovery attempt. A SIGKILLed child is a zombie until waited
@@ -562,6 +608,30 @@ mod tests {
                 (k, a) => panic!("seed {seed}: kind {k:?} -> wrong action {a:?}"),
             }
         }
+    }
+
+    /// bn-1jfui: the spec `SubprocFault` arms blocks a SigKill plan AT its
+    /// site (`hang:<marker>`) and leaves every other kind unchanged.
+    #[test]
+    fn blocking_spec_hangs_sigkill_plans_only() {
+        let marker = Path::new("/tmp/maw-fp-reached-test");
+        let mut saw_sigkill = false;
+        for seed in 0..200_u64 {
+            let p = FaultPlan::from_seed(seed);
+            let parsed = failpoints::parse_env_spec(&p.maw_fp_spec_blocking(marker));
+            assert_eq!(parsed.len(), 1, "seed {seed} spec must be one pair");
+            assert_eq!(parsed[0].0, p.failpoint);
+            match (p.kind, &parsed[0].1) {
+                (CrashKind::SigKill, FailpointAction::Hang(m)) => {
+                    saw_sigkill = true;
+                    assert_eq!(m, marker);
+                }
+                (CrashKind::Panic, FailpointAction::Panic(_))
+                | (CrashKind::Unwind, FailpointAction::Error(_)) => {}
+                (k, a) => panic!("seed {seed}: kind {k:?} -> wrong action {a:?}"),
+            }
+        }
+        assert!(saw_sigkill, "no SigKill plan in 200 seeds");
     }
 
     /// All phases are reachable across the seed space (the generator is not

@@ -418,7 +418,9 @@ pub fn check_first(repo_root: &Path) -> Result<(), OracleBViolation> {
 /// SP2 §3.1 calls out explicitly).
 fn live_merge_source_names(repo_root: &Path) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
-    let state_path = MergeStateFile::default_path(&repo_root.join(".manifold"));
+    // bn-1jfui: layout-aware — `<root>/.manifold` never exists in a
+    // consolidated repo, so this guard used to see no live merge there.
+    let state_path = MergeStateFile::default_path(&manifold_dir_path(repo_root));
     let Ok(state) = MergeStateFile::read(&state_path) else {
         return names;
     };

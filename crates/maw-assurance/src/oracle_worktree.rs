@@ -290,8 +290,14 @@ impl CleanMaterialization {
             // A recovered worktree materializes snapshot bytes, which differ
             // from HEAD by design.
             Op::Recover { to, .. } => self.mark_dirty(&to.0),
+            // bn-1jfui: only a workspace that is actually gone drops its
+            // expectation. A refused destroy (non-force on unmerged work, or a
+            // source of an unrecovered merge journal) leaves it on disk with
+            // whatever it had, dirt included.
             Op::Destroy { ws, .. } => {
-                self.expected_dirty.remove(&ws.0);
+                if !live.contains(&ws.0) {
+                    self.expected_dirty.remove(&ws.0);
+                }
             }
             Op::Merge { .. } => {
                 if !succeeded {
@@ -782,6 +788,35 @@ mod tests {
         assert!(
             !o.expected_dirty().contains("a"),
             "the driver commits with `git add -A`, so a successful commit ends clean"
+        );
+    }
+
+    /// bn-1jfui: a REFUSED destroy leaves the workspace on disk with its
+    /// uncommitted edits (faulted DST seed 3: `destroy --force` refused
+    /// because the workspace was a source of an unrecovered merge journal),
+    /// so its dirty bit must survive. Only a workspace that is actually gone
+    /// drops its expectation.
+    #[test]
+    fn refused_destroy_keeps_dirty_bit() {
+        let mut o = CleanMaterialization::new();
+        let edit = Op::EditFiles {
+            ws: ws("a"),
+            files: Vec::new(),
+        };
+        let destroy = Op::Destroy {
+            ws: ws("a"),
+            force: true,
+        };
+        o.absorb(&edit, false, &live(&["a"]));
+        o.absorb(&destroy, false, &live(&["a"]));
+        assert!(
+            o.expected_dirty().contains("a"),
+            "a refused destroy left the dirty workspace in place"
+        );
+        o.absorb(&destroy, true, &live(&[]));
+        assert!(
+            !o.expected_dirty().contains("a"),
+            "a destroyed workspace carries no expectation"
         );
     }
 

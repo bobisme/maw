@@ -5234,7 +5234,19 @@ fn sync_target_worktree_to_epoch(
     // native `set_head` (atomic write + reflog) replaces the raw
     // `std::fs::write(HEAD)` — no production HEAD movement outside guarded
     // native primitives (bn-8flz).
-    if let Err(e) = ws_repo.set_head_detached(target_git) {
+    //
+    // bn-1jfui: when HEAD already resolves to the target, leave it alone. In
+    // the consolidated layout the target is the repo root checked out ON the
+    // branch being absorbed, so HEAD reads `target` through the branch ref.
+    // Rewriting it as a raw OID detached the root; if the merge then failed
+    // after the absorb, the user's next trunk `git commit` landed off the
+    // branch and the next merge orphaned it.
+    if head_oid == Some(target_git) {
+        tracing::debug!(
+            workspace = %target_workspace_name,
+            "FF absorb (target): HEAD already at the absorbed tip; not rewriting it"
+        );
+    } else if let Err(e) = ws_repo.set_head_detached(target_git) {
         tracing::warn!(
             workspace = %target_workspace_name,
             error = %e,

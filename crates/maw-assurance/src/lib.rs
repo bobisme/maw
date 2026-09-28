@@ -148,6 +148,46 @@ pub fn merge_state_path(repo_root: &std::path::Path) -> std::path::PathBuf {
     manifold_dir.join("merge-state.json")
 }
 
+/// bn-1jfui: every workspace directory on disk, as `(name, path)`, for
+/// either layout — the same presence-based rule as [`merge_state_path`].
+///
+/// - Legacy v2: each directory under `<root>/ws/` (the default workspace is
+///   `ws/default/`).
+/// - Consolidated (`<root>/.maw/manifold/` exists): `default` is the repo
+///   root itself, plus each directory under `<root>/.maw/workspaces/`.
+///
+/// The harness readers (`oracle::capture_state`, `trace`) used to walk only
+/// `<root>/ws/`, so on a consolidated repo — what `maw init` creates — they
+/// saw NO workspace at all and Oracle A accumulated zero witnesses.
+/// Unordered; callers that need an order sort it.
+#[must_use]
+pub fn workspace_dirs(repo_root: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let consolidated = repo_root.join(".maw").join("manifold").is_dir();
+    let mut out = Vec::new();
+    let ws_dir = if consolidated {
+        out.push(("default".to_owned(), repo_root.to_path_buf()));
+        repo_root.join(".maw").join("workspaces")
+    } else {
+        repo_root.join("ws")
+    };
+    if let Ok(entries) = std::fs::read_dir(&ws_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // A consolidated repo's reserved name is the root; an impostor
+            // `.maw/workspaces/default/` directory is not the default.
+            if consolidated && name == "default" {
+                continue;
+            }
+            out.push((name, path));
+        }
+    }
+    out
+}
+
 // Re-export key types for convenience.
 pub use oracle::{
     AssuranceState, AssuranceViolation, WorkspaceStatus, capture_state, check_all,

@@ -235,6 +235,12 @@ sg1-production-tier:
 # `maw` (separate target dir), so the recipe needs no `--features failpoints`.
 # Knobs: DST_TRACES (seeds, default 16), DST_STEPS (steps/seed, default 24 —
 # the same green window as sg1-production-tier, so any violation is fault-induced).
+# bn-1jfui: the tier runs on BOTH layouts (consolidated = the `maw init`
+# default, plus legacy v2); odd seeds configure a passing [merge.validation]
+# so VALIDATE-phase sites are live; DST_DIRTY_TRUNK_CRASH_PCT (default 60)
+# biases dirty-trunk merges towards a crash in the target update (faults only,
+# ops unchanged). bn_1jfui_* proves SubprocFault's real SIGKILL lands AT the
+# commit- and prepare-phase sites.
 # bn-1sbjf: handled error-style sites (FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT) are
 # armed with `=error` instead of `=abort`; the targeted bn_1sbjf_* plans prove
 # the harness reaches both target-update windows and judges their recovery.
@@ -245,6 +251,8 @@ sg1-production-tier-faults:
     bn_1sbjf_ -- --ignored --nocapture
   cargo test --features assurance --test dst_production_tier \
     bn_2zubk_ -- --ignored --nocapture
+  cargo test --features assurance --test dst_production_tier \
+    bn_1jfui_ -- --ignored --nocapture
 
 # sg1-per-commit: bounded SG1 sweep — corpus replay + small random
 # budget (default 64 seeds × 32 steps). Hard wall-clock cap 8 min.

@@ -74,6 +74,51 @@ pub struct TestRepo {
     root: PathBuf,
     /// The epoch₀ commit OID.
     epoch0: String,
+    /// Which on-disk layout this repo uses (bn-1jfui).
+    layout: Layout,
+}
+
+/// The on-disk repository layout a [`TestRepo`] is built in (bn-1jfui).
+///
+/// Every helper that names a path (`workspace_path`, `default_workspace`,
+/// `list_workspaces`, the conflict sidecar) resolves it for the repo's own
+/// layout, so a test written against the helpers runs unchanged on both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// Legacy v2: bare root (`core.bare = true`), default workspace at
+    /// `ws/default/`, agent workspaces at `ws/<name>/`, metadata in
+    /// `.manifold/`. What [`TestRepo::new`] builds.
+    LegacyV2,
+    /// Consolidated (what `maw init` creates today): the repo root is a normal
+    /// `.git/` checkout on `main` and IS the default workspace; agent
+    /// workspaces live at `.maw/workspaces/<name>/`, metadata in
+    /// `.maw/manifold/`. Built by running the real `maw init`.
+    Consolidated,
+}
+
+impl Layout {
+    /// Both layouts, consolidated (the `maw init` default) first.
+    pub const ALL: [Self; 2] = [Self::Consolidated, Self::LegacyV2];
+
+    /// Short stable label for test output (`consolidated` / `legacy-v2`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LegacyV2 => "legacy-v2",
+            Self::Consolidated => "consolidated",
+        }
+    }
+
+    /// Parse a label (as printed by [`Self::label`]; `legacy` and `v2` are
+    /// accepted for the legacy layout).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "consolidated" => Some(Self::Consolidated),
+            "legacy-v2" | "legacy" | "v2" => Some(Self::LegacyV2),
+            _ => None,
+        }
+    }
 }
 
 impl TestRepo {
@@ -90,6 +135,72 @@ impl TestRepo {
     /// Panics if any git command fails.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_legacy_v2()
+    }
+
+    /// Create a test repo in the given [`Layout`].
+    #[must_use]
+    pub fn with_layout(layout: Layout) -> Self {
+        match layout {
+            Layout::LegacyV2 => Self::new_legacy_v2(),
+            Layout::Consolidated => Self::new_consolidated(),
+        }
+    }
+
+    /// Create a consolidated-layout repo by running the REAL `maw init` in a
+    /// fresh temp dir — exactly what a user gets today: the root is a normal
+    /// checkout on `main` and is the default workspace, agent workspaces go
+    /// under `.maw/workspaces/`, metadata under `.maw/manifold/`.
+    ///
+    /// # Panics
+    /// Panics if `maw init` or any git command fails, or if the result is not
+    /// the consolidated layout.
+    #[must_use]
+    pub fn new_consolidated() -> Self {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let root = dir.path().to_path_buf();
+
+        let out = Command::new(maw_bin())
+            .arg("init")
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@localhost")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@localhost")
+            .output()
+            .expect("failed to execute maw init");
+        assert!(
+            out.status.success(),
+            "maw init failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(
+            root.join(".maw").join("manifold").is_dir() && !root.join(".manifold").exists(),
+            "maw init did not produce the consolidated layout at {}",
+            root.display()
+        );
+
+        git_ok(&root, &["config", "user.name", "Test"]);
+        git_ok(&root, &["config", "user.email", "test@localhost"]);
+        git_ok(&root, &["config", "commit.gpgsign", "false"]);
+        git_ok(&root, &["config", "tag.gpgsign", "false"]);
+
+        let epoch0 = git_ok(&root, &["rev-parse", "refs/manifold/epoch/current"])
+            .trim()
+            .to_owned();
+
+        Self {
+            _dir: dir,
+            root,
+            epoch0,
+            layout: Layout::Consolidated,
+        }
+    }
+
+    /// Create a legacy v2 (bare root + `ws/default/`) repo. See [`Self::new`].
+    #[must_use]
+    pub fn new_legacy_v2() -> Self {
         let dir = TempDir::new().expect("failed to create temp dir");
         let root = dir.path().to_path_buf();
 
@@ -179,6 +290,7 @@ impl TestRepo {
             _dir: dir,
             root,
             epoch0,
+            layout: Layout::LegacyV2,
         }
     }
 
@@ -287,6 +399,7 @@ impl TestRepo {
             _dir: dir,
             root,
             epoch0,
+            layout: Layout::LegacyV2,
         };
         (repo, remote_dir)
     }
@@ -307,13 +420,44 @@ impl TestRepo {
         &self.epoch0
     }
 
-    /// Absolute path to a workspace: `<root>/ws/<name>/`.
+    /// The on-disk layout of this repo.
     #[must_use]
-    pub fn workspace_path(&self, name: &str) -> PathBuf {
-        self.root.join("ws").join(name)
+    pub const fn layout(&self) -> Layout {
+        self.layout
     }
 
-    /// Absolute path to the default workspace: `<root>/ws/default/`.
+    /// The directory agent workspaces live in: `<root>/ws/` (legacy v2) or
+    /// `<root>/.maw/workspaces/` (consolidated).
+    #[must_use]
+    pub fn workspaces_dir(&self) -> PathBuf {
+        match self.layout {
+            Layout::LegacyV2 => self.root.join("ws"),
+            Layout::Consolidated => self.root.join(".maw").join("workspaces"),
+        }
+    }
+
+    /// The manifold metadata directory: `<root>/.manifold/` (legacy v2) or
+    /// `<root>/.maw/manifold/` (consolidated).
+    #[must_use]
+    pub fn manifold_dir(&self) -> PathBuf {
+        match self.layout {
+            Layout::LegacyV2 => self.root.join(".manifold"),
+            Layout::Consolidated => self.root.join(".maw").join("manifold"),
+        }
+    }
+
+    /// Absolute path to a workspace: `<root>/ws/<name>/` (legacy v2), or
+    /// `<root>/.maw/workspaces/<name>/` (consolidated; `default` is the root).
+    #[must_use]
+    pub fn workspace_path(&self, name: &str) -> PathBuf {
+        if self.layout == Layout::Consolidated && name == "default" {
+            return self.root.clone();
+        }
+        self.workspaces_dir().join(name)
+    }
+
+    /// Absolute path to the default workspace: `<root>/ws/default/` (legacy
+    /// v2) or the repo root itself (consolidated).
     #[must_use]
     pub fn default_workspace(&self) -> PathBuf {
         self.workspace_path("default")
@@ -395,7 +539,7 @@ impl TestRepo {
     #[must_use]
     pub fn list_workspaces(&self) -> Vec<String> {
         let output = git_ok(&self.root, &["worktree", "list", "--porcelain"]);
-        let ws_dir = self.root.join("ws");
+        let ws_dir = self.workspaces_dir();
 
         let mut names = Vec::new();
         for block in output.split("\n\n") {
@@ -654,6 +798,22 @@ impl TestRepo {
             .trim()
             .to_owned();
 
+        if self.layout == Layout::Consolidated {
+            // The root is checked out ON `main`, so the commit above already
+            // advanced it. Align the epoch the way a user does after
+            // committing on trunk: `maw epoch sync` (it also records
+            // `refs/manifold/epoch/ws/default`).
+            let out = self.maw_raw_exact(&["epoch", "sync"]);
+            assert!(
+                out.status.success(),
+                "maw epoch sync failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert_eq!(self.current_epoch(), new_oid, "epoch sync did not align");
+            return new_oid;
+        }
+
         // Update epoch ref (Manifold's canonical epoch pointer)
         git_ok(
             &self.root,
@@ -850,8 +1010,7 @@ impl TestRepo {
     #[must_use]
     pub fn read_conflict_tree_sidecar(&self, workspace: &str) -> Option<serde_json::Value> {
         let path = self
-            .root
-            .join(".manifold")
+            .manifold_dir()
             .join("artifacts")
             .join("ws")
             .join(workspace)

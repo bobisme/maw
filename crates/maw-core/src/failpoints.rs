@@ -49,7 +49,25 @@ pub enum FailpointAction {
     /// A write failure is ignored: an injector must never crash the process it
     /// is only supposed to perturb.
     Corrupt(std::path::PathBuf),
+    /// Write the given marker file (containing this process's pid), then
+    /// BLOCK at the site until killed.
+    ///
+    /// The **blocking kill boundary** (bn-1jfui). A harness that wants to
+    /// SIGKILL the process exactly AT a failpoint arms `hang:<abs-marker>`,
+    /// waits for the marker to appear, then kills the process group. An
+    /// `error` bridge cannot do that: at the commit-phase sites the process
+    /// exits and clears its journal within milliseconds, so a poller misses
+    /// the window, and at `FP_PREPARE_BEFORE_STATE_WRITE` there is no journal
+    /// to observe at all.
+    ///
+    /// Bounded: after [`HANG_LIMIT`] the process aborts. It never continues
+    /// past the site, so a harness that fails to deliver the kill still sees a
+    /// crash, never a silently completed operation.
+    Hang(std::path::PathBuf),
 }
+
+/// How long a [`FailpointAction::Hang`] site blocks before it aborts.
+pub const HANG_LIMIT: Duration = Duration::from_secs(120);
 
 /// Bytes written by [`FailpointAction::Corrupt`].
 ///
@@ -68,6 +86,7 @@ impl std::fmt::Debug for FailpointAction {
             Self::Sleep(d) => f.debug_tuple("Sleep").field(d).finish(),
             Self::Callback(_) => write!(f, "Callback(<fn>)"),
             Self::Corrupt(p) => f.debug_tuple("Corrupt").field(p).finish(),
+            Self::Hang(p) => f.debug_tuple("Hang").field(p).finish(),
         }
     }
 }
@@ -168,6 +187,18 @@ pub fn check(name: &str) -> Result<(), String> {
             let _ = std::fs::write(&path, CORRUPT_BYTES);
             Ok(())
         }
+        Some(FailpointAction::Hang(marker)) => {
+            // Write-then-rename so a watcher never reads a half-written file.
+            let tmp = marker.with_extension("maw-fp-tmp");
+            if std::fs::write(&tmp, std::process::id().to_string()).is_ok() {
+                let _ = std::fs::rename(&tmp, &marker);
+            }
+            let start = std::time::Instant::now();
+            while start.elapsed() < HANG_LIMIT {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::process::abort()
+        }
     }
 }
 
@@ -242,7 +273,7 @@ impl Drop for ThreadFailpointGuard {
 //           canonical `KNOWN_FAILPOINTS` table at load time so `check()`
 //           stays an exact-match O(1) lookup with zero added overhead.
 //   action  off | error[:msg] | panic[:msg] | abort | sleep:<ms>
-//           | corrupt:<absolute-path>
+//           | corrupt:<absolute-path> | hang:<absolute-marker-path>
 //
 // Whitespace around names/actions/`;`/`=` is trimmed. Empty segments and
 // segments without `=` are ignored (forgiving: a stray `;` never aborts the
@@ -336,6 +367,14 @@ fn parse_action(token: &str) -> Option<FailpointAction> {
             let path = rest.filter(|s| !s.is_empty())?;
             let path = std::path::PathBuf::from(path);
             path.is_absolute().then_some(FailpointAction::Corrupt(path))
+        }
+        // bn-1jfui: `hang:<abs-marker>` — write the marker, then block until
+        // killed (see `FailpointAction::Hang`). Absolute for the same reason
+        // as `corrupt`.
+        "hang" => {
+            let path = rest.filter(|s| !s.is_empty())?;
+            let path = std::path::PathBuf::from(path);
+            path.is_absolute().then_some(FailpointAction::Hang(path))
         }
         _ => None,
     }
@@ -735,6 +774,23 @@ mod tests {
                 parse_env_spec("FP_X=corrupt:relative/path.txt").is_empty(),
                 "relative corruption targets must be rejected"
             );
+        }
+
+        /// bn-1jfui: `hang:<abs-marker>` parses to a `Hang` action; relative
+        /// or missing markers are rejected like `corrupt`.
+        #[test]
+        fn hang_parsing() {
+            let v = parse_env_spec("FP_COMMIT_BETWEEN_CAS_OPS=hang:/tmp/x/reached");
+            assert_eq!(v.len(), 1);
+            match &v[0].1 {
+                FailpointAction::Hang(p) => {
+                    assert_eq!(p, std::path::Path::new("/tmp/x/reached"));
+                }
+                other => panic!("expected Hang, got {other:?}"),
+            }
+            assert!(parse_env_spec("FP_X=hang").is_empty());
+            assert!(parse_env_spec("FP_X=hang:").is_empty());
+            assert!(parse_env_spec("FP_X=hang:rel/marker").is_empty());
         }
 
         /// An unknown glob matches nothing (no panic, empty result).

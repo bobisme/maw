@@ -362,20 +362,11 @@ fn discover_workspaces(root: &Path) -> (Vec<String>, BTreeMap<String, bool>) {
     let mut names = Vec::new();
     let mut dirty = BTreeMap::new();
 
-    let ws_dir = root.join("ws");
-    if let Ok(entries) = std::fs::read_dir(&ws_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let ws_path = entry.path();
-
-            if !ws_path.is_dir() {
-                continue;
-            }
-
-            let is_dirty = check_dirty(&ws_path);
-            names.push(name.clone());
-            dirty.insert(name, is_dirty);
-        }
+    // bn-1jfui: layout-aware (see `crate::workspace_dirs`).
+    for (name, ws_path) in crate::workspace_dirs(root) {
+        let is_dirty = check_dirty(&ws_path);
+        names.push(name.clone());
+        dirty.insert(name, is_dirty);
     }
 
     names.sort();

@@ -488,7 +488,36 @@ pub struct ConditionProfile {
     /// poisoned workspace — see `oracle_worktree`'s masked-stale carveout).
     #[serde(default)]
     pub corrupt_weight: u32,
+    /// Percent chance (0..=100) that a `Merge` planned AFTER a
+    /// [`Op::DirtyTrunkWrite`] carries a crash inside the target update — the
+    /// window where the user's uncommitted trunk bytes are off disk
+    /// ([`DIRTY_TRUNK_CRASH_SITES`]). **0 by default** (bn-1jfui).
+    ///
+    /// The random faulted tier otherwise almost never lines up a dirty trunk,
+    /// a merge that reaches the target update, and a fault in that window, so
+    /// a displacement across a crash was only ever reached by the targeted
+    /// bn-1sbjf test.
+    ///
+    /// It never moves an op: the decision is drawn from a side RNG keyed on
+    /// `(seed, step)`, not the plan RNG, so a profile with this knob produces
+    /// exactly the same ops and `git_time`s as the same profile without it —
+    /// only some `Merge` steps' [`FaultSpec`] change. A faulted seed therefore
+    /// still replays the same ops as its unfaulted twin.
+    #[serde(default)]
+    pub dirty_trunk_crash_pct: u32,
 }
+
+/// The target-update crash sites a dirty-trunk merge is biased towards by
+/// [`ConditionProfile::dirty_trunk_crash_pct`] (bn-1jfui), all cleanup-phase
+/// sites of [`CRASHABLE_BY_PHASE`]. `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` is
+/// listed twice: it is the one crash that leaves the user's edits only in the
+/// pinned snapshot (the displacement a recovering merge must undo).
+pub const DIRTY_TRUNK_CRASH_SITES: &[&str] = &[
+    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+    "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+    "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
+];
 
 impl ConditionProfile {
     /// Construct a profile with clamped fields. `advance_weight` defaults to 0
@@ -509,6 +538,7 @@ impl ConditionProfile {
             advance_weight: 0,
             escape_weight: 0,
             corrupt_weight: 0,
+            dirty_trunk_crash_pct: 0,
         }
     }
 
@@ -538,6 +568,15 @@ impl ConditionProfile {
     #[must_use]
     pub const fn with_corrupt_weight(mut self, w: u32) -> Self {
         self.corrupt_weight = w;
+        self
+    }
+
+    /// Return a copy of this profile with
+    /// [`dirty_trunk_crash_pct`](Self::dirty_trunk_crash_pct) set to `pct`
+    /// (clamped to 100). Changes only `Merge` faults, never an op.
+    #[must_use]
+    pub fn with_dirty_trunk_crash_pct(mut self, pct: u32) -> Self {
+        self.dirty_trunk_crash_pct = pct.min(100);
         self
     }
 }
@@ -721,9 +760,22 @@ pub fn generate_plan(seed: u64, profile: &ConditionProfile, n_steps: usize) -> S
     });
 
     let mut git_time = GIT_TIME_BASE + 1;
+    let mut trunk_dirty = false;
     for index in 1..n_steps {
         let op = choose_op(&mut rng, &mut model, profile);
-        let fault = choose_fault(&mut rng, profile, &op);
+        let mut fault = choose_fault(&mut rng, profile, &op);
+        // bn-1jfui: side-RNG bias, see `ConditionProfile::dirty_trunk_crash_pct`.
+        if profile.dirty_trunk_crash_pct > 0 {
+            if trunk_dirty
+                && matches!(op, Op::Merge { .. })
+                && let Some(biased) = dirty_trunk_crash_fault(seed, index, profile)
+            {
+                fault = biased;
+            }
+            if matches!(op, Op::DirtyTrunkWrite { .. }) {
+                trunk_dirty = true;
+            }
+        }
         // Each step advances git_time by 1..=60 seconds — monotonic and
         // deterministic, so committer dates make sense to git AND replays
         // are bit-exact. `random_range` is exclusive at top so add 1.
@@ -1965,6 +2017,34 @@ fn choose_fault(rng: &mut StdRng, profile: &ConditionProfile, op: &Op) -> FaultS
     }
 }
 
+/// bn-1jfui: the biased target-update fault for a dirty-trunk `Merge` at
+/// `index`, or `None` when the side draw says "leave the fault alone".
+///
+/// Uses its own RNG keyed on `(seed, index)` so the plan RNG — and with it
+/// every op — is untouched.
+fn dirty_trunk_crash_fault(
+    seed: u64,
+    index: usize,
+    profile: &ConditionProfile,
+) -> Option<FaultSpec> {
+    let key = seed ^ 0xD1B7_7C2A_5EED_0000_u64 ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut side = StdRng::seed_from_u64(key);
+    if side.random_range(0..100_u32) >= profile.dirty_trunk_crash_pct {
+        return None;
+    }
+    let name = DIRTY_TRUNK_CRASH_SITES[side.random_range(0..DIRTY_TRUNK_CRASH_SITES.len())];
+    debug_assert!(
+        CRASHABLE_BY_PHASE
+            .iter()
+            .any(|(phase, sites)| *phase == "cleanup" && sites.contains(&name)),
+        "{name} must be a cleanup-phase crash site"
+    );
+    Some(FaultSpec::Failpoint {
+        name: name.to_owned(),
+        phase: "cleanup".to_owned(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Small RNG helpers — kept inline and free of any HashMap iteration
 // ---------------------------------------------------------------------------
@@ -2959,5 +3039,88 @@ mod bn_22jy_tests {
             "the victim must NOT be a merge source, or it would not go stale"
         );
         super::tests::validate_plan_against_model(&plan, plan.seed);
+    }
+}
+
+#[cfg(test)]
+mod bn_1jfui_tests {
+    use super::{
+        ConditionProfile, DIRTY_TRUNK_CRASH_SITES, FaultSpec, Op, PRODUCTION_TIER_OP_STREAM_DIGEST,
+        generate_plan, op_stream_digest,
+    };
+
+    fn prod() -> ConditionProfile {
+        ConditionProfile::default()
+            .with_advance_weight(8)
+            .with_escape_weight(3)
+    }
+
+    /// The knob never moves an op or a `git_time`: only `Merge` faults differ,
+    /// and only on merges planned after a dirty-trunk write.
+    #[test]
+    fn dirty_trunk_crash_pct_changes_only_merge_faults() {
+        for seed in 0..128_u64 {
+            let base = generate_plan(seed, &prod(), 64);
+            let biased = generate_plan(seed, &prod().with_dirty_trunk_crash_pct(100), 64);
+            assert_eq!(base.steps.len(), biased.steps.len());
+            let mut dirty = false;
+            for (a, b) in base.steps.iter().zip(&biased.steps) {
+                assert_eq!(a.op, b.op, "seed {seed} step {}: op moved", a.index);
+                assert_eq!(a.git_time, b.git_time, "seed {seed} step {}", a.index);
+                if a.fault != b.fault {
+                    assert!(
+                        dirty && matches!(a.op, Op::Merge { .. }),
+                        "seed {seed} step {}: only a dirty-trunk merge may change fault",
+                        a.index
+                    );
+                }
+                if matches!(a.op, Op::DirtyTrunkWrite { .. }) {
+                    dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Non-vacuity: at 100% every dirty-trunk merge carries a window fault,
+    /// and across seeds every window site is drawn.
+    #[test]
+    fn dirty_trunk_crash_pct_targets_the_target_update_window() {
+        let profile = prod().with_dirty_trunk_crash_pct(100);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut biased_merges = 0;
+        for seed in 0..128_u64 {
+            let mut dirty = false;
+            for step in generate_plan(seed, &profile, 64).steps {
+                if dirty && matches!(step.op, Op::Merge { .. }) {
+                    match &step.fault {
+                        FaultSpec::Failpoint { name, phase } => {
+                            assert_eq!(phase, "cleanup");
+                            assert!(DIRTY_TRUNK_CRASH_SITES.contains(&name.as_str()));
+                            seen.insert(name.clone());
+                            biased_merges += 1;
+                        }
+                        FaultSpec::None => panic!("seed {seed}: unfaulted dirty-trunk merge"),
+                    }
+                }
+                if matches!(step.op, Op::DirtyTrunkWrite { .. }) {
+                    dirty = true;
+                }
+            }
+        }
+        assert!(biased_merges > 0, "no dirty-trunk merge in 128 seeds");
+        for site in DIRTY_TRUNK_CRASH_SITES {
+            assert!(seen.contains(*site), "{site} never drawn");
+        }
+    }
+
+    /// Default 0: the pinned production-tier stream is untouched.
+    #[test]
+    fn dirty_trunk_crash_pct_defaults_to_zero() {
+        assert_eq!(ConditionProfile::default().dirty_trunk_crash_pct, 0);
+        assert_eq!(op_stream_digest(&prod()), PRODUCTION_TIER_OP_STREAM_DIGEST);
+        assert_eq!(
+            op_stream_digest(&prod().with_dirty_trunk_crash_pct(0)),
+            PRODUCTION_TIER_OP_STREAM_DIGEST
+        );
     }
 }
