@@ -418,6 +418,23 @@ impl TrunkDirtyPreservation {
             if on_disk.as_deref() == Some(content.as_str()) {
                 continue;
             }
+            // 1b) Or the bytes survive VERBATIM as one side of a diff3
+            //     conflict in the default worktree file (bn-m7kjy). A merge
+            //     whose epoch changed a path the user had dirty on trunk
+            //     writes `<<<<<<< ws … ======= <dirty bytes> >>>>>>> default`
+            //     into the file (maw's conflict-as-data model); `maw ws
+            //     resolve default --keep default` restores them. Bounded to
+            //     files that actually carry BOTH marker kinds — the same
+            //     rescue Oracle A (bn-3g6o) and SiblingRefFaithfulness
+            //     (bn-286g) apply — so a coincidental substring in an
+            //     ordinary file never masks a loss.
+            if on_disk.as_deref().is_some_and(|disk| {
+                let d = disk.as_bytes();
+                crate::oracle_a::is_conflict_marker_blob(d)
+                    && crate::oracle_a::contains_subslice(d, content.as_bytes())
+            }) {
+                continue;
+            }
             // 2) Or the content is surfaced as a blob reachable from a recovery
             //    ref (the "explicitly surfaced in a recovery ref" escape hatch).
             if hash_blob(repo_root, content).is_some_and(|oid| recovery_blobs.contains(&oid)) {
@@ -745,24 +762,59 @@ pub fn check_record_ref_coherence(repo_root: &Path) -> Vec<EscapeViolation> {
         Ok(r) => r,
         Err(v) => return vec![v],
     };
-    let destroy_dir = LayoutFlavor::detect(repo_root)
+    let mut violations = Vec::new();
+    for claim in destroy_record_claims(repo_root) {
+        if !refs.contains(&claim.claimed_ref) {
+            violations.push(EscapeViolation::RecordClaimsMissingRef {
+                workspace: claim.workspace,
+                record: claim.record,
+                claimed_ref: claim.claimed_ref,
+            });
+        }
+    }
+    violations
+}
+
+/// One destroy record's claim on a recovery ref, read straight off disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestroyRecordClaim {
+    /// The destroyed workspace's name (the `artifacts/ws/<name>` dir).
+    pub workspace: String,
+    /// The record's file name (`<timestamp>.json`).
+    pub record: String,
+    /// The recovery ref it claims (`snapshot_ref`, else `final_head_ref`).
+    pub claimed_ref: String,
+}
+
+/// Every destroy record that claims a recovery ref, in deterministic order.
+///
+/// Records live where `maw ws destroy` writes them:
+/// `<manifold_dir>/artifacts/ws/<ws>/destroy/<timestamp>.json` (the
+/// `latest.json` pointer is skipped — it duplicates a timestamped record).
+/// Parsed as plain JSON (independent verifier; no `maw-cli` types).
+///
+/// bn-m7kjy: `check_record_ref_coherence` used to read
+/// `<manifold_dir>/destroy/<ws>/`, a directory no production writer uses, so
+/// the bn-3uou oracle was vacuously green in every DST tier.
+#[must_use]
+pub fn destroy_record_claims(repo_root: &Path) -> Vec<DestroyRecordClaim> {
+    let ws_root = LayoutFlavor::detect(repo_root)
         .manifold_dir(repo_root)
-        .join("destroy");
-    let Ok(ws_dirs) = std::fs::read_dir(&destroy_dir) else {
+        .join("artifacts")
+        .join("ws");
+    let Ok(ws_dirs) = std::fs::read_dir(&ws_root) else {
         return Vec::new(); // No destroy records at all.
     };
-
-    let mut violations = Vec::new();
-    // Deterministic order: sort workspace dirs, then record files.
     let mut ws_names: Vec<String> = ws_dirs
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| e.path().join("destroy").is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     ws_names.sort();
 
+    let mut claims = Vec::new();
     for ws in ws_names {
-        let dir = destroy_dir.join(&ws);
+        let dir = ws_root.join(&ws).join("destroy");
         let Ok(files) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -790,8 +842,8 @@ pub fn check_record_ref_coherence(repo_root: &Path) -> Vec<EscapeViolation> {
                     json.get("final_head_ref")
                         .and_then(serde_json::Value::as_str)
                 });
-            if let Some(claimed_ref) = claimed.filter(|r| !refs.contains(*r)) {
-                violations.push(EscapeViolation::RecordClaimsMissingRef {
+            if let Some(claimed_ref) = claimed {
+                claims.push(DestroyRecordClaim {
                     workspace: ws.clone(),
                     record: record.clone(),
                     claimed_ref: claimed_ref.to_owned(),
@@ -799,7 +851,135 @@ pub fn check_record_ref_coherence(repo_root: &Path) -> Vec<EscapeViolation> {
             }
         }
     }
-    violations
+    claims
+}
+
+// ---------------------------------------------------------------------------
+// Recovery-snapshot sweep eligibility (bn-m7kjy) — for Oracle A's gc release
+// ---------------------------------------------------------------------------
+
+/// Every `refs/manifold/recovery/*` ref as `name -> OID`.
+#[must_use]
+pub fn recovery_refs(repo_root: &Path) -> BTreeMap<String, String> {
+    let out = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/manifold/recovery/",
+        ])
+        .current_dir(repo_root)
+        .output();
+    let Ok(out) = out else {
+        return BTreeMap::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(r, o)| (r.to_owned(), o.to_owned()))
+        .collect()
+}
+
+/// The recovery refs a `maw gc --recovery-snapshots --older-than <days>` run
+/// starting at `now_secs` is ENTITLED to delete, judged independently of
+/// `ref_gc.rs` from maw's documented semantics (`maw gc --help`): a
+/// *recovery snapshot* is "the pinned commit holding a DESTROYED workspace's
+/// content", swept "in lockstep" with the destroy record that points at it,
+/// once the pin is older than the threshold. So a ref is eligible iff ALL of:
+///
+/// 1. it is `refs/manifold/recovery/<ws>/<leaf>`;
+/// 2. `<ws>` is NOT an extant workspace (no workspace directory on disk);
+/// 3. a destroy record of `<ws>` claims exactly this ref;
+/// 4. the pin-creation timestamp embedded in `<leaf>` (every production
+///    writer embeds one) is `<= now_secs - days*86400`.
+///
+/// Anything else — a pin of a live workspace (dirty-trunk
+/// `recovery/default/*`, bn-154g `materialize-*`), an unclaimed pin, a pin
+/// too young, a pin whose name carries no timestamp — is NOT eligible, so if
+/// gc deletes the only copy of witnessed content through such a ref, Oracle A
+/// still fires.
+#[must_use]
+pub fn gc_eligible_recovery_snapshots(
+    repo_root: &Path,
+    older_than_days: u64,
+    now_secs: u64,
+) -> BTreeMap<String, String> {
+    let cutoff = now_secs.saturating_sub(older_than_days.saturating_mul(86_400));
+    let flavor = LayoutFlavor::detect(repo_root);
+    let claimed: BTreeSet<String> = destroy_record_claims(repo_root)
+        .into_iter()
+        .map(|c| c.claimed_ref)
+        .collect();
+    recovery_refs(repo_root)
+        .into_iter()
+        .filter(|(name, _)| {
+            let Some(rest) = name.strip_prefix("refs/manifold/recovery/") else {
+                return false;
+            };
+            let Some((ws, leaf)) = rest.rsplit_once('/') else {
+                return false;
+            };
+            !ws.is_empty()
+                && !flavor.workspace_path(repo_root, ws).exists()
+                && claimed.contains(name)
+                && pin_timestamp_from_leaf(leaf).is_some_and(|ts| ts <= cutoff)
+        })
+        .collect()
+}
+
+/// Unix seconds of the `YYYY-MM-DDTHH-MM-SS[.frac]Z` timestamp in a recovery
+/// ref leaf (optionally after a `<kind>-` prefix). Independent re-derivation
+/// (not `ref_gc::pin_created_at_from_ref_name`).
+fn pin_timestamp_from_leaf(leaf: &str) -> Option<u64> {
+    let b = leaf.as_bytes();
+    (0..b.len())
+        .filter(|&i| i == 0 || b[i - 1] == b'-')
+        .find_map(|i| parse_ref_timestamp(&b[i..]))
+}
+
+fn parse_ref_timestamp(bytes: &[u8]) -> Option<u64> {
+    let b = bytes;
+    // YYYY-MM-DDTHH-MM-SS then Z or .digits Z
+    if b.len() < 20 {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| -> Option<u64> {
+        let s = std::str::from_utf8(&b[r]).ok()?;
+        s.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    };
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b'-' || b[16] != b'-' {
+        return None;
+    }
+    let tail = &b[19..];
+    let tail_ok = tail == b"Z"
+        || (tail.len() > 2
+            && tail[0] == b'.'
+            && tail[tail.len() - 1] == b'Z'
+            && tail[1..tail.len() - 1].iter().all(u8::is_ascii_digit));
+    if !tail_ok {
+        return None;
+    }
+    let (year, month, day) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let (hour, minute, second) = (digits(11..13)?, digits(14..16)?, digits(17..19)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    // Days from civil (Howard Hinnant), proleptic Gregorian, UTC.
+    let y = i64::try_from(year).ok()? - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (i64::try_from(month).ok()? + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::try_from(day).ok()? - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + i64::try_from(hour * 3600 + minute * 60 + second).ok()?;
+    u64::try_from(secs).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,6 +1615,66 @@ mod tests {
         );
     }
 
+    /// bn-m7kjy (seed 12 of the 48x48 escape-weight-8 run): a merge that
+    /// changed a path the user had dirty on trunk leaves the user's bytes as
+    /// the `default` side of a diff3 conflict in the worktree file. After an
+    /// explicit gc drops the redundant recovery pin, the bytes are still on
+    /// disk (conflict-as-data) — preserved, not lost.
+    #[test]
+    fn dirty_trunk_preserved_as_conflict_side_is_green_bn_m7kjy() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let content = "dirty-trunk\nseed-slot=8780130101953745955\nidx=0\n";
+        let mut oracle = TrunkDirtyPreservation::new();
+        oracle.record_dirty("shared/file-0.txt", content);
+        fs::create_dir_all(root.join("ws/default/shared")).unwrap();
+        fs::write(
+            root.join("ws/default/shared/file-0.txt"),
+            format!(
+                "<<<<<<< ws-4 (merged workspace)\nws=ws-4\n||||||| base\n=======\n{content}>>>>>>> default (local edits)\n"
+            ),
+        )
+        .unwrap();
+        let v = oracle.check(root);
+        assert!(
+            v.is_empty(),
+            "dirty bytes kept as a conflict side must be green: {v:?}"
+        );
+    }
+
+    /// Negative controls for the conflict-as-data rescue: markers WITHOUT the
+    /// recorded bytes, and the bytes inside a NON-conflict file that merely
+    /// contains them, both still trip.
+    #[test]
+    fn dirty_trunk_conflict_rescue_is_narrow_bn_m7kjy() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+        make_ws_dir(root, "default");
+        let content = "UNCOMMITTED dirty bytes\n";
+        let mut oracle = TrunkDirtyPreservation::new();
+        oracle.record_dirty("hot.txt", content);
+        let file = root.join("ws/default/hot.txt");
+
+        fs::write(
+            &file,
+            "<<<<<<< ws-a\ntheirs\n||||||| base\n=======\nsomething else\n>>>>>>> default\n",
+        )
+        .unwrap();
+        assert_eq!(
+            oracle.check(root).len(),
+            1,
+            "markers without the bytes must trip"
+        );
+
+        fs::write(&file, format!("prefix\n{content}suffix\n")).unwrap();
+        assert_eq!(
+            oracle.check(root).len(),
+            1,
+            "bytes embedded in an ordinary (non-conflict) file must still trip"
+        );
+    }
+
     // ----- TrunkDirtyDisplacement (bn-2zubk) -------------------------------
 
     fn merge_op() -> Op {
@@ -1628,7 +1868,12 @@ mod tests {
     // ----- RecordRefCoherence (bn-3uou) ------------------------------------
 
     fn write_destroy_record(root: &Path, ws: &str, filename: &str, snapshot_ref: Option<&str>) {
-        let dir = root.join(".manifold").join("destroy").join(ws);
+        let dir = LayoutFlavor::detect(root)
+            .manifold_dir(root)
+            .join("artifacts")
+            .join("ws")
+            .join(ws)
+            .join("destroy");
         fs::create_dir_all(&dir).unwrap();
         let snap = snapshot_ref.map_or_else(|| "null".to_owned(), |r| format!("\"{r}\""));
         let body = format!(
@@ -1686,5 +1931,60 @@ mod tests {
             check_record_ref_coherence(root).is_empty(),
             "a record with no claimed ref must be green"
         );
+    }
+
+    // ----- gc sweep eligibility (bn-m7kjy) ---------------------------------
+
+    #[test]
+    fn pin_timestamp_parses_production_shapes_bn_m7kjy() {
+        // 2026-09-28T02:24:27Z == 1_790_562_267 (date -u -d ... +%s).
+        let want = Some(1_790_562_267);
+        assert_eq!(pin_timestamp_from_leaf("2026-09-28T02-24-27Z"), want);
+        assert_eq!(
+            pin_timestamp_from_leaf("2026-09-28T02-24-27.337075157Z"),
+            want
+        );
+        assert_eq!(
+            pin_timestamp_from_leaf("materialize-2026-09-28T02-24-27Z"),
+            want
+        );
+        assert_eq!(pin_timestamp_from_leaf("1970-01-01T00-00-00Z"), Some(0));
+        assert_eq!(pin_timestamp_from_leaf("snap"), None);
+        assert_eq!(pin_timestamp_from_leaf("2026-09-28T02-24-27"), None);
+        assert_eq!(pin_timestamp_from_leaf("2026-13-28T02-24-27Z"), None);
+    }
+
+    /// The eligibility rule admits exactly a destroyed workspace's claimed,
+    /// old-enough, timestamped snapshot — and nothing else.
+    #[test]
+    fn gc_eligibility_is_destroyed_claimed_and_aged_only_bn_m7kjy() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let ts = "2026-09-28T02-24-27Z";
+        let now = 1_790_562_267 + 10;
+
+        // (1) eligible: gone workspace, claimed by a record, old enough.
+        let ok = format!("refs/manifold/recovery/gone/{ts}");
+        git(root, &["update-ref", &ok, &oid]);
+        write_destroy_record(root, "gone", "a.json", Some(&ok));
+        // (2) live workspace (dir exists) even though claimed.
+        let live = format!("refs/manifold/recovery/alive/{ts}");
+        git(root, &["update-ref", &live, &oid]);
+        write_destroy_record(root, "alive", "a.json", Some(&live));
+        make_ws_dir(root, "alive");
+        // (3) unclaimed pin of a gone workspace (e.g. dirty-trunk / materialize).
+        let unclaimed = format!("refs/manifold/recovery/default/{ts}");
+        git(root, &["update-ref", &unclaimed, &oid]);
+        // (4) claimed but no timestamp in the name.
+        let nots = "refs/manifold/recovery/legacy/snap";
+        git(root, &["update-ref", nots, &oid]);
+        write_destroy_record(root, "legacy", "a.json", Some(nots));
+
+        let e0 = gc_eligible_recovery_snapshots(root, 0, now);
+        assert_eq!(e0.keys().cloned().collect::<Vec<_>>(), vec![ok], "{e0:?}");
+        // (5) too young for a 1-day threshold.
+        assert!(gc_eligible_recovery_snapshots(root, 1, now).is_empty());
+        // Pin created AFTER the gc started is never eligible.
+        assert!(gc_eligible_recovery_snapshots(root, 0, now - 20).is_empty());
     }
 }

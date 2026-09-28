@@ -115,6 +115,10 @@ pub struct OracleA {
     total_check_time: Duration,
     /// Number of `check_step` invocations.
     steps_checked: u64,
+    /// bn-m7kjy: witnesses released because their ONLY reachability was a
+    /// recovery snapshot an explicit `maw gc --recovery-snapshots` sweep was
+    /// entitled to delete (see [`Self::release_swept_snapshots`]).
+    released: BTreeMap<String, WitnessOrigin>,
 }
 
 /// Outcome of a single [`OracleA::check_step`] call.
@@ -150,6 +154,7 @@ impl OracleA {
             seeded: false,
             total_check_time: Duration::ZERO,
             steps_checked: 0,
+            released: BTreeMap::new(),
         }
     }
 
@@ -180,6 +185,90 @@ impl OracleA {
     #[must_use]
     pub fn reachable_count(&self) -> usize {
         self.reachable_blobs.len()
+    }
+
+    /// How many witnesses were released by explicit recovery-snapshot sweeps
+    /// (bn-m7kjy non-vacuity / audit signal).
+    #[must_use]
+    pub fn released_count(&self) -> usize {
+        self.released.len()
+    }
+
+    /// bn-m7kjy: release witnesses whose ONLY copy was dropped by an explicit
+    /// `maw gc --recovery-snapshots` sweep that was entitled to drop it.
+    ///
+    /// Call AFTER the gc op and BEFORE [`Self::check_step`] for that step.
+    ///
+    /// - `pre_recovery`: every `refs/manifold/recovery/*` ref (`name -> OID`)
+    ///   captured just BEFORE the gc ran.
+    /// - `eligible`: the subset gc was entitled to delete, judged
+    ///   independently before the gc ran
+    ///   ([`crate::oracle_escape::gc_eligible_recovery_snapshots`]: destroyed
+    ///   workspace, claimed by a destroy record, pin older than the
+    ///   threshold).
+    /// - `post_state`: the post-gc state (same one `check_step` will get).
+    ///
+    /// A witness is released iff it is reachable from an eligible ref that gc
+    /// actually deleted, is NOT reachable from the post-gc frontier, and is
+    /// NOT reachable from any INELIGIBLE recovery ref that gc deleted. The
+    /// last clause keeps the exception narrow: content gc dropped through a
+    /// ref it had no right to delete (a live workspace's pin, an unclaimed or
+    /// too-young pin) stays witnessed, so Oracle A still fires on it.
+    ///
+    /// Rationale: the user explicitly asked gc to drop those snapshots
+    /// (`maw gc --help`: "remove old snapshots + their records";
+    /// `--older-than 0` "drain the whole recover queue"). Content whose only
+    /// home was such a snapshot is released by the user, not lost by maw.
+    ///
+    /// Returns the number of witnesses released by this call.
+    ///
+    /// # Errors
+    ///
+    /// `git` plumbing failures (as for [`Self::check_step`]).
+    pub fn release_swept_snapshots(
+        &mut self,
+        pre_recovery: &BTreeMap<String, String>,
+        eligible: &BTreeMap<String, String>,
+        post_state: &AssuranceState,
+    ) -> Result<usize, AssuranceViolation> {
+        // Refs gc actually deleted, split by entitlement.
+        let mut elig: BTreeSet<String> = BTreeSet::new();
+        let mut inelig: BTreeSet<String> = BTreeSet::new();
+        for (name, oid) in pre_recovery {
+            if post_state.durable_refs.contains_key(name) {
+                continue;
+            }
+            if eligible.contains_key(name) {
+                elig.insert(oid.clone());
+            } else {
+                inelig.insert(oid.clone());
+            }
+        }
+        if elig.is_empty() {
+            return Ok(0);
+        }
+        let reach = |oids: &BTreeSet<String>| -> Result<HashSet<String>, AssuranceViolation> {
+            let live: Vec<String> = existing_objects(&self.repo_root, oids)?
+                .into_iter()
+                .collect();
+            rev_list_objects(&self.repo_root, &live, &BTreeSet::new())
+        };
+        let held = reach(&elig)?;
+        let held_inelig = reach(&inelig)?;
+        let frontier: BTreeSet<String> = compute_frontier(post_state).into_values().collect();
+        let still = reach(&frontier)?;
+        let to_release: Vec<String> = self
+            .witnesses
+            .keys()
+            .filter(|b| held.contains(*b) && !still.contains(*b) && !held_inelig.contains(*b))
+            .cloned()
+            .collect();
+        for b in &to_release {
+            if let Some(origin) = self.witnesses.remove(b) {
+                self.released.insert(b.clone(), origin);
+            }
+        }
+        Ok(to_release.len())
     }
 
     /// Check Oracle A against the post-step state.
@@ -964,9 +1053,7 @@ where
         let Some(bytes) = read_blob_bytes(repo_root, oid) else {
             continue;
         };
-        if contains_subslice(&bytes, CONFLICT_MARKER_OPEN)
-            && contains_subslice(&bytes, CONFLICT_MARKER_CLOSE)
-        {
+        if is_conflict_marker_blob(&bytes) {
             out.push(bytes);
         }
     }
@@ -977,6 +1064,13 @@ where
 ///
 /// Empty needle is vacuously contained (a witnessed empty blob is trivially
 /// present in any marker blob — and an empty original is not "lost" content).
+/// `true` iff `bytes` carries both diff3 marker kinds — i.e. it is a
+/// conflict-as-data blob / file.
+pub(crate) fn is_conflict_marker_blob(bytes: &[u8]) -> bool {
+    contains_subslice(bytes, CONFLICT_MARKER_OPEN)
+        && contains_subslice(bytes, CONFLICT_MARKER_CLOSE)
+}
+
 pub(crate) fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -1241,6 +1335,150 @@ mod tests {
             "bn-cm63 (dangling head ref, no work loss) must NOT trip Oracle A — got: {:?}",
             r1.violation
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-m7kjy: explicit recovery-snapshot sweeps release (only) eligible
+    // snapshots' content
+    // -----------------------------------------------------------------------
+
+    /// Witness `ws`'s unique blob, then "destroy" it: drop its refs and pin
+    /// the tip under each of `pins`. Returns (oracle, blob, tip).
+    fn witnessed_then_pinned(root: &Path, ws: &str, pins: &[&str]) -> (OracleA, String, String) {
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+        git(
+            root,
+            &["update-ref", &format!("refs/manifold/epoch/ws/{ws}"), &head],
+        );
+        let blob = commit_file(
+            root,
+            &format!("refs/manifold/ws/{ws}"),
+            "f.txt",
+            &format!("{ws}-only-content"),
+        );
+        let tip = git_capture(root, &["rev-parse", &format!("refs/manifold/ws/{ws}")]);
+        let mut oracle = OracleA::new(root);
+        let s0 = make_state(root, &[(ws, &tip, false, true)]);
+        assert!(oracle.check_step(&s0, 0).unwrap().violation.is_none());
+        assert!(oracle.witnesses.contains_key(&blob));
+        for p in pins {
+            git(root, &["update-ref", p, &tip]);
+        }
+        git(
+            root,
+            &["update-ref", "-d", &format!("refs/manifold/ws/{ws}")],
+        );
+        git(
+            root,
+            &["update-ref", "-d", &format!("refs/manifold/epoch/ws/{ws}")],
+        );
+        let s1 = make_state(root, &[]);
+        assert!(
+            oracle.check_step(&s1, 1).unwrap().violation.is_none(),
+            "pinned ⇒ preserved"
+        );
+        (oracle, blob, tip)
+    }
+
+    fn recovery_map(root: &Path) -> BTreeMap<String, String> {
+        git_capture(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/manifold/recovery/",
+            ],
+        )
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn eligible_snapshot_sweep_releases_witness_bn_m7kjy() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let pin = "refs/manifold/recovery/alice/2026-09-28T02-24-27Z";
+        let (mut oracle, blob, _) = witnessed_then_pinned(root, "alice", &[pin]);
+        let pre = recovery_map(root);
+        let eligible = pre.clone();
+        git(root, &["update-ref", "-d", pin]); // the gc sweep
+        let s2 = make_state(root, &[]);
+        let n = oracle
+            .release_swept_snapshots(&pre, &eligible, &s2)
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(!oracle.witnesses.contains_key(&blob));
+        assert!(oracle.check_step(&s2, 2).unwrap().violation.is_none());
+    }
+
+    /// Negative control: gc deletes a recovery ref it was NOT entitled to
+    /// (not in `eligible`) — the witness is kept and Oracle A fires.
+    #[test]
+    fn ineligible_recovery_ref_deletion_still_trips_bn_m7kjy() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let pin = "refs/manifold/recovery/default/2026-09-28T02-24-27Z";
+        let (mut oracle, blob, _) = witnessed_then_pinned(root, "bob", &[pin]);
+        let pre = recovery_map(root);
+        git(root, &["update-ref", "-d", pin]);
+        let s2 = make_state(root, &[]);
+        assert_eq!(
+            oracle
+                .release_swept_snapshots(&pre, &BTreeMap::new(), &s2)
+                .unwrap(),
+            0
+        );
+        let v = oracle
+            .check_step(&s2, 2)
+            .unwrap()
+            .violation
+            .expect("must fire");
+        assert!(format!("{v}").contains(&blob[..12]), "{v}");
+    }
+
+    /// Negative control: content held by BOTH an eligible and an ineligible
+    /// deleted ref is not released — the ineligible deletion alone is a loss.
+    #[test]
+    fn mixed_eligible_and_ineligible_deletion_still_trips_bn_m7kjy() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let ok = "refs/manifold/recovery/carol/2026-09-28T02-24-27Z";
+        let bad = "refs/manifold/recovery/carol/materialize-2026-09-28T02-24-28Z";
+        let (mut oracle, _blob, _) = witnessed_then_pinned(root, "carol", &[ok, bad]);
+        let pre = recovery_map(root);
+        let eligible: BTreeMap<String, String> = pre
+            .iter()
+            .filter(|(k, _)| k.as_str() == ok)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        git(root, &["update-ref", "-d", ok]);
+        git(root, &["update-ref", "-d", bad]);
+        let s2 = make_state(root, &[]);
+        assert_eq!(
+            oracle
+                .release_swept_snapshots(&pre, &eligible, &s2)
+                .unwrap(),
+            0
+        );
+        assert!(oracle.check_step(&s2, 2).unwrap().violation.is_some());
+    }
+
+    /// Content still reachable elsewhere after the sweep is not released
+    /// (it stays witnessed and keeps being judged).
+    #[test]
+    fn swept_content_still_reachable_is_not_released_bn_m7kjy() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let pin = "refs/manifold/recovery/dan/2026-09-28T02-24-27Z";
+        let keep = "refs/manifold/recovery/dan-copy/2026-09-28T02-24-27Z";
+        let (mut oracle, blob, _) = witnessed_then_pinned(root, "dan", &[pin, keep]);
+        let pre = recovery_map(root);
+        git(root, &["update-ref", "-d", pin]);
+        let s2 = make_state(root, &[]);
+        assert_eq!(oracle.release_swept_snapshots(&pre, &pre, &s2).unwrap(), 0);
+        assert!(oracle.witnesses.contains_key(&blob));
     }
 
     // -----------------------------------------------------------------------

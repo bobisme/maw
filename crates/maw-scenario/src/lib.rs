@@ -768,6 +768,11 @@ pub const BN_286G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0003;
 /// [`BN_RAH2_REGRESSION_SEED`].
 pub const BN_154G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0004;
 
+/// Sentinel seed tagging the [`bn_m7kjy_regression_plan`] (explicit
+/// `maw gc --recovery-snapshots --older-than 0` drains the recover queue).
+/// See [`BN_RAH2_REGRESSION_SEED`].
+pub const BN_M7KJY_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0005;
+
 /// Sentinel seed tagging the [`bn_1sbjf_target_update_crash_plan`] family
 /// (a merge faulted inside the target update, with a dirty trunk, recovered by
 /// the next merge). The low byte is the failpoint's index in the cleanup
@@ -1056,6 +1061,76 @@ pub fn bn_286g_regression_plan() -> ScenarioPlan {
         seed: BN_286G_REGRESSION_SEED,
         profile: ConditionProfile::default().with_escape_weight(1),
         steps,
+    }
+}
+
+/// The **bn-m7kjy** shapes as a named, deterministic regression plan: an
+/// explicit `maw gc --recovery-snapshots --older-than 0` ("drain the whole
+/// recover queue") run after
+///
+/// - `ws-a` committed unmerged work and was `destroy --force`d, so its ONLY
+///   copy is its destroy snapshot (seeds 5/10/26/46 of the 48x48
+///   escape-weight-8 faulted run) — the sweep is entitled to drop it; and
+/// - a merge of `ws-b` hit a local-vs-merge conflict with uncommitted trunk
+///   bytes on the same path, leaving them as the `default` side of diff3
+///   markers on disk AND in a `recovery/default/*` pin (seed 12) — the sweep
+///   drops the pin, the bytes survive on disk as conflict-as-data.
+///
+/// Both must be GREEN under every oracle.
+#[must_use]
+pub fn bn_m7kjy_regression_plan() -> ScenarioPlan {
+    let ws_a = WsId("ws-a".to_owned());
+    let ws_b = WsId("ws-b".to_owned());
+    let ops = vec![
+        Op::WsCreate {
+            ws: ws_a.clone(),
+            from: BaseRef::Main,
+        },
+        Op::EditFiles {
+            ws: ws_a.clone(),
+            files: vec![edit("ws-a/only.txt", "ws-a abandoned work (bn-m7kjy)\n")],
+        },
+        Op::Commit {
+            ws: ws_a.clone(),
+            msg: Seeded("ws-a: unmerged work".to_owned()),
+        },
+        Op::Destroy {
+            ws: ws_a,
+            force: true,
+        },
+        Op::WsCreate {
+            ws: ws_b.clone(),
+            from: BaseRef::Main,
+        },
+        Op::EditFiles {
+            ws: ws_b.clone(),
+            files: vec![edit("shared/hot.txt", "ws-b committed hot\n")],
+        },
+        Op::Commit {
+            ws: ws_b.clone(),
+            msg: Seeded("ws-b: add shared/hot.txt".to_owned()),
+        },
+        Op::DirtyTrunkWrite {
+            files: vec![edit("shared/hot.txt", "UNCOMMITTED trunk hot (bn-m7kjy)\n")],
+        },
+        Op::Merge {
+            srcs: vec![ws_b],
+            into: Target::Default,
+            destroy: false,
+        },
+        Op::Gc {
+            recovery_snapshots: true,
+            older_than_days: 0,
+        },
+    ];
+    ScenarioPlan {
+        seed: BN_M7KJY_REGRESSION_SEED,
+        profile: ConditionProfile::default().with_escape_weight(1),
+        steps: ops
+            .into_iter()
+            .enumerate()
+            .map(|(i, op)| regression_step(i, op))
+            .collect(),
     }
 }
 

@@ -79,6 +79,12 @@
 //! 5120 op-steps, 0 violations (the depth ceiling that needed bn-3g6o — Oracle
 //! A recognizing content preserved inside conflict-marker rewrites — is fixed).
 //!
+//! Triage knobs (bn-m7kjy): `DST_SEEDS=5,10,26` replays exactly those seeds
+//! (the plan for a seed is prefix-stable, so a lower `DST_STEPS` shrinks it);
+//! `DST_DEBUG_DIR=<dir>` appends every op, its maw output and the post-op ref
+//! set to `<dir>/seed-<n>.log` and copies each seed's final repo to
+//! `<dir>/repo-<n>` for forensics.
+//!
 //! bn-286g: `DST_TRACES=48 DST_STEPS=48` surfaced the SAME conflict-as-data
 //! gap in the later-added `SiblingRefFaithfulness` escape oracle (seeds
 //! 0/15/18). The default 16x24 budget never reaches a *conflicting* sibling
@@ -98,7 +104,7 @@ use maw::assurance::oracle_b;
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_escape::{
     SiblingRefFaithfulness, TrunkDirtyDisplacement, TrunkDirtyPreservation,
-    check_record_ref_coherence,
+    check_record_ref_coherence, gc_eligible_recovery_snapshots, recovery_refs,
 };
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_worktree::{CleanMaterialization, MaskedStalePreservation};
@@ -205,6 +211,9 @@ struct Liveness {
     dirty_trunk_writes: u64,
     /// bn-2bcx: successful `maw gc` runs.
     gc_runs: u64,
+    /// bn-m7kjy: Oracle A witnesses released because their only copy was a
+    /// recovery snapshot an explicit gc sweep was entitled to delete.
+    gc_released_witnesses: u64,
     /// bn-3gba: workspace-level `worktree == HEAD` assertions the
     /// `CleanMaterialization` oracle actually performed. The non-vacuity signal
     /// for the bn-p3m9 gate: 0 checks means the oracle judged nothing and a
@@ -254,6 +263,74 @@ const fn op_name(op: &Op) -> &'static str {
         Op::Gc { .. } => "gc",
         Op::CorruptWorktreeStatMasked { .. } => "corrupt_worktree_stat_masked",
     }
+}
+
+/// bn-m7kjy triage hook: with `DST_DEBUG_DIR` set, append the op header, its
+/// maw output and the post-op ref set to `<dir>/seed-<seed>.log`. Best-effort.
+#[cfg(feature = "assurance")]
+fn debug_log_step(root: &std::path::Path, seed: u64, header: &str, output: &str) {
+    let Ok(dir) = std::env::var("DST_DEBUG_DIR") else {
+        return;
+    };
+    let refs = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let entry = format!("=== {header}\n--- output:\n{output}\n--- refs after:\n{refs}\n");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&dir).join(format!("seed-{seed}.log")))
+    {
+        let _ = std::io::Write::write_all(&mut f, entry.as_bytes());
+    }
+}
+
+/// bn-m7kjy: what an explicit `maw gc --recovery-snapshots` was entitled to
+/// delete, captured BEFORE it runs so Oracle A can release (only) witnesses
+/// whose sole copy was such a snapshot. `None` for every other op.
+#[cfg(feature = "assurance")]
+struct GcSweepCtx {
+    pre_recovery: std::collections::BTreeMap<String, String>,
+    eligible: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(feature = "assurance")]
+fn gc_sweep_ctx(repo: &TestRepo, op: &Op) -> Option<GcSweepCtx> {
+    let Op::Gc {
+        recovery_snapshots: true,
+        older_than_days,
+    } = op
+    else {
+        return None;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    Some(GcSweepCtx {
+        pre_recovery: recovery_refs(repo.root()),
+        eligible: gc_eligible_recovery_snapshots(repo.root(), *older_than_days, now),
+    })
+}
+
+/// Apply [`GcSweepCtx`] to Oracle A for the post-gc `state` (call before
+/// `check_step`). Returns the released-witness count, or a plumbing error line.
+#[cfg(feature = "assurance")]
+fn release_gc_swept(
+    oracle_a: &mut OracleA,
+    ctx: Option<&GcSweepCtx>,
+    state: &maw::assurance::oracle::AssuranceState,
+) -> Result<usize, String> {
+    let Some(ctx) = ctx else {
+        return Ok(0);
+    };
+    oracle_a
+        .release_swept_snapshots(&ctx.pre_recovery, &ctx.eligible, state)
+        .map_err(|e| format!("OracleA gc-release plumbing error: {e}"))
 }
 
 /// Map `BaseRef` to a `--from` value.
@@ -934,6 +1011,7 @@ fn run_seed(
             None
         };
 
+        let gc_ctx = gc_sweep_ctx(&repo, op);
         let (outcome, crashed) = if let Some(fp_name) = fault_name {
             // Arm MAW_FP=<name>=abort on the failpoints binary; the op will
             // likely crash mid-flight. That is EXPECTED — the oracle judges the
@@ -945,6 +1023,12 @@ fn run_seed(
             (execute_op(&repo, op), false)
         };
         let succeeded = outcome.succeeded;
+        debug_log_step(
+            repo.root(),
+            seed,
+            &format!("step={i} op={op:?} fault={fault_name:?} ok={succeeded} crashed={crashed}"),
+            &outcome.output,
+        );
         // bn-22jy: feed the corruption oracle the RESOLVED victim (the op
         // carries only a hint), so it never judges a path that was not actually
         // poisoned.
@@ -1004,6 +1088,12 @@ fn run_seed(
             }
         };
 
+        // bn-m7kjy: an explicit recovery-snapshot sweep releases (only) the
+        // witnesses whose sole copy it was entitled to delete.
+        match release_gc_swept(&mut oracle_a, gc_ctx.as_ref(), &state) {
+            Ok(n) => live.gc_released_witnesses += n as u64,
+            Err(e) => violations.push(format!("seed={seed} step={i} op={name} {e}")),
+        }
         // Oracle A (incremental content-reachability no-work-lost).
         match oracle_a.check_step(&state, i) {
             Ok(report) => {
@@ -1077,6 +1167,14 @@ fn run_seed(
         }
     }
 
+    if let Ok(dir) = std::env::var("DST_DEBUG_DIR") {
+        let dst = std::path::Path::new(&dir).join(format!("repo-{seed}"));
+        let _ = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(repo.root())
+            .arg(&dst)
+            .status();
+    }
     // Record how much content Oracle A actually witnessed this seed (the
     // non-vacuity signal — accumulated across seeds by the caller).
     live.oracle_a_witnesses = live
@@ -1132,7 +1230,13 @@ fn drive_tier(
     let mut all_violations: Vec<String> = Vec::new();
     let mut failing_seeds: Vec<u64> = Vec::new();
 
-    for seed in 0..count {
+    // `DST_SEEDS=5,10,26` replays exactly those seeds (triage / shrinking);
+    // otherwise seeds `0..DST_TRACES` run.
+    let seeds: Vec<u64> = std::env::var("DST_SEEDS").ok().map_or_else(
+        || (0..count).collect(),
+        |s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect(),
+    );
+    for seed in seeds {
         let v = run_seed(seed, n_steps, inject_faults, corrupt_weight, &mut live);
         if !v.is_empty() {
             failing_seeds.push(seed);
@@ -1165,7 +1269,7 @@ fn drive_tier(
         "{label}: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
-         {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx); \
+         {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx), {} witnesses released by explicit snapshot sweeps (bn-m7kjy); \
          {} clean-materialization checks (bn-3gba); \
          {} masked corruptions ({} effective), {} masked-removal judgements \
          (overwrite or destroy, bn-2k9e), {} masks re-materialized (bn-22jy); \
@@ -1184,6 +1288,7 @@ fn drive_tier(
         live.out_of_maw_commits,
         live.dirty_trunk_writes,
         live.gc_runs,
+        live.gc_released_witnesses,
         live.clean_materialization_checks,
         live.masked_corruptions,
         live.masked_corruptions_effective,
@@ -1418,6 +1523,8 @@ struct RegressionRun {
     /// (`refs/manifold/recovery/<ws>/materialize-<ts>`) rather than settling
     /// for "the bytes turned up somewhere recoverable".
     recovery_refs: Vec<String>,
+    /// bn-m7kjy: Oracle A witnesses released by explicit snapshot sweeps.
+    gc_released_witnesses: usize,
 }
 
 /// [`drive_regression_plan`] plus the non-vacuity evidence.
@@ -1459,6 +1566,10 @@ type BeforeStep<'a> = dyn FnMut(&TestRepo, usize) -> Vec<(String, String)> + 'a;
 /// `(path, target)`, so the strict displacement oracle (bn-2zubk) tracks them
 /// like any `DirtyTrunkWrite`.
 #[cfg(feature = "assurance")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat per-step oracle battery; splitting it would hide the check order"
+)]
 fn drive_plan_on(
     repo: &TestRepo,
     plan: &maw::assurance::scenario::ScenarioPlan,
@@ -1483,6 +1594,7 @@ fn drive_plan_on(
             displacement_oracle.record_dirty_symlink(&path, &target);
         }
         let mut crashed = false;
+        let gc_ctx = gc_sweep_ctx(repo, op);
         let outcome = match (&step.fault, inject_faults) {
             (FaultSpec::Failpoint { name: fp, .. }, true) => {
                 let (outcome, op_crashed, output) = execute_op_faulted(repo, op, fp);
@@ -1529,6 +1641,9 @@ fn drive_plan_on(
                 continue;
             }
         };
+        if let Err(e) = release_gc_swept(&mut oracle_a, gc_ctx.as_ref(), &state) {
+            violations.push(format!("step={i} op={name} {e}"));
+        }
         if let Ok(report) = oracle_a.check_step(&state, i)
             && let Some(v) = report.violation
         {
@@ -1567,6 +1682,7 @@ fn drive_plan_on(
             masked_paths,
             masked_overwrites_judged: masked_oracle.overwrites_judged(),
             recovery_refs: recovery_ref_names(repo.root()),
+            gc_released_witnesses: oracle_a.released_count(),
         },
         faulted_steps,
     )
@@ -1736,6 +1852,33 @@ fn bn_1xmk_regression_is_green() {
         violations.is_empty(),
         "bn-1xmk regression must be clean with the fix in place; oracle violations:\n{}",
         violations.join("\n"),
+    );
+}
+
+/// bn-m7kjy: an explicit `maw gc --recovery-snapshots --older-than 0` after a
+/// `destroy --force` of unmerged work and after a dirty-trunk local-vs-merge
+/// conflict must be GREEN — the user drained the recover queue (Oracle A
+/// releases exactly the swept destroy snapshot's content), and the dirty trunk
+/// bytes survive on disk as the `default` side of the conflict. Non-vacuity:
+/// the sweep really released a witness and really removed every recovery ref.
+#[cfg(feature = "assurance")]
+#[test]
+fn bn_m7kjy_explicit_snapshot_drain_is_green() {
+    let plan = maw::assurance::scenario::bn_m7kjy_regression_plan();
+    let run = drive_regression_plan_reported(&plan);
+    assert!(
+        run.violations.is_empty(),
+        "bn-m7kjy: explicit snapshot drain must be clean; oracle violations:\n{}",
+        run.violations.join("\n"),
+    );
+    assert!(
+        run.gc_released_witnesses >= 1,
+        "non-vacuity: the sweep must have released ws-a's destroy-snapshot content"
+    );
+    assert!(
+        run.recovery_refs.is_empty(),
+        "non-vacuity: --older-than 0 must have swept every recovery ref: {:?}",
+        run.recovery_refs
     );
 }
 
