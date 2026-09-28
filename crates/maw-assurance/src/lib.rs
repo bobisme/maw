@@ -124,6 +124,13 @@ pub mod shrinker;
 #[cfg(all(test, feature = "oracles"))]
 mod shrinker_tests;
 pub mod trace;
+/// **Dirty-trunk tier** of the in-proc driver (bn-1h9ue): the production
+/// target-update seam ([`trunk::TrunkUpdater`]), rich worktree edits, entry
+/// capture, and the **TrunkReplayFaithfulness** reference model
+/// ([`trunk::judge_replay`]) that judges exec bits and symlink type
+/// conflicts after every replayed merge.
+#[cfg(feature = "oracles")]
+pub mod trunk;
 
 /// Path of the merge journal (`merge-state.json`) for `repo_root`'s layout.
 ///

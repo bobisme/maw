@@ -469,6 +469,14 @@ const WHOLE_SNAPSHOT_NOTICES: &[&str] = &[
     // bn-15fzo: a stale checkout intent for a different commit — "left its
     // pre-merge edits pinned at <ref>".
     "pre-merge edits pinned at",
+    // bn-15fzo/bn-1bkr0 resume: edits made in the default worktree AFTER the
+    // crash (or a partial replay) are pinned and cleaned before the resumed
+    // replay — "held changes beyond the interrupted update ... They are
+    // pinned at <ref>". Like the stale-intent notice above it names the ref
+    // for the whole set, not per path (bn-1h9ue triage F1: surfaced by the
+    // dirty-trunk soak; accepted here by that analogy, per-path restore
+    // commands filed as a UX follow-up).
+    "held changes beyond the interrupted update",
 ];
 
 /// Phrases by which maw tells the user their version of a path is back on
@@ -570,6 +578,13 @@ impl TrunkDirtyDisplacement {
             self.pending.remove(p.as_ref());
             self.deferred.remove(p.as_ref());
         }
+    }
+
+    /// Entries currently expected back on disk (bn-1h9ue: the in-proc
+    /// vacuity guard counts merges that ran with this `> 0`).
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// Per-path verdicts rendered so far (0 = the oracle judged nothing).
@@ -715,13 +730,26 @@ fn claims_on_disk(output: &str, path: &str) -> bool {
 
 /// How the op output accounted for a displaced `path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Report {
+pub(crate) enum Report {
     /// Not mentioned with any way back.
     Silent,
     /// Reported as moved, with a way back (acknowledged).
     Displaced,
     /// Claimed to be back on disk — while it is not (a false report).
     ClaimedOnDisk,
+}
+
+/// Whether `output` carries a whole-snapshot displacement notice
+/// ([`WHOLE_SNAPSHOT_NOTICES`]) — shared with the in-proc replay model
+/// (bn-1h9ue, `crate::trunk::judge_replay`).
+pub(crate) fn has_whole_snapshot_notice(output: &str) -> bool {
+    WHOLE_SNAPSHOT_NOTICES.iter().any(|m| output.contains(m))
+}
+
+/// [`classify_report`] for the in-proc replay model (bn-1h9ue): one
+/// definition of "the output reported `path` with a way back".
+pub(crate) fn report_for(output: &str, path: &str) -> Report {
+    classify_report(output, path)
 }
 
 /// How `output` accounts for `path`, which is NOT on disk as recorded (see
@@ -904,7 +932,10 @@ pub fn gc_eligible_recovery_snapshots(
     now_secs: u64,
 ) -> BTreeMap<String, String> {
     let cutoff = now_secs.saturating_sub(older_than_days.saturating_mul(86_400));
-    let flavor = LayoutFlavor::detect(repo_root);
+    let live: BTreeSet<String> = crate::workspace_dirs(repo_root)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let claimed: BTreeSet<String> = destroy_record_claims(repo_root)
         .into_iter()
         .map(|c| c.claimed_ref)
@@ -918,8 +949,11 @@ pub fn gc_eligible_recovery_snapshots(
             let Some((ws, leaf)) = rest.rsplit_once('/') else {
                 return false;
             };
+            // bn-wxg28 / bn-1h9ue: liveness through the layout-aware
+            // `workspace_dirs` — the default workspace is the repo root on the
+            // consolidated layout (no `.maw/workspaces/default/`).
             !ws.is_empty()
-                && !flavor.workspace_path(repo_root, ws).exists()
+                && !live.contains(ws)
                 && claimed.contains(name)
                 && pin_timestamp_from_leaf(leaf).is_some_and(|ts| ts <= cutoff)
         })

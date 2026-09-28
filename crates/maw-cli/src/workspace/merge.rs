@@ -7260,6 +7260,13 @@ fn guard_unbound_sources_against_active_change_ancestry(
 /// CRITICAL: errors and conflicts during replay never abort the cleanup phase.
 /// The merge COMMIT has already succeeded — remaining cleanup (workspace
 /// destroy, GC, merge-state removal) MUST still run.
+///
+/// # Errors
+///
+/// Fails when the default workspace cannot be opened or anchored, the
+/// checkout intent cannot be recorded, a resumed update cannot pin or clean
+/// the interrupted tree, or an injected failpoint fires. The merge journal
+/// then stays for `maw ws merge --recover` (bn-15fzo).
 #[expect(
     clippy::too_many_arguments,
     reason = "cleanup step needs explicit merge context from earlier phases"

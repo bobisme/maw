@@ -110,8 +110,12 @@ use crate::infra::{self, InfraFailure};
 use crate::oracle::{AssuranceState, AssuranceViolation, WorkspaceStatus, capture_state};
 use crate::oracle_a::{OracleA, StepReport};
 use crate::oracle_b::{self, OracleBViolation};
+use crate::oracle_escape::{EscapeViolation, TrunkDirtyDisplacement, TrunkDirtyPreservation};
 use crate::scenario::{
     BaseRef, FaultSpec, FileEdit, Op, PlannedStep, ScenarioPlan, Seeded, Target, WsId,
+};
+use crate::trunk::{
+    self, EntryMap, ReplayMismatch, TrunkUpdateOutcome, TrunkUpdateRequest, TrunkUpdater,
 };
 
 // ---------------------------------------------------------------------------
@@ -133,6 +137,10 @@ pub enum StepVerdict {
     /// Oracle B tripped. Carries the first violation (deterministic
     /// B1→B2→B3→B4 order) reduced to its class signature.
     OracleB(OracleBClass),
+    /// A dirty-trunk oracle tripped (bn-1h9ue): `TrunkDirtyPreservation`,
+    /// `TrunkDirtyDisplacement` or the `TrunkReplayFaithfulness` reference
+    /// model ([`crate::trunk::judge_replay`]).
+    Trunk(TrunkClass),
     /// The harness itself malfunctioned (bn-25pac): a plan step could not
     /// be applied, the post-step state could not be read, an oracle
     /// returned a tooling error, or the seed ended with vacuous oracle
@@ -168,6 +176,59 @@ impl HarnessErrorClass {
         Self {
             site,
             detail: detail.into(),
+        }
+    }
+}
+
+/// Class signature for a dirty-trunk violation (bn-1h9ue) — oracle kind +
+/// offending trunk path. Equivalence is `(kind, path)`; `detail` is
+/// informational only.
+#[derive(Clone, Debug)]
+pub struct TrunkClass {
+    /// `"TrunkDirtyLost" | "TrunkDirtyDisplaced" | "TrunkReplayMismatch"`.
+    pub kind: &'static str,
+    /// The trunk path (relative to the default worktree).
+    pub path: String,
+    /// Human-readable detail (NOT part of the equivalence key).
+    pub detail: String,
+}
+
+impl PartialEq for TrunkClass {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.path == other.path
+    }
+}
+impl Eq for TrunkClass {}
+
+impl TrunkClass {
+    fn from_escape(v: &EscapeViolation) -> Self {
+        match v {
+            EscapeViolation::TrunkDirtyLost { path } => Self {
+                kind: "TrunkDirtyLost",
+                path: path.clone(),
+                detail: v.to_string(),
+            },
+            EscapeViolation::TrunkDirtyDisplaced { path, .. } => Self {
+                kind: "TrunkDirtyDisplaced",
+                path: path.clone(),
+                detail: v.to_string(),
+            },
+            other => Self {
+                kind: "TrunkOracleError",
+                path: String::new(),
+                detail: other.to_string(),
+            },
+        }
+    }
+
+    fn from_mismatch(m: &ReplayMismatch) -> Self {
+        Self {
+            kind: "TrunkReplayMismatch",
+            path: m.path.clone(),
+            detail: format!(
+                "TrunkReplayFaithfulness (bn-1h9ue): '{}': {}",
+                m.path, m.detail
+            ),
         }
     }
 }
@@ -213,6 +274,7 @@ impl StepVerdict {
             (Self::Clean, Self::Clean) => true,
             (Self::OracleA(a), Self::OracleA(b)) => a == b,
             (Self::OracleB(a), Self::OracleB(b)) => a == b,
+            (Self::Trunk(a), Self::Trunk(b)) => a == b,
             (Self::HarnessError(a), Self::HarnessError(b)) => a == b,
             _ => false,
         }
@@ -225,6 +287,7 @@ impl StepVerdict {
             Self::Clean => ("Clean", String::new()),
             Self::OracleA(a) => (a.kind, a.oid.clone()),
             Self::OracleB(b) => (b.kind, b.entity.clone()),
+            Self::Trunk(t) => (t.kind, t.path.clone()),
             Self::HarnessError(h) => ("HarnessError", format!("{}: {}", h.site, h.detail)),
         }
     }
@@ -350,11 +413,62 @@ pub struct InProcDriver {
     /// Workspaces with evidence (a create and/or new commits) that no
     /// observation has handed to Oracle A yet: `ws -> (creates, commits)`.
     pending_evidence: std::collections::BTreeMap<String, (usize, usize)>,
+    /// The dirty-trunk tier (bn-1h9ue): a real default worktree whose
+    /// target update after every merge is the PRODUCTION code. `None` when no
+    /// [`TrunkUpdater`] is installed (the legacy ref-shape-only model).
+    trunk: Option<TrunkTier>,
     /// Test-only fault knob: pretend the per-step workspace observation
     /// saw no workspaces (the historical `unwrap_or_default` fail-open
     /// class), so the vacuity guard can be proven to fire.
     #[cfg(test)]
     test_blind_ws_observation: bool,
+}
+
+/// Name of the default workspace (its worktree is `<root>/ws/default`). No
+/// generator slot can collide with it (slots are `ws-<n>`).
+pub const DEFAULT_WS: &str = "default";
+
+/// The dirty-trunk tier's state (bn-1h9ue). See [`crate::trunk`].
+struct TrunkTier {
+    updater: std::sync::Arc<dyn TrunkUpdater>,
+    /// `<root>/ws/default`.
+    ws_path: PathBuf,
+    preservation: TrunkDirtyPreservation,
+    displacement: TrunkDirtyDisplacement,
+    /// Trunk paths currently recorded with the two dirty-byte oracles.
+    recorded: BTreeSet<String>,
+    /// A target update a crash (or error) interrupted, awaiting the next
+    /// merge's recovery.
+    pending: Option<PendingUpdate>,
+    /// Combined output of this step's target updates.
+    step_output: String,
+    /// This step's (last) target update did not complete.
+    step_crashed: bool,
+    /// First replay-model mismatch of this step.
+    step_mismatch: Option<ReplayMismatch>,
+    /// First displacement found when judging this step's recovery.
+    step_displaced: Option<EscapeViolation>,
+    /// `TrunkDirtyDisplacement` entries pending when the recovery started.
+    pending_len_before_recovery: usize,
+}
+
+/// An interrupted target update and the model inputs captured before it.
+struct PendingUpdate {
+    epoch_before: String,
+    epoch_after: String,
+    sources: Vec<String>,
+    /// Anchor tree the replay is judged against.
+    base: EntryMap,
+    /// The worktree before the interrupted attempt.
+    user: EntryMap,
+    /// The interrupted attempt got as far as starting the update (so the
+    /// worktree may already hold the merged tree); `false` = the merge died
+    /// before the target update began and the worktree is still pre-merge.
+    update_started: bool,
+    /// The trunk was edited while the update was pending: the pre-crash
+    /// capture no longer describes the user's state, so the reference model
+    /// does not judge the recovery (the byte oracles still do).
+    tainted: bool,
 }
 
 /// Per-drive evidence counters (bn-25pac). A seed only counts as clean
@@ -378,6 +492,24 @@ pub struct DriveStats {
     /// the workspace was still extant (a plant that removes the workspace
     /// before any observation legitimately leaves a commit unobserved).
     pub commits_observed: usize,
+    // --- dirty-trunk tier (bn-1h9ue); all 0 when no updater is installed ---
+    /// `DirtyTrunkWrite` ops applied to the default worktree.
+    pub trunk_writes: usize,
+    /// Production target updates run (including recoveries and crashed runs).
+    pub trunk_updates: usize,
+    /// Target updates a crash interrupted (an `abort` inside it, an error,
+    /// or a merge that died before its update began), leaving the update to
+    /// the next merge's recovery.
+    pub trunk_crashes: usize,
+    /// Merges that completed while `TrunkDirtyDisplacement` expected
+    /// uncommitted trunk entries back on disk.
+    pub dirty_trunk_merges: usize,
+    /// `TrunkDirtyDisplacement` per-path verdicts (its `judged()` counter).
+    pub displacement_checks: usize,
+    /// Completed target updates the replay reference model judged.
+    pub replay_judgements: usize,
+    /// Per-path verdicts of the replay reference model.
+    pub replay_checks: usize,
 }
 
 impl DriveStats {
@@ -403,6 +535,28 @@ impl DriveStats {
                 ),
             ));
         }
+        // bn-1h9ue: a seed that merged over a dirty trunk must have made at
+        // least one displacement judgement, and every judged update at least
+        // one per-path replay verdict — otherwise the trunk oracles are wired
+        // to nothing and the seed proves nothing about the replay.
+        if self.dirty_trunk_merges > 0 && self.displacement_checks == 0 {
+            return Some(HarnessErrorClass::new(
+                "vacuous_displacement",
+                format!(
+                    "{} merge(s) ran over a dirty trunk but TrunkDirtyDisplacement judged 0 entries",
+                    self.dirty_trunk_merges
+                ),
+            ));
+        }
+        if self.replay_judgements > 0 && self.replay_checks == 0 {
+            return Some(HarnessErrorClass::new(
+                "vacuous_replay",
+                format!(
+                    "{} target update(s) judged but the replay model rendered 0 path verdicts",
+                    self.replay_judgements
+                ),
+            ));
+        }
         if self.commits_observed > 0 && self.witnesses == 0 {
             return Some(HarnessErrorClass::new(
                 "vacuous_witnesses",
@@ -424,6 +578,13 @@ impl DriveStats {
         self.workspaces_observed += other.workspaces_observed;
         self.commits_made += other.commits_made;
         self.commits_observed += other.commits_observed;
+        self.trunk_writes += other.trunk_writes;
+        self.trunk_updates += other.trunk_updates;
+        self.trunk_crashes += other.trunk_crashes;
+        self.dirty_trunk_merges += other.dirty_trunk_merges;
+        self.displacement_checks += other.displacement_checks;
+        self.replay_judgements += other.replay_judgements;
+        self.replay_checks += other.replay_checks;
     }
 }
 
@@ -435,6 +596,10 @@ impl InProcDriver {
         Self::init_repo(&root)?;
         let root_oid = git_capture(&root, &["rev-parse", "HEAD"])?;
         std::fs::create_dir_all(root.join("ws"))?;
+        let trunk = match trunk::installed_trunk_updater() {
+            Some(updater) => Some(Self::init_trunk(&root, updater)?),
+            None => None,
+        };
         let oracle_a = OracleA::new(&root);
         Ok(Self {
             repo,
@@ -443,8 +608,64 @@ impl InProcDriver {
             oracle_a,
             stats: DriveStats::default(),
             pending_evidence: std::collections::BTreeMap::new(),
+            trunk,
             #[cfg(test)]
             test_blind_ws_observation: false,
+        })
+    }
+
+    /// Construct a driver with an explicit target updater (tests), instead
+    /// of the process-wide one.
+    pub fn with_trunk_updater(updater: std::sync::Arc<dyn TrunkUpdater>) -> std::io::Result<Self> {
+        let mut d = Self::new()?;
+        if d.trunk.is_none() {
+            let root = d.repo.path().to_path_buf();
+            d.trunk = Some(Self::init_trunk(&root, updater)?);
+        }
+        Ok(d)
+    }
+
+    /// Whether this driver runs the dirty-trunk tier.
+    #[must_use]
+    pub const fn has_trunk(&self) -> bool {
+        self.trunk.is_some()
+    }
+
+    /// The default worktree, when the dirty-trunk tier is on.
+    #[must_use]
+    pub fn default_ws_path(&self) -> Option<&Path> {
+        self.trunk.as_ref().map(|t| t.ws_path.as_path())
+    }
+
+    /// bn-1h9ue: turn the freshly initialised repo into the v2 shape — a bare
+    /// root whose default workspace `<root>/ws/default` is a linked worktree
+    /// on `main` (the same refs; the root commit is unchanged).
+    fn init_trunk(
+        root: &Path,
+        updater: std::sync::Arc<dyn TrunkUpdater>,
+    ) -> std::io::Result<TrunkTier> {
+        run_git(root, &["config", "core.bare", "true"])?;
+        std::fs::remove_file(root.join("README.md"))?;
+        match std::fs::remove_file(root.join(".git").join("index")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let ws_path = root.join("ws").join(DEFAULT_WS);
+        let ws_arg = ws_path.to_string_lossy().into_owned();
+        run_git(root, &["worktree", "add", "-q", &ws_arg, "main"])?;
+        Ok(TrunkTier {
+            updater,
+            ws_path,
+            preservation: TrunkDirtyPreservation::new(),
+            displacement: TrunkDirtyDisplacement::new(),
+            recorded: BTreeSet::new(),
+            pending: None,
+            step_output: String::new(),
+            step_crashed: false,
+            step_mismatch: None,
+            step_displaced: None,
+            pending_len_before_recovery: 0,
         })
     }
 
@@ -502,6 +723,9 @@ impl InProcDriver {
             // (bn-30v6e); anything else is a HarnessError that fails the
             // seed like an oracle violation — the oracles must never judge
             // a half-applied step and call it clean.
+            if let Some(t) = self.trunk.as_mut() {
+                t.begin_step();
+            }
             if let Err(err) = self.apply_op(step) {
                 infra::raise_if_infra_io(&err, &format!("in-proc apply step {i}"));
                 return DriveOutcome {
@@ -530,6 +754,16 @@ impl InProcDriver {
                 for d in &defects {
                     self.apply_planted_defect(d, step);
                 }
+            }
+            // bn-1h9ue: the dirty-trunk oracles judge EVERY step in both
+            // modes — `TrunkDirtyDisplacement` is stateful across steps (its
+            // crash deferral), so a final-only check could not reproduce it.
+            if let Some(verdict) = self.check_trunk(step) {
+                return DriveOutcome {
+                    verdict,
+                    steps_replayed,
+                    stats: self.final_stats(),
+                };
             }
             if check_each_step {
                 let verdict = self.check_oracles(i);
@@ -629,6 +863,10 @@ impl InProcDriver {
             }
         };
         state.workspaces.clear();
+        // The in-proc repo is always the v2 shape (`<root>/ws/<name>`), so
+        // this walks `ws/` directly rather than `crate::workspace_dirs`: that
+        // helper skips unreadable directories, and this observation must
+        // fail closed (bn-25pac).
         let entries = std::fs::read_dir(root.join("ws")).map_err(|err| {
             infra::raise_if_infra_io(&err, "read ws/");
             HarnessErrorClass::new("read_ws_dir", err.to_string())
@@ -640,6 +878,12 @@ impl InProcDriver {
             })?;
             let name = entry.file_name().to_string_lossy().to_string();
             if !entry.path().is_dir() {
+                continue;
+            }
+            // bn-1h9ue: the default worktree is the merge TARGET, not an
+            // in-proc workspace (it has no refs/manifold/ws/<name> state
+            // ref); the dirty-trunk oracles judge it.
+            if self.trunk.is_some() && name == DEFAULT_WS {
                 continue;
             }
             let head_oid = match resolve_ref(&root, &refs_workspace_state(&name)) {
@@ -766,7 +1010,11 @@ impl InProcDriver {
                 srcs,
                 into,
                 destroy,
-            } => self.do_merge(&root, srcs, into, *destroy, &step.fault, &env),
+            } => {
+                let (srcs, into, destroy, fault) =
+                    (srcs.clone(), into.clone(), *destroy, step.fault.clone());
+                self.do_merge(&root, &srcs, &into, destroy, &fault, &env)
+            }
             // Advance is modelled like Sync at the in-proc level (no per-ws
             // epoch-staleness representation). Only generated when a profile
             // sets advance_weight > 0; the default soak profile never emits it.
@@ -798,7 +1046,19 @@ impl InProcDriver {
             // preserve-before-overwrite guard actually lives. Only generated
             // when a profile sets corrupt_weight > 0; the in-proc soak profile
             // keeps it 0, so this arm is inert for the bn-2yzz campaign.
-            Op::DirtyTrunkWrite { .. } | Op::CorruptWorktreeStatMasked { .. } => Ok(()),
+            //
+            // bn-1h9ue: with the dirty-trunk tier on, the driver HAS a real
+            // default worktree, so `DirtyTrunkWrite` edits it (every
+            // `EditKind`) and records the result with the dirty-byte oracles.
+            Op::DirtyTrunkWrite { files } => match self.trunk.as_mut() {
+                Some(t) => {
+                    t.write(files)?;
+                    self.stats.trunk_writes += 1;
+                    Ok(())
+                }
+                None => Ok(()),
+            },
+            Op::CorruptWorktreeStatMasked { .. } => Ok(()),
             Op::Gc {
                 recovery_snapshots,
                 older_than_days,
@@ -844,11 +1104,8 @@ impl InProcDriver {
             return Ok(()); // a planted destroy may have removed it
         }
         for f in files {
-            let path = ws_dir.join(&f.path);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, &f.content)?;
+            // bn-1h9ue: every `EditKind` (plain writes are unchanged).
+            trunk::apply_edit(&ws_dir, f)?;
         }
         Ok(())
     }
@@ -860,68 +1117,56 @@ impl InProcDriver {
         msg: &Seeded,
         env: &[(String, String)],
     ) -> std::io::Result<bool> {
-        // Manually build a commit at refs/manifold/ws/<ws> with the
-        // workspace's edited file content (a single file per commit is
-        // sufficient — we just need a real, hash-stable blob for Oracle
-        // A's witness harvest).
+        // Build a commit at refs/manifold/ws/<ws>: the workspace's parent
+        // tree with every entry in its directory layered on top (bn-1h9ue:
+        // nested paths, exec bits and symlinks are committed as such — the
+        // model used to flatten everything to 100644 basenames, so a merge
+        // could never change a trunk path's mode or type).
         let ws_dir = root.join("ws").join(&ws.0);
         if !ws_dir.is_dir() {
             return Ok(false); // destroyed in flight (modelled no-op)
         }
-        let mut tree_entries: Vec<(String, String)> = Vec::new();
-        for entry in walk_files(&ws_dir)? {
-            let rel = entry
-                .strip_prefix(&ws_dir)
-                .unwrap_or(&entry)
-                .to_string_lossy()
-                .into_owned();
-            // Skip git-internal & sentinel files.
-            if rel.starts_with(".git") || rel == ".maw-ws" {
-                continue;
-            }
-            let content = std::fs::read(&entry)?;
-            let blob = git_hash_object_stdin(root, &content)?;
-            tree_entries.push((rel, blob));
-        }
-        if tree_entries.is_empty() {
+        let mut entries = walk_entries(&ws_dir)?;
+        entries.retain(|e| e.rel != ".maw-ws" && !e.rel.starts_with(".git"));
+        if entries.is_empty() {
             return Ok(false); // nothing edited yet (modelled no-op)
         }
-        // Build a flat tree (paths with `/` get nested via mktree's flat
-        // input format — we use one entry per file with `/` allowed only
-        // at depth 1; canonicalise by sorting).
-        tree_entries.sort();
-        let mut mktree_input = String::new();
-        for (path, blob) in &tree_entries {
-            // Skip nested paths to keep the test tree flat; if the path
-            // contains `/`, replace with a slot name. The plan's edit
-            // paths are short ("ws-0/file-1.txt", "shared/file-0.txt").
-            // Use the basename so mktree is happy.
-            let basename = std::path::Path::new(path)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone());
-            mktree_input.push_str(&format!("100644 blob {blob}\t{basename}\n"));
+        // Blob OIDs: regular files in one `hash-object --stdin-paths`, link
+        // targets one at a time (there are few).
+        let file_paths: String = entries
+            .iter()
+            .filter(|e| e.link_target.is_none())
+            .map(|e| format!("{}\n", e.abs.display()))
+            .collect();
+        let file_oids = if file_paths.is_empty() {
+            String::new()
+        } else {
+            git_pipe(
+                root,
+                &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+                file_paths.as_bytes(),
+            )?
+        };
+        let mut file_oids = file_oids.lines();
+        let mut index_info = String::new();
+        for e in &entries {
+            let (mode, oid) = match &e.link_target {
+                Some(target) => ("120000", git_hash_object_stdin(root, target)?),
+                None => {
+                    let oid = file_oids
+                        .next()
+                        .ok_or_else(|| std::io::Error::other("hash-object: missing OID"))?
+                        .to_owned();
+                    (if e.exec { "100755" } else { "100644" }, oid)
+                }
+            };
+            index_info.push_str(&format!("{mode} {oid}\t{}\n", e.rel));
         }
-        // Deduplicate by basename (mktree refuses duplicates) — keep last.
-        let mut dedup: Vec<(String, String)> = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for line in mktree_input.lines().rev() {
-            let parts: Vec<&str> = line.splitn(3, [' ', '\t']).collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            let basename = parts[2].to_string();
-            if seen.insert(basename.clone()) {
-                dedup.push((basename, line.to_string()));
-            }
-        }
-        dedup.sort_by(|a, b| a.0.cmp(&b.0));
-        let mktree_input: String = dedup.iter().map(|(_, l)| format!("{l}\n")).collect();
-        let tree = git_pipe(root, &["mktree"], mktree_input.as_bytes())?;
         // Parent: current ws tip if any, else main.
         let ws_ref = refs_workspace_state(&ws.0);
         let parent = resolve_ref(root, &format!("{ws_ref}^{{commit}}"))?
             .unwrap_or_else(|| self.root_oid.clone());
+        let tree = layered_tree(root, &ws.0, &parent, &index_info)?;
         let commit = git_pipe_env(
             root,
             &["commit-tree", &tree, "-p", &parent, "-m", &msg.0],
@@ -936,7 +1181,7 @@ impl InProcDriver {
     }
 
     fn do_merge(
-        &self,
+        &mut self,
         root: &Path,
         srcs: &[WsId],
         into: &Target,
@@ -945,6 +1190,36 @@ impl InProcDriver {
         env: &[(String, String)],
     ) -> std::io::Result<()> {
         let _ = into; // we only model `Target::Default`
+        // bn-1h9ue: `maw ws merge` first recovers an interrupted merge —
+        // here, the target update a crash left unfinished.
+        if let Some(t) = self.trunk.as_mut()
+            && t.recover(root, &mut self.stats)?
+        {
+            // The recovery is its own op as far as the user is concerned: its
+            // output reports (or claims) what IT did to the dirty trunk, before
+            // this merge's own update starts. Judge the displacement oracle on
+            // it now, so a later claim by this merge's update (about the
+            // post-recovery state) is not read against the pre-crash entries.
+            let recovering = Op::Merge {
+                srcs: srcs.to_vec(),
+                into: into.clone(),
+                destroy,
+            };
+            let before = t.displacement.judged();
+            let v = t
+                .displacement
+                .check_step(root, &recovering, &t.step_output, false);
+            self.stats.displacement_checks +=
+                usize::try_from(t.displacement.judged().saturating_sub(before))
+                    .unwrap_or(usize::MAX);
+            if t.step_displaced.is_none() {
+                t.step_displaced = v.into_iter().next();
+            }
+            if t.pending_len_before_recovery > 0 {
+                self.stats.dirty_trunk_merges += 1;
+            }
+            t.step_output.clear();
+        }
         // The merge's effect: advance main + refs/manifold/epoch/current
         // to the last source's tip; bump the per-ws epoch refs of
         // non-sources to mark them stale; optionally destroy sources.
@@ -981,6 +1256,19 @@ impl InProcDriver {
             root,
             &["update-ref", "refs/manifold/epoch/current", &merge_commit],
         )?;
+        // bn-1h9ue: the CLEANUP phase's target update — production code —
+        // with the crash windows the fault names.
+        if let Some(t) = self.trunk.as_mut() {
+            let sources: Vec<String> = srcs.iter().map(|w| w.0.clone()).collect();
+            t.merge_update(
+                root,
+                &prev_main,
+                &merge_commit,
+                sources,
+                fault,
+                &mut self.stats,
+            )?;
+        }
         if destroy && !fault.is_some() {
             // Clean destroy of sources with recovery refs pinned.
             for src in srcs {
@@ -1053,11 +1341,23 @@ impl InProcDriver {
         Ok(())
     }
 
-    /// Model `maw gc`'s recovery-snapshot sweep at the ref-shape level: when
-    /// `recovery_snapshots` and `older_than_days == 0`, drain the recovery-ref
-    /// queue (the most hostile bn-3uou setting). Plain `maw gc` (recovery
-    /// snapshots off) is modelled as a no-op — it only self-heals dangling head
-    /// refs, which the in-proc model never leaks in isolation.
+    /// Model `maw gc`'s recovery-snapshot sweep at the ref-shape level, as
+    /// the explicit user sweep `maw gc --recovery-snapshots --older-than 0
+    /// --force` (bn-wxg28 policy, WITHOUT `--include-live`): drop every
+    /// recovery pin of a workspace that no longer exists; pins of a live
+    /// workspace — including the default worktree's dirty-trunk pins
+    /// `recovery/default/*` when the dirty-trunk tier is on — survive.
+    ///
+    /// Only `older_than_days == 0` has a modellable effect: the in-proc model
+    /// pins at a synthetic clock, so an age threshold has no stable meaning.
+    /// Plain `maw gc` (recovery snapshots off) only self-heals dangling head
+    /// refs, which the in-proc model never leaks in isolation — a no-op.
+    ///
+    /// Modelling gap: in-proc destroys write no destroy records, so no pin is
+    /// ever `gc_eligible_recovery_snapshots` (which requires a record's
+    /// claim) — witnessed content whose only copy was a swept pin is still
+    /// judged lost by Oracle A. `Op::Gc` is generated only under
+    /// `escape_weight > 0`, which no in-proc soak profile sets.
     fn do_gc(
         &self,
         root: &Path,
@@ -1065,9 +1365,6 @@ impl InProcDriver {
         older_than_days: u64,
     ) -> std::io::Result<()> {
         if !recovery_snapshots || older_than_days != 0 {
-            // Age-gated sweeps keep recent snapshots; the in-proc model pins
-            // all recovery refs at the same synthetic clock, so only the
-            // drain-everything (older_than 0) case has a modellable effect.
             return Ok(());
         }
         let listing = git_capture(
@@ -1078,8 +1375,21 @@ impl InProcDriver {
                 "refs/manifold/recovery/",
             ],
         )?;
+        let live_names: BTreeSet<String> = crate::workspace_dirs(root)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         for ref_name in listing.lines() {
-            run_git(root, &["update-ref", "-d", ref_name])?;
+            // bn-wxg28: a pin whose workspace cannot be parsed is treated as
+            // live (fail closed), like `ref_gc`.
+            let ws = ref_name
+                .strip_prefix("refs/manifold/recovery/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .map_or("", |(ws, _)| ws);
+            let live = ws.is_empty() || live_names.contains(ws);
+            if !live {
+                run_git(root, &["update-ref", "-d", ref_name])?;
+            }
         }
         Ok(())
     }
@@ -1265,6 +1575,400 @@ impl InProcDriver {
         };
         self.stats.oracle_b_checks += 1;
         verdict
+    }
+}
+
+impl InProcDriver {
+    /// Run the dirty-trunk oracles on the post-step state (bn-1h9ue).
+    /// `None` = clean (or no trunk tier).
+    fn check_trunk(&mut self, step: &PlannedStep) -> Option<StepVerdict> {
+        let root = self.repo.path().to_path_buf();
+        let t = self.trunk.as_mut()?;
+        let mismatch = t.step_mismatch.take();
+        if matches!(step.op, Op::Merge { .. })
+            && !t.step_crashed
+            && t.displacement.pending_len() > 0
+        {
+            self.stats.dirty_trunk_merges += 1;
+        }
+        let before = t.displacement.judged();
+        let displaced = t
+            .displacement
+            .check_step(&root, &step.op, &t.step_output, t.step_crashed);
+        self.stats.displacement_checks +=
+            usize::try_from(t.displacement.judged().saturating_sub(before)).unwrap_or(usize::MAX);
+        let lost = t.preservation.check(&root);
+        // Severity order: lost bytes (gone from disk AND every ref), then a
+        // replay-model mismatch, then a silent displacement (the recovery's
+        // own, judged mid-step, first).
+        if lost.is_empty()
+            && let Some(m) = mismatch
+        {
+            return Some(StepVerdict::Trunk(TrunkClass::from_mismatch(&m)));
+        }
+        let recovery_displaced = t.step_displaced.take();
+        let Some(first) = lost
+            .first()
+            .or(recovery_displaced.as_ref())
+            .or_else(|| displaced.first())
+        else {
+            if matches!(step.op, Op::Merge { .. })
+                && t.pending.is_none()
+                && let Err(e) = t.settle_committed()
+            {
+                return Some(StepVerdict::HarnessError(HarnessErrorClass::new(
+                    "trunk_settle",
+                    e.to_string(),
+                )));
+            }
+            return None;
+        };
+        if matches!(first, EscapeViolation::GitError { .. }) {
+            infra::raise_if_infra_text(&first.to_string(), "trunk oracle");
+            return Some(StepVerdict::HarnessError(HarnessErrorClass::new(
+                "trunk_oracle",
+                first.to_string(),
+            )));
+        }
+        Some(StepVerdict::Trunk(TrunkClass::from_escape(first)))
+    }
+}
+
+impl TrunkTier {
+    fn begin_step(&mut self) {
+        self.step_output.clear();
+        self.step_crashed = false;
+        self.step_mismatch = None;
+        self.step_displaced = None;
+        self.pending_len_before_recovery = 0;
+    }
+
+    /// Apply a `DirtyTrunkWrite` to the default worktree and (re)record every
+    /// touched path's on-disk entry with the dirty-byte oracles.
+    fn write(&mut self, files: &[FileEdit]) -> std::io::Result<()> {
+        for f in files {
+            trunk::apply_edit(&self.ws_path, f)?;
+            // Whatever was recorded at, under or above this path is gone or
+            // replaced — stop expecting it.
+            let p = f.path.as_str();
+            let stale: Vec<String> = self
+                .recorded
+                .iter()
+                .filter(|r| {
+                    r.as_str() == p
+                        || r.strip_prefix(p).is_some_and(|rest| rest.starts_with('/'))
+                        || p.strip_prefix(r.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .cloned()
+                .collect();
+            self.preservation.note_trunk_overwrite(&stale);
+            self.displacement.note_trunk_overwrite(&stale);
+            for r in &stale {
+                self.recorded.remove(r);
+            }
+        }
+        // What the worktree is "clean" against: the commit it was last
+        // updated to (HEAD), or — while a merge that died before its target
+        // update is pending — that merge's `epoch_before` (HEAD already names
+        // the merged commit, the tree does not). An entry equal to it is not
+        // an uncommitted change (e.g. an exec-bit flip: the byte oracles do
+        // not model modes; the replay model does).
+        let baseline_commit = match &self.pending {
+            Some(p) if !p.update_started => p.epoch_before.clone(),
+            _ => git_capture(&self.ws_path, &["rev-parse", "HEAD"])?,
+        };
+        let baseline = trunk::capture_tree(&self.ws_path, &baseline_commit)?;
+        let mut now_recorded = 0usize;
+        let mut seen = BTreeSet::new();
+        for f in files {
+            let mut candidates = vec![f.path.clone()];
+            if f.kind == crate::scenario::EditKind::Dir
+                && std::fs::symlink_metadata(self.ws_path.join(&f.path)).is_ok_and(|m| m.is_dir())
+            {
+                candidates.push(format!("{}/{}", f.path, trunk::DIR_INNER));
+            }
+            for rel in candidates {
+                if !seen.insert(rel.clone()) {
+                    continue;
+                }
+                let abs = self.ws_path.join(&rel);
+                // Never resolve through a symlinked parent: the entry is
+                // either directly at `rel` or not there.
+                if rel.contains('/')
+                    && Path::new(&rel).parent().is_some_and(|parent| {
+                        std::fs::symlink_metadata(self.ws_path.join(parent))
+                            .is_ok_and(|m| !m.is_dir())
+                    })
+                {
+                    continue;
+                }
+                let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() {
+                    let target = std::fs::read_link(&abs)?;
+                    let target = target.to_string_lossy().into_owned();
+                    if matches!(baseline.get(&rel), Some(trunk::TrunkEntry::Symlink(t)) if t == target.as_bytes())
+                    {
+                        continue;
+                    }
+                    self.displacement.record_dirty_symlink(&rel, &target);
+                } else if meta.is_file() {
+                    let Ok(content) = std::fs::read_to_string(&abs) else {
+                        continue;
+                    };
+                    if matches!(baseline.get(&rel), Some(trunk::TrunkEntry::File { bytes, .. }) if bytes == content.as_bytes())
+                    {
+                        continue;
+                    }
+                    // An unresolved conflict file (the user edited a file that
+                    // still carries an earlier replay's diff3 markers) shares
+                    // lines with the committed side, so the next replay may
+                    // legitimately 3-way-merge it cleanly instead of keeping
+                    // it verbatim. The byte oracles only model verbatim
+                    // survival; the replay model judges this path.
+                    if crate::oracle_a::is_conflict_marker_blob(content.as_bytes()) {
+                        continue;
+                    }
+                    self.preservation.record_dirty(&rel, &content);
+                    self.displacement.record_dirty(&rel, &content);
+                } else {
+                    continue;
+                }
+                self.recorded.insert(rel);
+                now_recorded += 1;
+            }
+        }
+        // Wiring cross-check: what was just recorded must be expected back.
+        if now_recorded > 0 && self.displacement.pending_len() == 0 {
+            return Err(std::io::Error::other(
+                "trunk_record_blind: recorded dirty trunk entries but the displacement \
+                 oracle expects none",
+            ));
+        }
+        if let Some(p) = self.pending.as_mut() {
+            p.tainted = true;
+        }
+        Ok(())
+    }
+
+    /// After a completed merge: a recorded path whose on-disk entry now
+    /// EQUALS the committed one (the merge committed exactly the user's
+    /// bytes / link) is no longer uncommitted — a later merge may change or
+    /// delete it legitimately. Stop expecting it.
+    fn settle_committed(&mut self) -> std::io::Result<()> {
+        if self.recorded.is_empty() {
+            return Ok(());
+        }
+        let head = trunk::capture_tree(&self.ws_path, "HEAD")?;
+        let mut settled = Vec::new();
+        for rel in &self.recorded {
+            let abs = self.ws_path.join(rel);
+            let same = match head.get(rel) {
+                Some(trunk::TrunkEntry::File { bytes, .. }) => {
+                    std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_file())
+                        && std::fs::read(&abs).is_ok_and(|b| &b == bytes)
+                }
+                Some(trunk::TrunkEntry::Symlink(t)) => {
+                    std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink())
+                        && std::fs::read_link(&abs)
+                            .is_ok_and(|l| l.as_os_str().as_encoded_bytes() == t.as_slice())
+                }
+                None => false,
+            };
+            if same {
+                settled.push(rel.clone());
+            }
+        }
+        self.preservation.note_trunk_overwrite(&settled);
+        self.displacement.note_trunk_overwrite(&settled);
+        for r in &settled {
+            self.recorded.remove(r);
+        }
+        Ok(())
+    }
+
+    fn run(
+        &mut self,
+        root: &Path,
+        epoch_before: &str,
+        epoch_after: &str,
+        sources: &[String],
+        maw_fp: Option<String>,
+        stats: &mut DriveStats,
+    ) -> std::io::Result<TrunkUpdateOutcome> {
+        let req = TrunkUpdateRequest {
+            default_ws_path: self.ws_path.clone(),
+            repo_root: root.to_path_buf(),
+            branch: "main".to_owned(),
+            epoch_before: epoch_before.to_owned(),
+            epoch_after: epoch_after.to_owned(),
+            sources: sources.to_vec(),
+            maw_fp,
+        };
+        let out = self.updater.update(&req)?;
+        stats.trunk_updates += 1;
+        if !out.completed() {
+            stats.trunk_crashes += 1;
+        }
+        if std::env::var("MAW_INPROC_DEBUG").is_ok() {
+            eprintln!(
+                "[in_proc] trunk update {}..{} fp={:?} crashed={} error={:?}\n{}",
+                &epoch_before[..8.min(epoch_before.len())],
+                &epoch_after[..8.min(epoch_after.len())],
+                req.maw_fp,
+                out.crashed,
+                out.error,
+                out.output
+            );
+        }
+        self.step_output.push_str(&out.output);
+        if let Some(e) = &out.error {
+            self.step_output.push_str(&format!("\nerror: {e}\n"));
+        }
+        Ok(out)
+    }
+
+    /// Judge a completed update with the replay reference model.
+    fn judge(
+        &mut self,
+        root: &Path,
+        epoch_after: &str,
+        base: &EntryMap,
+        user: &EntryMap,
+        output: &str,
+        stats: &mut DriveStats,
+    ) -> std::io::Result<()> {
+        let merged = trunk::capture_tree(root, epoch_after)?;
+        let disk = trunk::capture_worktree(&self.ws_path)?;
+        let j = trunk::judge_replay(base, user, &merged, &disk, output);
+        stats.replay_judgements += 1;
+        stats.replay_checks += usize::try_from(j.judged).unwrap_or(usize::MAX);
+        if self.step_mismatch.is_none()
+            && let Some(m) = j.mismatches.into_iter().next()
+        {
+            self.step_mismatch = Some(m);
+        }
+        Ok(())
+    }
+
+    /// The merge's target update: `prev_main` → `merge_commit`, with the
+    /// crash window `fault` names. A crash (or error) leaves it pending for
+    /// the next merge's recovery.
+    fn merge_update(
+        &mut self,
+        root: &Path,
+        prev_main: &str,
+        merge_commit: &str,
+        sources: Vec<String>,
+        fault: &FaultSpec,
+        stats: &mut DriveStats,
+    ) -> std::io::Result<()> {
+        // The anchor is the epoch the default worktree was last updated to:
+        // `prev_main` (every completed update ends there, and a pending one
+        // was recovered at the start of this merge).
+        let base = trunk::capture_tree(root, prev_main)?;
+        let user = trunk::capture_worktree(&self.ws_path)?;
+        let pending = |update_started: bool| PendingUpdate {
+            epoch_before: prev_main.to_owned(),
+            epoch_after: merge_commit.to_owned(),
+            sources: sources.clone(),
+            base: base.clone(),
+            user: user.clone(),
+            update_started,
+            tainted: false,
+        };
+        let maw_fp = match fault {
+            FaultSpec::None => None,
+            FaultSpec::Failpoint { name, .. }
+                if name == "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"
+                    || name == "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT" =>
+            {
+                Some(crate::fault::production_fp_spec(name))
+            }
+            // Any other fault = the merge process died BEFORE the target
+            // update (the in-proc model lands every merge's refs, so the
+            // crash is at or after COMMIT): the update is left entirely to
+            // the next merge's recovery.
+            FaultSpec::Failpoint { .. } => {
+                stats.trunk_crashes += 1;
+                self.pending = Some(pending(false));
+                self.step_crashed = true;
+                return Ok(());
+            }
+        };
+        let out = self.run(root, prev_main, merge_commit, &sources, maw_fp, stats)?;
+        if out.completed() {
+            self.step_crashed = false;
+            let output = out.output;
+            self.judge(root, merge_commit, &base, &user, &output, stats)
+        } else {
+            self.pending = Some(pending(true));
+            self.step_crashed = true;
+            Ok(())
+        }
+    }
+
+    /// Finish an interrupted target update, as `maw ws merge`'s journal
+    /// recovery does (`recover.rs`): anchor at the merged commit once the
+    /// workspace epoch ref names it, else at the crashed merge's
+    /// `epoch_before`; no fault armed.
+    /// Returns whether a recovery ran.
+    fn recover(&mut self, root: &Path, stats: &mut DriveStats) -> std::io::Result<bool> {
+        let Some(p) = self.pending.take() else {
+            return Ok(false);
+        };
+        self.pending_len_before_recovery = self.displacement.pending_len();
+        let ws_epoch = resolve_ref(root, &format!("refs/manifold/epoch/ws/{DEFAULT_WS}"))?;
+        let anchor = if ws_epoch.as_deref() == Some(p.epoch_after.as_str()) {
+            p.epoch_after.clone()
+        } else {
+            p.epoch_before.clone()
+        };
+        let out = self.run(root, &anchor, &p.epoch_after, &p.sources, None, stats)?;
+        if !out.completed() {
+            // No fault is armed during recovery, so it must complete. A
+            // recovery that crashes or errors would leave maw refusing every
+            // later merge; surface it (with the update's own output) rather
+            // than model past it.
+            return Err(std::io::Error::other(format!(
+                "trunk_recovery_failed: unfaulted recovery of the target update {}..{} did not \
+                 complete (crashed={}, error={:?}):\n{}",
+                p.epoch_before, p.epoch_after, out.crashed, out.error, out.output
+            )));
+        }
+        // bn-15fzo resume check: the recovery re-runs the update of the SAME
+        // merged commit whose checkout intent the crash left behind, so maw
+        // must RESUME from that intent. Treating it as the stale intent of a
+        // different commit ("an earlier interrupted update of 'default' (to
+        // <this commit>) left its pre-merge edits pinned at ...") re-anchors
+        // against a tree that may already be the merged one — the bn-15fzo
+        // bug — while the notice itself acknowledges the displacement to the
+        // byte oracles. Only the harness knows the commits are the same.
+        let same_commit_notice = format!(
+            "(to {}) left its pre-merge edits pinned at",
+            &p.epoch_after[..12.min(p.epoch_after.len())]
+        );
+        if out.output.contains(&same_commit_notice) && self.step_mismatch.is_none() {
+            self.step_mismatch = Some(ReplayMismatch {
+                path: "(checkout intent)".to_owned(),
+                detail: format!(
+                    "recovery of the interrupted update to {} discarded that update's OWN \
+                     checkout intent as stale instead of resuming it (bn-15fzo)",
+                    p.epoch_after
+                ),
+            });
+        }
+        if !p.tainted {
+            let output = out.output;
+            self.judge(root, &p.epoch_after, &p.base, &p.user, &output, stats)?;
+        }
+        // The same step may run this merge's own update next, which may
+        // legitimately change a path the recovery just committed the user's
+        // exact entry for.
+        self.settle_committed()?;
+        Ok(true)
     }
 }
 
@@ -1539,23 +2243,80 @@ fn git_hash_object_stdin(root: &Path, content: &[u8]) -> std::io::Result<String>
     git_pipe(root, &["hash-object", "-w", "--stdin"], content)
 }
 
-fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// One entry of an in-proc workspace directory (never following links).
+struct WalkEntry {
+    /// `/`-separated path relative to the walked directory.
+    rel: String,
+    abs: PathBuf,
+    exec: bool,
+    /// `Some(target bytes)` for a symlink.
+    link_target: Option<Vec<u8>>,
+}
+
+fn walk_entries(dir: &Path) -> std::io::Result<Vec<WalkEntry>> {
     let mut out = Vec::new();
-    walk_files_inner(dir, &mut out)?;
-    out.sort();
+    walk_entries_inner(dir, "", &mut out)?;
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(out)
 }
-fn walk_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+
+fn walk_entries_inner(dir: &Path, prefix: &str, out: &mut Vec<WalkEntry>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
-        if p.is_dir() {
-            walk_files_inner(&p, out)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rel = if prefix.is_empty() {
+            name
         } else {
-            out.push(p);
+            format!("{prefix}/{name}")
+        };
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&p)?;
+            out.push(WalkEntry {
+                rel,
+                abs: p,
+                exec: false,
+                link_target: Some(target.as_os_str().as_encoded_bytes().to_vec()),
+            });
+        } else if meta.is_dir() {
+            walk_entries_inner(&p, &rel, out)?;
+        } else {
+            out.push(WalkEntry {
+                rel,
+                abs: p,
+                exec: meta.permissions().mode() & 0o100 != 0,
+                link_target: None,
+            });
         }
     }
     Ok(())
+}
+
+/// `parent`'s tree with the `index_info` entries (`<mode> <oid>\t<path>`
+/// lines) layered on top, via a throwaway index. `--replace` lets a file
+/// replace a directory and vice versa (the file<->directory edits).
+fn layered_tree(root: &Path, ws: &str, parent: &str, index_info: &str) -> std::io::Result<String> {
+    let git_dir = git_capture(root, &["rev-parse", "--absolute-git-dir"])?;
+    let index = PathBuf::from(git_dir).join(format!("sg1-commit-index-{ws}"));
+    let _ = std::fs::remove_file(&index);
+    let env = vec![(
+        "GIT_INDEX_FILE".to_owned(),
+        index.to_string_lossy().into_owned(),
+    )];
+    let result = (|| {
+        git_pipe_env(root, &["read-tree", parent], &[], &env)?;
+        git_pipe_env(
+            root,
+            &["update-index", "--add", "--replace", "--index-info"],
+            index_info.as_bytes(),
+            &env,
+        )?;
+        git_pipe_env(root, &["write-tree"], &[], &env)
+    })();
+    let _ = std::fs::remove_file(&index);
+    result
 }
 
 // Unused but reserved for tests that want to inspect frontier evolution.
@@ -1702,10 +2463,7 @@ mod fail_closed_tests {
                     1,
                     Op::EditFiles {
                         ws: ws.clone(),
-                        files: vec![FileEdit {
-                            path: "doc.txt".into(),
-                            content: "bn-25pac witness\n".into(),
-                        }],
+                        files: vec![FileEdit::write("doc.txt", "bn-25pac witness\n")],
                     },
                 ),
                 step(
@@ -1896,8 +2654,42 @@ mod fail_closed_tests {
             workspaces_observed: 1,
             commits_made: 1,
             commits_observed: 1,
+            trunk_writes: 2,
+            trunk_updates: 1,
+            trunk_crashes: 0,
+            dirty_trunk_merges: 1,
+            displacement_checks: 2,
+            replay_judgements: 1,
+            replay_checks: 3,
         };
         assert_eq!(ok.vacuity(), None);
+        // bn-1h9ue: merged over a dirty trunk but judged no entry; judged an
+        // update but rendered no per-path verdict.
+        let site_of = |s: DriveStats| s.vacuity().map(|h| h.site);
+        assert_eq!(
+            site_of(DriveStats {
+                displacement_checks: 0,
+                ..ok
+            }),
+            Some("vacuous_displacement")
+        );
+        assert_eq!(
+            site_of(DriveStats {
+                replay_checks: 0,
+                ..ok
+            }),
+            Some("vacuous_replay")
+        );
+        assert_eq!(
+            site_of(DriveStats {
+                dirty_trunk_merges: 0,
+                displacement_checks: 0,
+                replay_judgements: 0,
+                replay_checks: 0,
+                ..ok
+            }),
+            None
+        );
         let site = |s: DriveStats| s.vacuity().map(|h| h.site);
         assert_eq!(
             site(DriveStats {
@@ -1981,10 +2773,7 @@ mod fail_closed_tests {
             4,
             Op::EditFiles {
                 ws: ws6.clone(),
-                files: vec![FileEdit {
-                    path: "other.txt".into(),
-                    content: "ws-6 content\n".into(),
-                }],
+                files: vec![FileEdit::write("other.txt", "ws-6 content\n")],
             },
         ));
         plan.steps.push(step(
@@ -2021,5 +2810,414 @@ mod fail_closed_tests {
         assert!(!a.same_class(&c));
         assert!(a.is_violation());
         assert!(!a.same_class(&StepVerdict::Clean));
+    }
+}
+
+#[cfg(test)]
+mod trunk_tier_tests {
+    //! bn-1h9ue: the dirty-trunk tier's wiring, driven by FAKE target updaters
+    //! (the production updater lives in the `sg1_dst` test binary, since this
+    //! crate cannot depend on `maw-cli`). A fake that loses the dirty trunk
+    //! must trip the byte oracles; one that never updates must trip the
+    //! replay model; a crash must be deferred and recovered with the
+    //! interrupted update's own arguments.
+    use super::*;
+    use crate::scenario::{ConditionProfile, EditKind, GIT_TIME_BASE_FOR_DRIVER};
+    use std::sync::{Arc, Mutex};
+
+    fn step(index: usize, op: Op, fault: FaultSpec) -> PlannedStep {
+        PlannedStep {
+            index,
+            op,
+            fault,
+            git_time: GIT_TIME_BASE_FOR_DRIVER + 100 * (i64::try_from(index).unwrap() + 1),
+        }
+    }
+
+    fn plan(ops: Vec<(Op, FaultSpec)>) -> ScenarioPlan {
+        ScenarioPlan {
+            seed: 0x1_19E,
+            profile: ConditionProfile::sg1_soak(),
+            steps: ops
+                .into_iter()
+                .enumerate()
+                .map(|(i, (op, f))| step(i, op, f))
+                .collect(),
+        }
+    }
+
+    fn ws(n: usize) -> WsId {
+        WsId::slot(n)
+    }
+
+    /// create ws-N, edit `shared/file-0.txt`, commit, merge (with `fault`).
+    fn merge_round(n: usize, content: &str, fault: FaultSpec) -> Vec<(Op, FaultSpec)> {
+        vec![
+            (
+                Op::WsCreate {
+                    ws: ws(n),
+                    from: BaseRef::Main,
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::EditFiles {
+                    ws: ws(n),
+                    files: vec![FileEdit::write("shared/file-0.txt", content)],
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::Commit {
+                    ws: ws(n),
+                    msg: Seeded(format!("c{n}")),
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::Merge {
+                    srcs: vec![ws(n)],
+                    into: Target::Default,
+                    destroy: false,
+                },
+                fault,
+            ),
+        ]
+    }
+
+    fn dirty(path: &str, content: &str, kind: EditKind) -> (Op, FaultSpec) {
+        (
+            Op::DirtyTrunkWrite {
+                files: vec![FileEdit {
+                    path: path.into(),
+                    content: content.into(),
+                    kind,
+                }],
+            },
+            FaultSpec::None,
+        )
+    }
+
+    /// A fake target update: `reset --hard` to the merged commit (and `clean`
+    /// when `clean` is set), crashing (no-op + `crashed`) when an abort
+    /// failpoint is armed. Records every request.
+    struct FakeUpdater {
+        calls: Mutex<Vec<TrunkUpdateRequest>>,
+        clean: bool,
+        noop: bool,
+    }
+
+    impl FakeUpdater {
+        fn new(clean: bool, noop: bool) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                clean,
+                noop,
+            })
+        }
+    }
+
+    impl TrunkUpdater for FakeUpdater {
+        fn update(&self, req: &TrunkUpdateRequest) -> std::io::Result<TrunkUpdateOutcome> {
+            self.calls.lock().unwrap().push(req.clone());
+            if req.maw_fp.as_deref().is_some_and(|f| f.ends_with("=abort")) {
+                return Ok(TrunkUpdateOutcome {
+                    output: String::new(),
+                    crashed: true,
+                    error: None,
+                });
+            }
+            if !self.noop {
+                let w = &req.default_ws_path;
+                run_git(w, &["reset", "-q", "--hard", &req.epoch_after])?;
+                if self.clean {
+                    run_git(w, &["clean", "-q", "-fd"])?;
+                }
+                run_git(
+                    &req.repo_root,
+                    &[
+                        "update-ref",
+                        "refs/manifold/epoch/ws/default",
+                        &req.epoch_after,
+                    ],
+                )?;
+            }
+            Ok(TrunkUpdateOutcome {
+                output: "Default workspace updated to new epoch.\n".into(),
+                crashed: false,
+                error: None,
+            })
+        }
+    }
+
+    fn trunk_kind(v: &StepVerdict) -> Option<&'static str> {
+        match v {
+            StepVerdict::Trunk(t) => Some(t.kind),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn clean_trunk_merges_are_clean_and_judged() {
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up).unwrap();
+        let mut ops = merge_round(0, "one\n", FaultSpec::None);
+        ops.extend(merge_round(1, "two\n", FaultSpec::None));
+        let out = d.drive(&plan(ops));
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        assert_eq!(out.stats.trunk_updates, 2, "{:?}", out.stats);
+        assert_eq!(out.stats.replay_judgements, 2);
+        assert!(out.stats.replay_checks >= 2, "{:?}", out.stats);
+        // The default worktree is the merge target, not an in-proc workspace.
+        let ws_path = d.default_ws_path().unwrap().to_path_buf();
+        assert_eq!(
+            std::fs::read_to_string(ws_path.join("shared/file-0.txt")).unwrap(),
+            "two\n"
+        );
+    }
+
+    /// A target update that throws the dirty trunk away (reset + clean, no
+    /// pin) must trip `TrunkDirtyPreservation`.
+    #[test]
+    fn update_that_loses_dirty_trunk_trips_preservation() {
+        let up = FakeUpdater::new(true, false);
+        let mut d = InProcDriver::with_trunk_updater(up).unwrap();
+        let mut ops = vec![dirty("trunk/new-0.txt", "precious\n", EditKind::Write)];
+        ops.extend(merge_round(0, "one\n", FaultSpec::None));
+        let out = d.drive(&plan(ops));
+        assert_eq!(
+            trunk_kind(&out.verdict),
+            Some("TrunkDirtyLost"),
+            "{:?}",
+            out.verdict
+        );
+    }
+
+    /// A target update that never updates the worktree must trip the replay
+    /// model (a path the user did not touch is not the merged entry).
+    #[test]
+    fn update_that_never_checks_out_trips_replay_model() {
+        let up = FakeUpdater::new(false, true);
+        let mut d = InProcDriver::with_trunk_updater(up).unwrap();
+        let out = d.drive(&plan(merge_round(0, "one\n", FaultSpec::None)));
+        assert_eq!(
+            trunk_kind(&out.verdict),
+            Some("TrunkReplayMismatch"),
+            "{:?}",
+            out.verdict
+        );
+    }
+
+    /// A crash inside the update is deferred; the next merge recovers the
+    /// SAME update (same epochs, no fault) before running its own.
+    #[test]
+    fn crashed_update_is_recovered_by_the_next_merge() {
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up.clone()).unwrap();
+        let crash = FaultSpec::Failpoint {
+            name: "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT".into(),
+            phase: "cleanup".into(),
+        };
+        let mut ops = merge_round(0, "one\n", crash);
+        ops.extend(merge_round(1, "two\n", FaultSpec::None));
+        let out = d.drive(&plan(ops));
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        let calls = up.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "{calls:#?}");
+        assert_eq!(
+            calls[0].maw_fp.as_deref(),
+            Some("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort")
+        );
+        assert_eq!(calls[1].maw_fp, None, "recovery runs unfaulted");
+        assert_eq!(calls[1].epoch_after, calls[0].epoch_after, "same update");
+        assert_eq!(calls[1].epoch_before, calls[0].epoch_before, "same anchor");
+        assert_eq!(calls[2].epoch_before, calls[0].epoch_after);
+        assert_eq!(out.stats.trunk_crashes, 1);
+        assert_eq!(out.stats.replay_judgements, 2);
+    }
+
+    /// A merge that dies before its target update (any non-target-update
+    /// fault) leaves the whole update to recovery.
+    #[test]
+    fn crash_before_update_defers_the_whole_update() {
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up.clone()).unwrap();
+        let crash = FaultSpec::Failpoint {
+            name: "FP_COMMIT_AFTER_EPOCH_CAS".into(),
+            phase: "commit".into(),
+        };
+        let mut ops = merge_round(0, "one\n", crash);
+        ops.extend(merge_round(1, "two\n", FaultSpec::None));
+        let out = d.drive(&plan(ops));
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        let calls = up.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "no update ran in the crashed merge: {calls:#?}"
+        );
+        assert_eq!(calls[0].maw_fp, None);
+    }
+
+    /// A same-commit stale-intent notice from a recovery is flagged: the
+    /// recovery must resume its own interrupted update (bn-15fzo).
+    #[test]
+    fn recovery_discarding_its_own_intent_is_flagged() {
+        struct StaleNotice(Arc<FakeUpdater>);
+        impl TrunkUpdater for StaleNotice {
+            fn update(&self, req: &TrunkUpdateRequest) -> std::io::Result<TrunkUpdateOutcome> {
+                let mut out = self.0.update(req)?;
+                if req.maw_fp.is_none() {
+                    out.output.push_str(&format!(
+                        "  WARNING: an earlier interrupted update of 'default' (to {}) left its \
+                         pre-merge edits pinned at refs/manifold/recovery/default/x\n",
+                        &req.epoch_after[..12]
+                    ));
+                }
+                Ok(out)
+            }
+        }
+        let mut d =
+            InProcDriver::with_trunk_updater(Arc::new(StaleNotice(FakeUpdater::new(false, false))))
+                .unwrap();
+        let crash = FaultSpec::Failpoint {
+            name: "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT".into(),
+            phase: "cleanup".into(),
+        };
+        let mut ops = merge_round(0, "one\n", crash);
+        ops.extend(merge_round(1, "two\n", FaultSpec::None));
+        let out = d.drive(&plan(ops));
+        match &out.verdict {
+            StepVerdict::Trunk(t) => assert_eq!(t.path, "(checkout intent)", "{t:?}"),
+            other => panic!("expected the resume check to fire: {other:?}"),
+        }
+    }
+
+    /// Exec-bit flips alone are not recorded as dirty BYTES (the byte
+    /// oracles do not model modes), so a merge that legitimately rewrites the
+    /// file's bytes is not a displacement.
+    #[test]
+    fn exec_flip_is_not_a_dirty_byte_expectation() {
+        let up = FakeUpdater::new(false, false);
+        let mut d = InProcDriver::with_trunk_updater(up).unwrap();
+        let mut ops = merge_round(0, "one\n", FaultSpec::None);
+        ops.push(dirty("shared/file-0.txt", "", EditKind::ExecFlip));
+        let out = d.drive(&plan(ops));
+        assert!(
+            matches!(out.verdict, StepVerdict::Clean),
+            "{:?}",
+            out.verdict
+        );
+        assert_eq!(d.trunk.as_ref().unwrap().displacement.pending_len(), 0);
+    }
+
+    /// bn-wxg28: the modelled `gc --recovery-snapshots --older-than 0
+    /// --force` keeps live workspaces' pins (the default worktree's
+    /// dirty-trunk pins) and drops a destroyed workspace's.
+    #[test]
+    fn gc_sweep_keeps_live_pins() {
+        let up = FakeUpdater::new(false, false);
+        let d = InProcDriver::with_trunk_updater(up).unwrap();
+        let root = d.repo_root().to_path_buf();
+        let head = d.root_oid.clone();
+        run_git(
+            &root,
+            &["update-ref", "refs/manifold/recovery/default/p1", &head],
+        )
+        .unwrap();
+        run_git(
+            &root,
+            &["update-ref", "refs/manifold/recovery/ws-9/p1", &head],
+        )
+        .unwrap();
+        d.do_gc(&root, true, 0).unwrap();
+        assert!(
+            resolve_ref(&root, "refs/manifold/recovery/default/p1")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            resolve_ref(&root, "refs/manifold/recovery/ws-9/p1")
+                .unwrap()
+                .is_none()
+        );
+        // Age-gated / plain gc: no modellable effect.
+        run_git(
+            &root,
+            &["update-ref", "refs/manifold/recovery/ws-9/p2", &head],
+        )
+        .unwrap();
+        d.do_gc(&root, true, 7).unwrap();
+        d.do_gc(&root, false, 0).unwrap();
+        assert!(
+            resolve_ref(&root, "refs/manifold/recovery/ws-9/p2")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Workspace commits carry exec bits, symlinks and nested / replaced
+    /// directories (the model used to flatten everything to 100644 basenames).
+    #[test]
+    fn workspace_commits_carry_modes_links_and_dirs() {
+        let d = InProcDriver::new().unwrap();
+        let root = d.repo_root().to_path_buf();
+        let env = pinned_env(GIT_TIME_BASE_FOR_DRIVER + 10);
+        d.do_ws_create(&root, &ws(0), &BaseRef::Main, &env).unwrap();
+        let e = |path: &str, content: &str, kind| FileEdit {
+            path: path.into(),
+            content: content.into(),
+            kind,
+        };
+        d.do_edit_files(
+            &root,
+            &ws(0),
+            &[
+                e("shared/a", "x", EditKind::ExecFlip),
+                e("shared/b", "a", EditKind::Symlink),
+                e("shared/c", "in", EditKind::Dir),
+            ],
+        )
+        .unwrap();
+        assert!(
+            d.do_commit(&root, &ws(0), &Seeded("m".into()), &env)
+                .unwrap()
+        );
+        let tree = git_capture(&root, &["ls-tree", "-r", "refs/manifold/ws/ws-0"]).unwrap();
+        assert!(
+            tree.contains("100755 blob") && tree.contains("\tshared/a"),
+            "{tree}"
+        );
+        assert!(
+            tree.contains("120000 blob") && tree.contains("\tshared/b"),
+            "{tree}"
+        );
+        assert!(tree.contains("\tshared/c/inner.txt"), "{tree}");
+        assert!(tree.contains("\tREADME.md"), "parent tree is kept: {tree}");
+        // A later file replaces the directory in the next commit.
+        d.do_edit_files(&root, &ws(0), &[e("shared/c", "file", EditKind::Write)])
+            .unwrap();
+        assert!(
+            d.do_commit(&root, &ws(0), &Seeded("m2".into()), &env)
+                .unwrap()
+        );
+        let tree = git_capture(&root, &["ls-tree", "-r", "refs/manifold/ws/ws-0"]).unwrap();
+        assert!(
+            tree.contains("\tshared/c\n") || tree.ends_with("\tshared/c"),
+            "{tree}"
+        );
+        assert!(!tree.contains("shared/c/inner.txt"), "{tree}");
     }
 }

@@ -1,16 +1,32 @@
 # Local SG1 DST soak cron
 
 Accrues fault-injected op-steps toward the **v1.0 release-gate floor of 1e8
-op-steps at `ConditionProfile::default()` with 0 Oracle A/B violations**
+op-steps at `ConditionProfile::sg1_soak()` with 0 oracle violations**
 (bn-2yzz; `notes/sg1-soak-campaign.md`). Replaces the GitHub Actions
 `dst-soak.yml` cron, which timed out at the 180-min job cap every night and
 accrued nothing (and burned free Actions minutes).
 
+## What a seed exercises (bn-1h9ue)
+Since bn-1h9ue the in-proc driver has a real default worktree (`<root>/ws/default`)
+and every modelled merge runs the **production** target update
+(`maw_cli::workspace::update_default_workspace` — snapshot, checkout, replay of
+the uncommitted trunk) in a self-exec'd helper of the pinned binary, so the
+crash windows really `abort()`. `ConditionProfile::sg1_soak()` adds rich
+uncommitted trunk edits (content, new files, deletions, exec-bit flips,
+symlinks, file<->directory), workspace commits that change modes and entry
+types, and crashes inside the target update (`dirty_trunk_crash_pct`). Per
+step, besides Oracle A/B: `TrunkDirtyPreservation`, `TrunkDirtyDisplacement`
+and the `TrunkReplayFaithfulness` reference model (`crates/maw-assurance/src/trunk.rs`).
+Clean ledger rows also record `trunk_updates`, `trunk_crashes`,
+`dirty_trunk_merges`, `displacement_checks` and `replay_checks`.
+
 ## Why local
-The soak is **I/O-bound on git/worktree ops** (~30–46 op-steps/sec/core,
-release or debug — build mode barely matters). 1e8 is therefore a multi-week
-accrual at low parallelism. Run it as a background cron at `nice -19` +
-`ionice -c3` so it yields CPU and disk to your foreground compiles.
+The soak is **I/O-bound on git/worktree ops**. With the dirty-trunk tier a
+64-step seed takes ~1.3 s of driver time (~50 op-steps/sec/core; ~0.7 s /
+~90 op-steps/sec before bn-1h9ue), so 1e8 op-steps (1.56M seeds) at
+`PARALLEL=2` is roughly 12 days of dedicated wall time (more under `nice`).
+Run it as a background cron at `nice -19` + `ionice -c3` so it yields CPU and
+disk to your foreground compiles.
 
 ## Mechanics
 - A **frozen copy** of the prebuilt release `sg1_dst` test binary is pinned

@@ -32,6 +32,14 @@ tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# bn-1h9ue: the SG1 soak's dirty-trunk tier runs the PRODUCTION target update
+# (`maw_cli::workspace::update_default_workspace`) — the same code `maw ws
+# merge` and crash recovery run — in a self-exec'd helper of the test binary
+# (see `tests/sg1_dst.rs`, `sg1_trunk_update_helper`). A dev-dependency, not a
+# normal one: `maw-cli -> maw -> maw-assurance` would be a package cycle, which
+# cargo only permits through dev-dependencies. `failpoints` compiles in the
+# `fp!()` sites so the soak can crash the update at FP_CLEANUP_* windows.
+maw-cli = { path = "../maw-cli", default-features = false, features = ["lfs", "ast-merge", "otel", "failpoints"] }
 
 [features]
 default = []

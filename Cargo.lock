@@ -2283,6 +2283,7 @@ dependencies = [
 name = "maw-assurance"
 version = "1.0.0-pre.17"
 dependencies = [
+ "maw-cli",
  "maw-core",
  "maw-scenario",
  "rand 0.9.5",

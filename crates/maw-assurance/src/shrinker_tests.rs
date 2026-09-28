@@ -67,10 +67,7 @@ pub fn planted_oracle_a_fixture() -> (crate::scenario::ScenarioPlan, Vec<Planted
                 index: 1,
                 op: Op::EditFiles {
                     ws: ws.clone(),
-                    files: vec![FileEdit {
-                        path: "doc.txt".into(),
-                        content: "oracle-a-witness-content-v1\n".into(),
-                    }],
+                    files: vec![FileEdit::write("doc.txt", "oracle-a-witness-content-v1\n")],
                 },
                 fault: FaultSpec::None,
                 git_time: crate::scenario::GIT_TIME_BASE_FOR_DRIVER + 200,

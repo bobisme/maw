@@ -189,6 +189,60 @@ pub struct FileEdit {
     pub path: String,
     /// Seed-derived deterministic content.
     pub content: String,
+    /// What the edit does to `path` (bn-1h9ue). [`EditKind::Write`] — the only
+    /// kind any generator emitted before the `trunk_weight` knob — is the
+    /// default and is omitted from the serialized form, so every pre-existing
+    /// plan, corpus entry and op-stream digest is byte-identical.
+    #[serde(default, skip_serializing_if = "EditKind::is_write")]
+    pub kind: EditKind,
+}
+
+impl FileEdit {
+    /// A plain regular-file write of `content` at `path`.
+    #[must_use]
+    pub fn write(path: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            content: content.into(),
+            kind: EditKind::Write,
+        }
+    }
+}
+
+/// The worktree mutation a [`FileEdit`] performs (bn-1h9ue).
+///
+/// Only [`EditKind::Write`] is emitted unless a profile sets
+/// [`ConditionProfile::trunk_weight`] `> 0`; the richer kinds exist so the
+/// dirty-trunk soak can reach the replay paths that regressed this cycle
+/// (bn-3fcbu exec bits, bn-2ygs0 symlink type changes, bn-3jqfk symlink /
+/// directory capture). Every kind REPLACES whatever entry is at `path` (file,
+/// symlink or directory) and creates missing parent directories, replacing a
+/// non-directory that is in the way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditKind {
+    /// A regular (non-executable) file holding `content`.
+    #[default]
+    Write,
+    /// Toggle the executable bit of the regular file at `path`, keeping its
+    /// bytes. If `path` is not a regular file, write `content` there as an
+    /// EXECUTABLE file instead.
+    ExecFlip,
+    /// Remove whatever is at `path` (`content` is unused).
+    Delete,
+    /// A symbolic link whose target is `content` (may dangle).
+    Symlink,
+    /// A directory at `path` holding one regular file `<path>/inner.txt` with
+    /// `content` — the file<->directory type change.
+    Dir,
+}
+
+impl EditKind {
+    /// `true` for the default plain write (serde skip predicate).
+    #[must_use]
+    pub const fn is_write(&self) -> bool {
+        matches!(self, Self::Write)
+    }
 }
 
 /// A seed-derived value (commit message etc.) the driver renders verbatim.
@@ -505,6 +559,26 @@ pub struct ConditionProfile {
     /// still replays the same ops as its unfaulted twin.
     #[serde(default)]
     pub dirty_trunk_crash_pct: u32,
+    /// Selection weight for the **dirty-trunk soak** (bn-1h9ue). **0 by
+    /// default**, which leaves the chooser, every `FileEdit` and every fault
+    /// draw byte-identical (pinned by [`DEFAULT_PROFILE_OP_STREAM_DIGEST`] and
+    /// [`PRODUCTION_TIER_OP_STREAM_DIGEST`]). When `> 0`:
+    ///
+    /// * [`Op::DirtyTrunkWrite`] joins the chooser at this weight and draws
+    ///   RICH edits ([`EditKind`]: content writes, new untracked files,
+    ///   deletions, exec-bit flips, symlinks and retargets, file<->directory)
+    ///   over the `shared/*` paths workspaces also commit, so the next merge's
+    ///   replay of the uncommitted trunk meets a changed committed side;
+    /// * workspace [`Op::EditFiles`] on `shared/*` paths may commit exec-bit
+    ///   flips, symlinks and file->directory changes, so merges change modes
+    ///   and entry types under the dirty trunk;
+    ///
+    /// Crashes inside the target update over a dirty trunk come from the
+    /// separate [`ConditionProfile::dirty_trunk_crash_pct`] knob (bn-1jfui).
+    /// The in-proc SG1 soak runs [`ConditionProfile::sg1_soak`], which sets
+    /// both.
+    #[serde(default)]
+    pub trunk_weight: u32,
 }
 
 /// The target-update crash sites a dirty-trunk merge is biased towards by
@@ -539,7 +613,29 @@ impl ConditionProfile {
             escape_weight: 0,
             corrupt_weight: 0,
             dirty_trunk_crash_pct: 0,
+            trunk_weight: 0,
         }
+    }
+
+    /// Return a copy of this profile with the dirty-trunk soak weight
+    /// (bn-1h9ue, see [`ConditionProfile::trunk_weight`]) set to `w`. `w = 0`
+    /// leaves the seed→plan byte stream identical to a profile without it.
+    #[must_use]
+    pub const fn with_trunk_weight(mut self, w: u32) -> Self {
+        self.trunk_weight = w;
+        self
+    }
+
+    /// The profile the **in-proc SG1 soak** (the v1.0 release gate, bn-2yzz)
+    /// runs: the default knobs plus the dirty-trunk soak
+    /// ([`SG1_SOAK_TRUNK_WEIGHT`]) and target-update crashes over it
+    /// ([`SG1_SOAK_DIRTY_TRUNK_CRASH_PCT`]). Pinned by
+    /// [`SG1_SOAK_PROFILE_OP_STREAM_DIGEST`] — changing it re-pins the soak.
+    #[must_use]
+    pub fn sg1_soak() -> Self {
+        Self::default()
+            .with_trunk_weight(SG1_SOAK_TRUNK_WEIGHT)
+            .with_dirty_trunk_crash_pct(SG1_SOAK_DIRTY_TRUNK_CRASH_PCT)
     }
 
     /// Return a copy of this profile with the `Advance`-op selection weight
@@ -862,6 +958,7 @@ fn regression_step(index: usize, op: Op) -> PlannedStep {
 /// Convenience: a single seed-stable [`FileEdit`].
 fn edit(path: &str, content: &str) -> FileEdit {
     FileEdit {
+        kind: EditKind::Write,
         path: path.to_owned(),
         content: content.to_owned(),
     }
@@ -1598,6 +1695,13 @@ fn choose_op(rng: &mut StdRng, model: &mut AbstractModel, profile: &ConditionPro
     if profile.corrupt_weight > 0 {
         kinds.push((OpKind::CorruptWorktreeStatMasked, profile.corrupt_weight));
     }
+    // bn-1h9ue: the dirty-trunk soak. Appended ONLY when `trunk_weight > 0`
+    // (same rule as the other gated knobs), so at weight 0 the slice and the
+    // whole seed→plan byte stream are unchanged. With `escape_weight > 0` too,
+    // `DirtyTrunkWrite` simply appears twice (its weights add).
+    if profile.trunk_weight > 0 {
+        kinds.push((OpKind::DirtyTrunkWrite, profile.trunk_weight));
+    }
     let mut desired = weighted_choice(rng, &kinds);
 
     // Validity narrowing: if the desired op isn't legal right now, fall back
@@ -1689,7 +1793,15 @@ fn try_emit(
                 };
                 let blob: u64 = rng.random();
                 let content = format!("ws={}\nseed-slot={blob}\nidx={i}\n", ws.0);
-                files.push(FileEdit { path, content });
+                // bn-1h9ue: under the dirty-trunk soak, a shared path may
+                // commit an exec-bit flip, a symlink or a file->directory
+                // change, so merges change modes and entry types under the
+                // uncommitted trunk. Extra draws ONLY when the knob is on.
+                if profile.trunk_weight > 0 && path.starts_with("shared/") {
+                    files.push(rich_ws_edit(rng, path, content));
+                } else {
+                    files.push(FileEdit::write(path, content));
+                }
             }
             // Canonical order: sort by path so the same `(ws, draws)` ⇒ same
             // bytes regardless of the chooser's draw order.
@@ -1782,12 +1894,15 @@ fn try_emit(
                 };
                 let blob: u64 = rng.random();
                 let content = format!("trunk-commit\nseed-slot={blob}\nidx={i}\n");
-                files.push(FileEdit { path, content });
+                files.push(FileEdit::write(path, content));
             }
             files.sort_by(|a, b| a.path.cmp(&b.path));
             let msg = Seeded(format!("out-of-maw trunk commit #{}", rng.random::<u32>()));
             Some(Op::OutOfMawCommit { files, msg })
         }
+        OpKind::DirtyTrunkWrite if profile.trunk_weight > 0 => Some(Op::DirtyTrunkWrite {
+            files: rich_trunk_edits(rng),
+        }),
         OpKind::DirtyTrunkWrite => {
             // Uncommitted write to a tracked trunk file — always valid. Bias
             // toward `shared/*` paths whose committed content a later merge can
@@ -1799,7 +1914,7 @@ fn try_emit(
                 let path = format!("shared/file-{slot}.txt");
                 let blob: u64 = rng.random();
                 let content = format!("dirty-trunk\nseed-slot={blob}\nidx={i}\n");
-                files.push(FileEdit { path, content });
+                files.push(FileEdit::write(path, content));
             }
             files.sort_by(|a, b| a.path.cmp(&b.path));
             Some(Op::DirtyTrunkWrite { files })
@@ -2043,6 +2158,89 @@ fn dirty_trunk_crash_fault(
         name: name.to_owned(),
         phase: "cleanup".to_owned(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// bn-1h9ue: rich dirty-trunk / workspace edits for the dirty-trunk soak
+// ---------------------------------------------------------------------------
+
+/// The `trunk_weight` of [`ConditionProfile::sg1_soak`]. With the default
+/// core op weights (sum 64) this makes roughly one step in six an uncommitted
+/// trunk edit; since the trunk is never committed, nearly every merge after
+/// the first such edit replays a dirty trunk.
+pub const SG1_SOAK_TRUNK_WEIGHT: u32 = 12;
+
+/// The `dirty_trunk_crash_pct` of [`ConditionProfile::sg1_soak`]: one merge
+/// in ten after the first dirty-trunk write crashes inside the target update
+/// ([`DIRTY_TRUNK_CRASH_SITES`] — half of them in the bn-15fzo resume window).
+pub const SG1_SOAK_DIRTY_TRUNK_CRASH_PCT: u32 = 10;
+
+/// Symlink targets the rich edits draw from, relative to `shared/`: siblings
+/// the workspaces also commit (so a link can point at tracked content), a
+/// path outside `shared/`, and dangling names.
+const LINK_TARGETS: &[&str] = &[
+    "file-0.txt",
+    "file-1.txt",
+    "file-2.txt",
+    "../README.md",
+    "dangling-a",
+    "dangling-b",
+];
+
+fn draw_link_target(rng: &mut StdRng) -> String {
+    LINK_TARGETS[rng.random_range(0..LINK_TARGETS.len())].to_owned()
+}
+
+/// A workspace edit of a `shared/*` path under the dirty-trunk soak: mostly
+/// plain writes, sometimes an exec-bit flip, a symlink or a file->directory
+/// change. Workspaces never emit `Delete` (deletions reach trunk through the
+/// merge of a tree that lacks a path).
+fn rich_ws_edit(rng: &mut StdRng, path: String, content: String) -> FileEdit {
+    let roll: u32 = rng.random_range(0..100);
+    let (kind, content) = match roll {
+        0..60 => (EditKind::Write, content),
+        60..75 => (EditKind::ExecFlip, content),
+        75..90 => (EditKind::Symlink, draw_link_target(rng)),
+        _ => (EditKind::Dir, content),
+    };
+    FileEdit {
+        path,
+        content,
+        kind,
+    }
+}
+
+/// The edits of one dirty-trunk step under the soak: 1..=3 uncommitted
+/// mutations of the default worktree, mostly over the `shared/*` paths the
+/// workspaces commit (so the next merge's replay meets a changed committed
+/// side), sometimes a brand-new untracked `trunk/*` file.
+fn rich_trunk_edits(rng: &mut StdRng) -> Vec<FileEdit> {
+    let n: usize = rng.random_range(1..=3);
+    let mut files = Vec::with_capacity(n);
+    for i in 0..n {
+        let path = if rng.random_bool(0.85) {
+            format!("shared/file-{}.txt", rng.random_range(0..4_u32))
+        } else {
+            format!("trunk/new-{}.txt", rng.random_range(0..2_u32))
+        };
+        let blob: u64 = rng.random();
+        let content = format!("dirty-trunk\nseed-slot={blob}\nidx={i}\n");
+        let roll: u32 = rng.random_range(0..100);
+        let (kind, content) = match roll {
+            0..45 => (EditKind::Write, content),
+            45..60 => (EditKind::ExecFlip, content),
+            60..75 => (EditKind::Symlink, draw_link_target(rng)),
+            75..85 => (EditKind::Dir, content),
+            _ => (EditKind::Delete, String::new()),
+        };
+        files.push(FileEdit {
+            path,
+            content,
+            kind,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
 }
 
 // ---------------------------------------------------------------------------
@@ -2854,6 +3052,106 @@ pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0x8e09_b3f9_d8e9_cdf1;
 /// `git_time`s are byte-identical to the previous pin (verified by diffing
 /// the 3 x 256 x 128 step streams with fault names masked).
 pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x47e8_0c03_96be_778b;
+
+/// Op-stream digest of [`ConditionProfile::sg1_soak`] — the in-proc SG1 soak
+/// (the v1.0 release gate) — introduced by bn-1h9ue (dirty-trunk soak,
+/// user-approved campaign reset). Changing it re-pins the soak.
+pub const SG1_SOAK_PROFILE_OP_STREAM_DIGEST: u64 = 0xc831_ec9b_c977_a7f0;
+
+#[cfg(test)]
+mod bn_1h9ue_tests {
+    use super::{
+        ConditionProfile, DEFAULT_PROFILE_OP_STREAM_DIGEST, DIRTY_TRUNK_CRASH_SITES, EditKind,
+        FaultSpec, Op, SG1_SOAK_PROFILE_OP_STREAM_DIGEST, generate_plan, op_stream_digest,
+    };
+    use std::collections::BTreeSet;
+
+    /// The soak profile's stream is pinned (a change is a campaign reset).
+    #[test]
+    fn sg1_soak_profile_op_stream_digest_is_pinned() {
+        assert_eq!(
+            op_stream_digest(&ConditionProfile::sg1_soak()),
+            SG1_SOAK_PROFILE_OP_STREAM_DIGEST,
+            "the in-proc SG1 soak profile's seed->plan op stream changed; re-pin ONLY as a \
+             deliberate, approved campaign reset"
+        );
+    }
+
+    /// `trunk_weight = 0` is byte-identical to the default (the knob is
+    /// gated), and `> 0` really changes the stream.
+    #[test]
+    fn trunk_weight_is_gated() {
+        assert_eq!(
+            op_stream_digest(&ConditionProfile::default().with_trunk_weight(0)),
+            DEFAULT_PROFILE_OP_STREAM_DIGEST
+        );
+        assert_ne!(
+            op_stream_digest(&ConditionProfile::sg1_soak()),
+            DEFAULT_PROFILE_OP_STREAM_DIGEST
+        );
+    }
+
+    /// The soak profile emits every rich edit kind on trunk and on
+    /// workspaces, dirty-trunk writes are common, and faulted merges land in
+    /// every target-update window.
+    #[test]
+    fn sg1_soak_emits_rich_trunk_and_workspace_edits_and_target_update_faults() {
+        let profile = ConditionProfile::sg1_soak();
+        let mut trunk_kinds = BTreeSet::new();
+        let mut ws_kinds = BTreeSet::new();
+        let mut fps = BTreeSet::new();
+        let (mut steps, mut dirty) = (0usize, 0usize);
+        for seed in 0..200_u64 {
+            let plan = generate_plan(seed, &profile, 64);
+            for step in &plan.steps {
+                steps += 1;
+                match &step.op {
+                    Op::DirtyTrunkWrite { files } => {
+                        dirty += 1;
+                        trunk_kinds.extend(files.iter().map(|f| format!("{:?}", f.kind)));
+                    }
+                    Op::EditFiles { files, .. } => {
+                        ws_kinds.extend(files.iter().map(|f| format!("{:?}", f.kind)));
+                        assert!(
+                            files.iter().all(|f| f.kind != EditKind::Delete),
+                            "workspaces never emit Delete"
+                        );
+                    }
+                    Op::OutOfMawCommit { .. }
+                    | Op::Gc { .. }
+                    | Op::CorruptWorktreeStatMasked { .. } => {
+                        panic!(
+                            "the soak profile must not emit escape/corruption ops: {:?}",
+                            step.op
+                        )
+                    }
+                    _ => {}
+                }
+                if let (Op::Merge { .. }, FaultSpec::Failpoint { name, .. }) =
+                    (&step.op, &step.fault)
+                {
+                    fps.insert(name.clone());
+                }
+            }
+        }
+        for k in ["Write", "ExecFlip", "Delete", "Symlink", "Dir"] {
+            assert!(
+                trunk_kinds.contains(k),
+                "trunk kinds {trunk_kinds:?} lack {k}"
+            );
+        }
+        for k in ["Write", "ExecFlip", "Symlink", "Dir"] {
+            assert!(ws_kinds.contains(k), "ws kinds {ws_kinds:?} lack {k}");
+        }
+        for fp in DIRTY_TRUNK_CRASH_SITES {
+            assert!(fps.contains(*fp), "no merge crashed at {fp}: {fps:?}");
+        }
+        assert!(
+            dirty * 10 > steps,
+            "dirty-trunk writes too rare: {dirty}/{steps}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod bn_22jy_tests {

@@ -65,6 +65,18 @@
 //!   run then fails with the violations, never exits 75;
 //! - infra never counts a seed as clean.
 //!
+//! ## Dirty-trunk tier (bn-1h9ue)
+//!
+//! Every driver in this binary runs the in-proc dirty-trunk tier: a real
+//! default worktree whose target update after each merge is the PRODUCTION
+//! `maw_cli::workspace::update_default_workspace`, run in a self-exec'd
+//! helper ([`sg1_trunk_update_helper`]) so crash windows really `abort()` and
+//! the update's output reaches the displacement oracle. Random seeds use
+//! [`ConditionProfile::sg1_soak`] (rich `DirtyTrunkWrite`s, merges that change
+//! modes and entry types, crashes inside the target update). Per step the
+//! `TrunkDirtyPreservation`, `TrunkDirtyDisplacement` and
+//! `TrunkReplayFaithfulness` oracles judge the trunk.
+//!
 //! Test hooks (used by `sg1_infra_exit_contract`): `SG1_SIMULATE_INFRA_AT=<i>`
 //! raises a simulated EDQUOT at seed index `i`; `SG1_SIMULATE_PANIC_AT=<i>`
 //! raises an ordinary (non-infra) panic there. Neither can produce a clean
@@ -96,6 +108,7 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use maw_assurance::in_proc::{
@@ -108,6 +121,50 @@ use maw_assurance::scenario::{
     generate_plan,
 };
 use maw_assurance::shrinker::{ShrinkReport, ShrinkerCorpusEntry, shrink};
+use maw_assurance::trunk::{self, SelfExecUpdater};
+
+/// The in-proc soak's profile (bn-1h9ue): default knobs + the dirty-trunk
+/// soak. Every random seed of this binary is generated with it.
+fn soak_profile() -> ConditionProfile {
+    ConditionProfile::sg1_soak()
+}
+
+/// Name of the self-exec'd helper test (see [`sg1_trunk_update_helper`]).
+const TRUNK_HELPER_TEST: &str = "sg1_trunk_update_helper";
+
+/// Install the process-wide production target updater (idempotent).
+fn install_trunk_tier() {
+    let exe = std::env::current_exe().expect("current_exe");
+    let _ = trunk::install_trunk_updater(Arc::new(SelfExecUpdater {
+        exe,
+        test_name: TRUNK_HELPER_TEST.to_owned(),
+    }));
+}
+
+/// bn-1h9ue: helper process of the dirty-trunk tier. The in-proc driver
+/// re-executes THIS binary with `--exact sg1_trunk_update_helper --ignored`
+/// and a JSON request in `SG1_TRUNK_UPDATE_REQUEST`; the helper arms `MAW_FP`
+/// and runs the production target update exactly as `maw ws merge`'s CLEANUP
+/// phase does. Without the env var (a plain `-- --ignored` run) it is a no-op.
+#[test]
+#[ignore = "helper process for the dirty-trunk tier (self-exec'd by the in-proc driver)"]
+fn sg1_trunk_update_helper() {
+    trunk::run_trunk_update_helper(|req| {
+        maw_cli::workspace::update_default_workspace(
+            &req.default_ws_path,
+            "default",
+            &req.branch,
+            &req.epoch_before,
+            &req.epoch_after,
+            None,
+            &req.repo_root,
+            true,
+            true,
+            &req.sources,
+        )
+        .map_err(|e| format!("{e:#}"))
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Tunables (overridable via env vars in CI)
@@ -323,16 +380,26 @@ struct SeedOutcome {
 fn evidence_summary(totals: &DriveStats, harness_errors: usize) -> String {
     format!(
         "oracle_a_checks={} oracle_b_checks={} witnesses={} workspaces_observed={} \
-         commits_observed={} harness_errors={harness_errors}",
+         commits_observed={} trunk_writes={} trunk_updates={} trunk_crashes={} \
+         dirty_trunk_merges={} displacement_checks={} replay_judgements={} replay_checks={} \
+         harness_errors={harness_errors}",
         totals.oracle_a_checks,
         totals.oracle_b_checks,
         totals.witnesses,
         totals.workspaces_observed,
         totals.commits_observed,
+        totals.trunk_writes,
+        totals.trunk_updates,
+        totals.trunk_crashes,
+        totals.dirty_trunk_merges,
+        totals.displacement_checks,
+        totals.replay_judgements,
+        totals.replay_checks,
     )
 }
 
 fn new_driver() -> InProcDriver {
+    install_trunk_tier();
     match InProcDriver::new() {
         Ok(d) => d,
         Err(err) => {
@@ -343,7 +410,7 @@ fn new_driver() -> InProcDriver {
 }
 
 fn drive_one(seed: u64, n_steps: usize, planted: &[PlantedDefect]) -> SeedOutcome {
-    let plan = generate_plan(seed, &ConditionProfile::default(), n_steps);
+    let plan = generate_plan(seed, &soak_profile(), n_steps);
     let mut driver = new_driver().with_planted(planted.to_vec());
     let started = Instant::now();
     let out = driver.drive(&plan);
@@ -619,7 +686,7 @@ fn known_violation_mismatch(description: &str, verdict: &StepVerdict) -> Option<
             "expected known_violation but the harness malfunctioned — the oracles did \
              NOT judge the plan: {verdict:?}"
         )),
-        StepVerdict::OracleA(_) | StepVerdict::OracleB(_) => {
+        StepVerdict::OracleA(_) | StepVerdict::OracleB(_) | StepVerdict::Trunk(_) => {
             let (kind, _) = verdict.signature();
             if matches!(kind, "Other" | "GitError") {
                 Some(format!(
@@ -645,6 +712,9 @@ fn known_violation_mismatch(description: &str, verdict: &StepVerdict) -> Option<
 /// Fixed-budget random seed sweep through the in-proc tier. Always
 /// runs. Override `SG1_PER_COMMIT_SEEDS` / `SG1_PER_COMMIT_STEPS` to
 /// retune. Set `SG1_SEED=<n>` to replay one seed.
+///
+/// `SG1_SKIP_SHRINK=1` (triage, bn-1h9ue) lists every red seed without
+/// shrinking or writing bundles — for sweeping a mutation over many seeds.
 ///
 /// **Planted-violation smoke** (`SG1_PLANT_VIOLATION=1`): turns the
 /// run red on purpose by planting an Oracle A `WorkLoss` defect.
@@ -713,9 +783,13 @@ fn sg1_per_commit_random_budget() {
                 outcome.verdict
             );
         }
-        if outcome.verdict.is_violation() {
+        if outcome.verdict.is_violation() && env_bool("SG1_SKIP_SHRINK") {
+            // Triage knob (bn-1h9ue): list every red seed fast, no shrink.
+            eprintln!("[sg1] RED seed={seed} verdict={:?}", outcome.verdict);
+            violations.push((*seed, outcome.verdict.clone(), PathBuf::new()));
+        } else if outcome.verdict.is_violation() {
             // Shrink and emit a minimal bundle.
-            let original_plan = generate_plan(*seed, &ConditionProfile::default(), steps);
+            let original_plan = generate_plan(*seed, &soak_profile(), steps);
             let report = shrink(&original_plan, &planted, outcome.verdict.clone());
             let corpus_entry = ShrinkerCorpusEntry::from_report(&report, &planted);
             let replay = replay_command_for_seed(*seed, steps);
@@ -854,7 +928,7 @@ fn sg1_nightly_soak() {
             );
         }
         if outcome.verdict.is_violation() {
-            let original_plan = generate_plan(*seed, &ConditionProfile::default(), steps);
+            let original_plan = generate_plan(*seed, &soak_profile(), steps);
             let report = shrink(&original_plan, &[], outcome.verdict.clone());
             let corpus_entry = ShrinkerCorpusEntry::from_report(&report, &[]);
             let replay = replay_command_for_seed(*seed, steps);
@@ -896,6 +970,213 @@ fn sg1_nightly_soak() {
             .collect::<Vec<_>>()
             .join("\n  - ")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dirty-trunk tier: every target-update window, production code (bn-1h9ue)
+// ---------------------------------------------------------------------------
+
+/// A hand-built plan that drives the PRODUCTION target update through every
+/// window the soak profile crashes in — the snapshot-failed fallback, a crash
+/// after the checkout (bn-15fzo resume) and a crash before the update — over
+/// a dirty trunk (tracked edit, new untracked file, new symlink), and proves
+/// the seed is judged clean AND non-vacuously: crashes happened, the
+/// displacement oracle judged entries, the replay model judged updates, and
+/// the user's uncommitted entries are on disk at the end.
+#[test]
+fn sg1_trunk_tier_production_windows_are_judged() {
+    use maw_assurance::scenario::{
+        BaseRef, EditKind, FaultSpec, FileEdit, GIT_TIME_BASE_FOR_DRIVER, Op, PlannedStep,
+        ScenarioPlan, Seeded, Target, WsId,
+    };
+    let fp = |name: &str| FaultSpec::Failpoint {
+        name: name.to_owned(),
+        phase: "cleanup".to_owned(),
+    };
+    let mut ops: Vec<(Op, FaultSpec)> = Vec::new();
+    let mut round = |n: usize, path: &str, content: &str, fault: FaultSpec| {
+        let ws = WsId::slot(n);
+        ops.push((
+            Op::WsCreate {
+                ws: ws.clone(),
+                from: BaseRef::Main,
+            },
+            FaultSpec::None,
+        ));
+        ops.push((
+            Op::EditFiles {
+                ws: ws.clone(),
+                files: vec![FileEdit::write(path, content)],
+            },
+            FaultSpec::None,
+        ));
+        ops.push((
+            Op::Commit {
+                ws: ws.clone(),
+                msg: Seeded(format!("round {n}")),
+            },
+            FaultSpec::None,
+        ));
+        ops.push((
+            Op::Merge {
+                srcs: vec![ws],
+                into: Target::Default,
+                destroy: false,
+            },
+            fault,
+        ));
+    };
+    round(0, "shared/file-0.txt", "committed\n", FaultSpec::None);
+    let dirty = Op::DirtyTrunkWrite {
+        files: vec![
+            FileEdit::write("shared/file-0.txt", "uncommitted\n"),
+            FileEdit {
+                path: "shared/file-1.txt".into(),
+                content: "file-0.txt".into(),
+                kind: EditKind::Symlink,
+            },
+            FileEdit::write("trunk/new-0.txt", "untracked\n"),
+        ],
+    };
+    round(1, "shared/file-2.txt", "one\n", FaultSpec::None);
+    let mut all = ops.clone();
+    all.push((dirty, FaultSpec::None));
+    ops.clear();
+    let round2 = |n: usize, path: &str, content: &str, fault: FaultSpec| {
+        let ws = WsId::slot(n);
+        vec![
+            (
+                Op::WsCreate {
+                    ws: ws.clone(),
+                    from: BaseRef::Main,
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::EditFiles {
+                    ws: ws.clone(),
+                    files: vec![FileEdit::write(path, content)],
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::Commit {
+                    ws: ws.clone(),
+                    msg: Seeded(format!("round {n}")),
+                },
+                FaultSpec::None,
+            ),
+            (
+                Op::Merge {
+                    srcs: vec![ws],
+                    into: Target::Default,
+                    destroy: false,
+                },
+                fault,
+            ),
+        ]
+    };
+    all.extend(round2(
+        2,
+        "shared/file-2.txt",
+        "two\n",
+        fp("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"),
+    ));
+    all.extend(round2(
+        3,
+        "shared/file-3.txt",
+        "three\n",
+        fp("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT"),
+    ));
+    all.extend(round2(
+        4,
+        "shared/file-2.txt",
+        "four\n",
+        fp("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT"),
+    ));
+    all.extend(round2(5, "shared/file-3.txt", "five\n", FaultSpec::None));
+    let plan = ScenarioPlan {
+        seed: 0x1_19E0,
+        profile: soak_profile(),
+        steps: all
+            .into_iter()
+            .enumerate()
+            .map(|(index, (op, fault))| PlannedStep {
+                index,
+                op,
+                fault,
+                git_time: GIT_TIME_BASE_FOR_DRIVER + 60 * (i64::try_from(index).unwrap() + 1),
+            })
+            .collect(),
+    };
+    let mut driver = new_driver();
+    assert!(
+        driver.has_trunk(),
+        "the sg1_dst binary installs the production updater"
+    );
+    let out = driver.drive(&plan);
+    assert!(
+        matches!(out.verdict, StepVerdict::Clean),
+        "verdict={:?} stats={:?}",
+        out.verdict,
+        out.stats
+    );
+    let s = out.stats;
+    assert_eq!(s.trunk_crashes, 2, "{s:?}");
+    assert!(s.trunk_updates >= 6, "{s:?}");
+    assert!(s.dirty_trunk_merges >= 2, "{s:?}");
+    assert!(s.displacement_checks >= 4, "{s:?}");
+    assert!(s.replay_judgements >= 5, "{s:?}");
+    let w = driver.default_ws_path().expect("trunk tier").to_path_buf();
+    assert_eq!(
+        fs::read_to_string(w.join("shared/file-0.txt")).unwrap(),
+        "uncommitted\n"
+    );
+    assert_eq!(
+        fs::read_to_string(w.join("trunk/new-0.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert_eq!(
+        fs::read_link(w.join("shared/file-1.txt")).unwrap(),
+        PathBuf::from("file-0.txt")
+    );
+    assert_eq!(
+        fs::read_to_string(w.join("shared/file-3.txt")).unwrap(),
+        "five\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Triage: replay a failure bundle's minimal plan (bn-1h9ue)
+// ---------------------------------------------------------------------------
+
+/// Replay the minimal plan of a failure bundle (`SG1_REPLAY_BUNDLE=<path to
+/// bundle.json>`, or a corpus entry JSON) and print its verdict. Combine with
+/// `MAW_INPROC_DEBUG=1` to see every target update's output. A no-op without
+/// the env var.
+#[test]
+#[ignore = "triage helper: SG1_REPLAY_BUNDLE=<bundle.json>"]
+fn sg1_replay_bundle() {
+    let Ok(path) = std::env::var("SG1_REPLAY_BUNDLE") else {
+        return;
+    };
+    let body = fs::read_to_string(&path).expect("read bundle");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("bundle json");
+    let entry_json = json.get("corpus_entry").cloned().unwrap_or(json);
+    let entry: ShrinkerCorpusEntry = serde_json::from_value(entry_json).expect("corpus entry");
+    let mut driver = new_driver().with_planted(entry.planted.clone());
+    let out = driver.drive(&entry.plan);
+    eprintln!(
+        "[sg1] replay {path}: steps={} verdict={:?} repo={}",
+        out.steps_replayed,
+        out.verdict,
+        driver.repo_root().display()
+    );
+    if std::env::var("SG1_REPLAY_KEEP").is_ok() {
+        let keep = driver.repo_root().to_path_buf();
+        std::mem::forget(driver);
+        eprintln!("[sg1] kept repo at {}", keep.display());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,7 +1311,7 @@ fn sg1_known_violation_pin_is_not_satisfied_by_a_broken_harness() {
 
 #[test]
 fn sg1_generator_is_byte_identical_per_seed() {
-    let profile = ConditionProfile::default();
+    let profile = soak_profile();
     let a = DefaultScenarioGenerator::generate(123, &profile);
     let b = DefaultScenarioGenerator::generate(123, &profile);
     let a_json = a.canonical_json().expect("serialize a");

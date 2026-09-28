@@ -65,6 +65,14 @@ pub(crate) mod working_copy;
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
 
+/// The production target update (anchor → snapshot → checkout → replay) that
+/// `maw ws merge` and merge crash recovery run on the default workspace.
+/// Exposed so the SG1 in-proc soak (`maw-assurance`'s `sg1_dst` test binary)
+/// drives the SAME code over its dirty-trunk scenarios (bn-1h9ue). Not a
+/// stable API.
+#[doc(hidden)]
+pub use merge::update_default_workspace;
+
 /// Print (and consume) a pending one-time auto-rebase notice for a
 /// workspace (bn-1abp). No-op for the default workspace — the sibling
 /// auto-rebase orchestrator never touches it.

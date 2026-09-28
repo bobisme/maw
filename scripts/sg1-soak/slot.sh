@@ -96,6 +96,12 @@ evidence() {
 ev_checks=$(evidence oracle_a_checks)
 ev_witnesses=$(evidence witnesses)
 ev_harness=$(evidence harness_errors)
+# bn-1h9ue: dirty-trunk tier evidence (null from a pre-bn-1h9ue binary).
+ev_trunk_updates=$(evidence trunk_updates)
+ev_trunk_crashes=$(evidence trunk_crashes)
+ev_dirty_merges=$(evidence dirty_trunk_merges)
+ev_displacement=$(evidence displacement_checks)
+ev_replay=$(evidence replay_checks)
 infra_line=$(grep -m1 '^\[sg1\] INFRA-FAILURE:' <<<"$out" || true)
 # Belt and braces: any sign of an oracle violation in the output vetoes the
 # infra path (the harness already refuses to exit 75 after a violation).
@@ -151,8 +157,9 @@ if [ "$rc" -ne 0 ] || [ -z "$clean" ] || [ -z "$range_clean" ]; then
 fi
 
 op=$(( range_clean * STEPS ))
-printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"range_clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"status":"clean"}\n' \
-  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$range_clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" >> "$STATE/ledger.jsonl"
+printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"range_clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"trunk_updates":%s,"trunk_crashes":%s,"dirty_trunk_merges":%s,"displacement_checks":%s,"replay_checks":%s,"status":"clean"}\n' \
+  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$range_clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" \
+  "$ev_trunk_updates" "$ev_trunk_crashes" "$ev_dirty_merges" "$ev_displacement" "$ev_replay" >> "$STATE/ledger.jsonl"
 
 exec {tf}>"$STATE/total.lock"; flock "$tf"
 cum=$(( $(cat "$STATE/cumulative") + op )); echo "$cum" > "$STATE/cumulative"

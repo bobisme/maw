@@ -81,7 +81,7 @@ case "${STUB_MODE:?}" in
     exit 0 ;;
   clean_evidence)
     begin
-    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 harness_errors=0"
+    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 trunk_writes=40 trunk_updates=12 trunk_crashes=2 dirty_trunk_merges=9 displacement_checks=31 replay_judgements=10 replay_checks=77 harness_errors=0"
     exit 0 ;;
   harness_error)
     echo "[sg1] HARNESS-ERROR seed=3 (oracles did not judge this seed; counted as a violation): HarnessError(..)"
@@ -347,10 +347,17 @@ fn clean_rows_record_evidence_totals() {
     assert_eq!(new["oracle_a_checks"], 55);
     assert_eq!(new["witnesses"], 17);
     assert_eq!(new["harness_errors"], 0);
+    // bn-1h9ue: dirty-trunk tier evidence.
+    assert_eq!(new["trunk_updates"], 12);
+    assert_eq!(new["trunk_crashes"], 2);
+    assert_eq!(new["dirty_trunk_merges"], 9);
+    assert_eq!(new["displacement_checks"], 31);
+    assert_eq!(new["replay_checks"], 77);
     let old: serde_json::Value = serde_json::from_str(&ledger[1]).expect("JSON");
     assert_eq!(old["status"], "clean");
     assert!(old["oracle_a_checks"].is_null(), "{old}");
     assert!(old["witnesses"].is_null(), "{old}");
+    assert!(old["displacement_checks"].is_null(), "{old}");
 }
 
 /// bn-2qamr: a clean slot accrues exactly its allocated range, and only when
