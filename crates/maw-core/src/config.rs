@@ -808,11 +808,13 @@ impl ManifoldConfig {
     }
 }
 
-/// Top-level sections of the deprecated consolidated-layout location
-/// (`.maw/config.toml`) that are adopted as a fallback. `[repo]` is written
+/// Sections of the deprecated `.maw/config.toml` adopted as a fallback.
+///
+/// These are top-level sections of the deprecated consolidated-layout
+/// location; `MawConfig`'s unknown-key check skips them there. `[repo]` is written
 /// to both files by `maw init` and is not adopted; any other table belongs
 /// to the `.maw.toml`-fallback role of that file.
-const LEGACY_ADOPTED_SECTIONS: &[&str] = &["merge", "workspace"];
+pub const LEGACY_ADOPTED_SECTIONS: &[&str] = &["merge", "workspace"];
 
 /// `[merge]` keys of the legacy `.maw/config.toml` that belong to its
 /// `.maw.toml`-fallback role (read by `MawConfig`), not to the manifold

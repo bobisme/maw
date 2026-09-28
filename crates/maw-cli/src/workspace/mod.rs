@@ -263,7 +263,20 @@ impl MawConfig {
                 // so maw would silently run on the default. Warn (never fail:
                 // a config written for a newer maw must keep working).
                 if let Ok(table) = content.parse::<toml::Table>() {
-                    let warnings: Vec<String> = maw_toml_keys::unknown_keys(&table)
+                    // bn-15ebo: in the consolidated layout the `.maw.toml`
+                    // fallback is the deprecated manifold location too; its
+                    // `[merge]` / `[workspace]` sections are read (with a
+                    // deprecation warning) by the manifold loader, so they
+                    // are not "ignored".
+                    let adopted: &[&str] =
+                        if flavor.legacy_manifold_config_path(repo_root).as_deref()
+                            == Some(candidate.as_path())
+                        {
+                            maw_core::config::LEGACY_ADOPTED_SECTIONS
+                        } else {
+                            &[]
+                        };
+                    let warnings: Vec<String> = maw_toml_keys::unknown_keys(&table, adopted)
                         .iter()
                         .map(|k| format!("{}: {}", candidate.display(), k.describe()))
                         .collect();
@@ -2311,9 +2324,16 @@ pub fn git_cwd() -> Result<PathBuf> {
 pub fn default_workspace_path() -> Result<PathBuf> {
     let root = repo_root()?;
     let flavor = LayoutFlavor::detect_with_env(&root);
-    // bn-qi5br: callers write into this path (`ws recover --restore-file`);
-    // an invalid .maw.toml must not silently redirect them to "default".
-    let config = MawConfig::require(&root, "maw ws recover")?;
+    // bn-15ebo: in the consolidated layout the default workspace IS the repo
+    // root whatever `.maw.toml` says, so an invalid config must not block
+    // recovery (`ws recover --restore-file`) here.
+    if flavor == LayoutFlavor::ConsolidatedMawDir {
+        return Ok(flavor.default_target_path(&root, DEFAULT_WORKSPACE));
+    }
+    // bn-qi5br: v2 resolves `ws/<default_workspace>`; callers write into this
+    // path, so an invalid .maw.toml must not silently redirect them to
+    // "default".
+    let config = MawConfig::require(&root, "maw ws recover --restore-file")?;
     Ok(flavor.default_target_path(&root, config.default_workspace()))
 }
 

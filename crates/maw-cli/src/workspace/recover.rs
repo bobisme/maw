@@ -1770,6 +1770,7 @@ fn warn_unresolved_lfs_pointers(_git_cwd: &Path, _ws_path: &Path, _oid: &str) {}
 pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     validate_recovery_ref(recovery_ref)?;
     validate_workspace_name(new_name)?;
+    require_config_for_restore_to()?;
 
     audit::log_audit(&AuditEvent::Restore {
         ref_name: recovery_ref.to_string(),
@@ -1808,6 +1809,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     maw::fp!("FP_RECOVER_BEFORE_RESTORE")?;
     validate_workspace_name(name)?;
     validate_workspace_name(new_name)?;
+    require_config_for_restore_to()?;
 
     audit::log_audit(&AuditEvent::Restore {
         ref_name: format!("(workspace:{name})"),
@@ -1869,6 +1871,22 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     println!("Next: maw exec {new_name} -- git status");
     println!("      maw exec {new_name} -- git diff");
 
+    Ok(())
+}
+
+/// `--to` creates a workspace, and create's base-epoch resync reads (and may
+/// rewrite the epoch toward) the configured branch, so an invalid `.maw.toml`
+/// refuses — before the audit log records a restore, and naming the command
+/// the user ran rather than `maw ws create` (bn-15ebo). Nothing is lost: the
+/// snapshot stays pinned and the read-only recovery paths keep working.
+fn require_config_for_restore_to() -> Result<()> {
+    let root = repo_root()?;
+    super::MawConfig::require(&root, "maw ws recover --to").map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}\n  Nothing was changed and the snapshot stays pinned; \
+             `maw ws recover <name> --show <path>` and `--search` still work."
+        )
+    })?;
     Ok(())
 }
 

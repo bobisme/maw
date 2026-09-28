@@ -62,9 +62,16 @@ fn known_paths() -> Vec<String> {
 }
 
 /// Find keys in a parsed `.maw.toml` that `MawConfig` does not read.
-pub(super) fn unknown_keys(table: &toml::Table) -> Vec<UnknownKey> {
+///
+/// `read_elsewhere` names top-level sections another loader reads from this
+/// same file (the consolidated layout's deprecated `.maw/config.toml`); they
+/// are skipped rather than reported as ignored.
+pub(super) fn unknown_keys(table: &toml::Table, read_elsewhere: &[&str]) -> Vec<UnknownKey> {
     let mut out = Vec::new();
     for (key, value) in table {
+        if read_elsewhere.contains(&key.as_str()) {
+            continue;
+        }
         match KNOWN_KEYS.iter().find(|(section, _)| section == key) {
             None => out.push(UnknownKey {
                 path: key.clone(),
@@ -132,7 +139,7 @@ mod tests {
     use super::*;
 
     fn unknown(src: &str) -> Vec<UnknownKey> {
-        unknown_keys(&toml::from_str(src).expect("valid toml"))
+        unknown_keys(&toml::from_str(src).expect("valid toml"), &[])
     }
 
     #[test]

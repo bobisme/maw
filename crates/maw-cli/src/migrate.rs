@@ -96,6 +96,11 @@ pub fn run(opts: &MigrateOptions) -> Result<()> {
         return Ok(());
     }
 
+    // bn-15ebo: Phase D attaches HEAD to the configured branch and refuses
+    // an invalid `.maw.toml` (bn-qi5br). Refuse here, before Phase B pins
+    // snapshots and Phase C relocates worktrees, rather than halfway through.
+    crate::workspace::MawConfig::require(&root, "maw migrate")?;
+
     let mut journal = match existing_journal {
         Some(j) if opts.resume || j.phase != JournalPhase::Start => {
             println!(
