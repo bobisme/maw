@@ -44,12 +44,43 @@ fn tools_available() -> bool {
 
 /// Stub for the pinned `sg1_dst` binary. `STUB_MODE` picks the behaviour.
 const STUB: &str = r#"#!/usr/bin/env bash
+# The real harness's begin line (unchanged since bn-1gp4).
+begin() {
+  printf '[sg1] nightly soak begin: seeds=%s steps=%s base_seed=0x%016x\n' \
+    "${1:-$SG1_NIGHTLY_SEEDS}" "${2:-$SG1_NIGHTLY_STEPS}" "${3:-$SG1_BASE_SEED}"
+}
+# The real harness's end line: the allocated range plus the canonical seed.
+end_clean() {
+  local n=$(( ${1:-$SG1_NIGHTLY_SEEDS} + 1 ))
+  echo "[sg1] nightly soak end: seeds=$n clean=$n violations=0 driver_total=1s wall=1s"
+}
 case "${STUB_MODE:?}" in
   clean)
-    echo "[sg1] nightly soak begin: seeds=$SG1_NIGHTLY_SEEDS"
-    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s"
+    begin; end_clean
+    exit 0 ;;
+  wrong_steps)
+    begin "" $((SG1_NIGHTLY_STEPS + 1)); end_clean
+    exit 0 ;;
+  wrong_base)
+    begin "" "" $((SG1_BASE_SEED + 1)); end_clean
+    exit 0 ;;
+  default_seeds)
+    begin 100000; end_clean 100000
+    exit 0 ;;
+  no_begin)
+    end_clean
+    exit 0 ;;
+  infra_while_peer_violates)
+    echo "VIOLATION: peer slot at base_seed=7 (rc=101). Log: x" > "$SG1_SOAK_STATE/STOP"
+    echo '[sg1] INFRA-FAILURE: EDQUOT: Disk quota exceeded (seed=5; run is NOT counted)'
+    exit 75 ;;
+  clean_while_peer_violates)
+    # A parallel slot halts the campaign while this one is still running.
+    echo "VIOLATION: peer slot at base_seed=7 (rc=101). Log: x" > "$SG1_SOAK_STATE/STOP"
+    begin; end_clean
     exit 0 ;;
   clean_evidence)
+    begin
     echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 harness_errors=0"
     exit 0 ;;
   harness_error)
@@ -176,11 +207,14 @@ fn infra_slots_record_but_do_not_accrue_or_halt_until_the_streak_limit() {
     }
     let c = Campaign::new();
 
-    // Clean slot accrues (SLOT_SEEDS + canonical seed) * STEPS.
+    // Clean slot accrues SLOT_SEEDS * STEPS: only the allocated seed range.
+    // The canonical bn-cm63 seed the harness replays in EVERY slot is the
+    // same deterministic plan each time, so it adds no new op-steps
+    // (bn-2qamr).
     let (code, text) = c.slot("clean");
     assert_eq!(code, 0, "{text}");
     assert!(c.tmpdir.is_dir(), "slot.sh must mkdir -p TMPDIR");
-    let per_clean = (SLOT_SEEDS + 1) * STEPS;
+    let per_clean = SLOT_SEEDS * STEPS;
     assert_eq!(c.num("cumulative"), per_clean);
     assert_eq!(c.num("cursor"), BASE + SLOT_SEEDS);
 
@@ -317,4 +351,101 @@ fn clean_rows_record_evidence_totals() {
     assert_eq!(old["status"], "clean");
     assert!(old["oracle_a_checks"].is_null(), "{old}");
     assert!(old["witnesses"].is_null(), "{old}");
+}
+
+/// bn-2qamr: a clean slot accrues exactly its allocated range, and only when
+/// the harness provably ran what the slot allocated (seed count, steps, base
+/// seed from its begin line). Anything else fails closed like a violation:
+/// the op-step count would otherwise be wrong, or the seeds would overlap
+/// other slots' ranges.
+#[test]
+fn clean_slots_accrue_only_the_allocated_range_run_as_allocated() {
+    if !tools_available() {
+        return;
+    }
+    let c = Campaign::new();
+    let (code, text) = c.slot("clean");
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(c.num("cumulative"), SLOT_SEEDS * STEPS);
+    let row: serde_json::Value = serde_json::from_str(&c.ledger()[0]).expect("JSON");
+    assert_eq!(row["op_steps"], SLOT_SEEDS * STEPS);
+    assert_eq!(
+        row["clean"],
+        SLOT_SEEDS + 1,
+        "harness clean count kept as is"
+    );
+    assert_eq!(row["range_clean"], SLOT_SEEDS);
+
+    for mode in ["wrong_steps", "wrong_base", "default_seeds", "no_begin"] {
+        let c = Campaign::new();
+        let (code, text) = c.slot(mode);
+        assert_eq!(code, 1, "{mode}: {text}");
+        let stop = c.stop().unwrap_or_else(|| panic!("{mode}: must STOP"));
+        assert!(stop.starts_with("VIOLATION:"), "{mode}: {stop}");
+        assert_eq!(c.num("cumulative"), 0, "{mode}: must not accrue");
+        let ledger = c.ledger();
+        assert_eq!(ledger.len(), 1, "{mode}");
+        assert!(
+            ledger[0].contains(r#""status":"VIOLATION_OR_ERROR""#),
+            "{mode}: {}",
+            ledger[0]
+        );
+    }
+}
+
+/// bn-2qamr: a violation STOP written by a PARALLEL slot while this slot was
+/// still running must never be masked by this slot crossing the target:
+/// slot.sh must not write DONE under a STOP, and status.sh must never report
+/// "DONE — 0 violations" while the ledger records a violation.
+#[test]
+fn a_peer_violation_is_never_reported_as_done() {
+    if !tools_available() {
+        return;
+    }
+    let c = Campaign::new();
+    fs::write(c.state.join("cumulative"), "999999\n").unwrap();
+    let (code, text) = c.slot("clean_while_peer_violates");
+    assert_eq!(code, 0, "{text}");
+    assert!(c.stop().is_some(), "the peer's STOP stays");
+    assert!(
+        !c.state.join("DONE").exists(),
+        "DONE must not be written while a violation STOP exists"
+    );
+
+    // Even with a DONE marker present (e.g. written by an older slot.sh), a
+    // violation in the ledger wins.
+    let c = Campaign::new();
+    fs::write(
+        c.state.join("ledger.jsonl"),
+        "{\"status\":\"VIOLATION_OR_ERROR\",\"ts\":\"2026-01-01T00:00:00+00:00\"}\n",
+    )
+    .unwrap();
+    fs::write(c.state.join("STOP"), "VIOLATION: x\n").unwrap();
+    fs::write(c.state.join("DONE"), "").unwrap();
+    fs::write(c.state.join("cumulative"), "1000000\n").unwrap();
+    let status = c.status();
+    assert!(!status.contains("DONE"), "{status}");
+    assert!(status.contains("STOPPED (VIOLATION)"), "{status}");
+}
+
+/// bn-2qamr: an INFRA-HALT must never overwrite a PARALLEL slot's violation
+/// STOP. Its operator instruction is "free disk, then rm STOP to resume" —
+/// following it would silently resume the campaign past a real violation.
+#[test]
+fn infra_halt_never_overwrites_a_peer_violation_stop() {
+    if !tools_available() {
+        return;
+    }
+    let c = Campaign::new();
+    fs::write(c.state.join("infra_consecutive"), "2\n").unwrap();
+    let (code, text) = c.slot("infra_while_peer_violates");
+    assert_eq!(code, 1, "the streak limit still halts: {text}");
+    let stop = c.stop().expect("STOP");
+    assert!(
+        stop.starts_with("VIOLATION:"),
+        "peer violation STOP kept: {stop}"
+    );
+    let status = c.status();
+    assert!(status.contains("STOPPED (VIOLATION)"), "{status}");
+    assert!(!status.contains("INFRA-HALT"), "{status}");
 }

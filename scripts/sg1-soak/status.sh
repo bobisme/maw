@@ -39,8 +39,9 @@ echo "  Wilson 95% UB:      $wilson    (gate requires <= 3.84e-8 at 1e8, 0 viola
 echo "  violations:         $viol"
 echo "  infra failures:     $infra   (EDQUOT/ENOSPC/EMFILE/ENFILE; not verdicts, no op-steps; consecutive now: $infra_streak / ${INFRA_HALT_AFTER:-3})"
 stop_msg=""; [ -e "$STATE/STOP" ] && stop_msg=$(head -1 "$STATE/STOP" 2>/dev/null)
-if   [ -e "$STATE/DONE" ]; then echo "  STATUS: ✅ DONE — 1e8 reached with 0 violations. Fill notes/sg1-soak-campaign.md §7.1/§8 from the ledger."
-elif [ -e "$STATE/STOP" ]; then
+# bn-2qamr: a STOP or a recorded violation always outranks a DONE marker (a
+# parallel slot can cross the target after a peer's violation).
+if [ -e "$STATE/STOP" ]; then
   case "$stop_msg" in
     INFRA-HALT:*)
       echo "  STATUS: ⚠ INFRA-HALT — the HOST failed, not an oracle. See $STATE/infra/."
@@ -54,5 +55,9 @@ elif [ -e "$STATE/STOP" ]; then
       # a possible violation until a human checks (fail closed).
       echo "  STATUS: ⛔ STOPPED — manual pause or violation; check $STATE/violations/ before removing STOP." ;;
   esac
+elif [ -e "$STATE/DONE" ] && [ "$viol" -eq 0 ]; then
+  echo "  STATUS: ✅ DONE — 1e8 reached with 0 violations. Fill notes/sg1-soak-campaign.md §7.1/§8 from the ledger."
+elif [ -e "$STATE/DONE" ]; then
+  echo "  STATUS: ⛔ NOT A PASS — a DONE marker exists but the ledger records $viol violation(s); see $STATE/violations/."
 else                            echo "  STATUS: ▶ accruing (cron active if installed; or run scripts/sg1-soak/slot.sh)."
 fi

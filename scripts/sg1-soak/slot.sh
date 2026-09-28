@@ -66,6 +66,25 @@ out=$(SG1_BASE_SEED="$base" SG1_NIGHTLY_SEEDS="$SLOT_SEEDS" SG1_NIGHTLY_STEPS="$
 rc=$?
 end_ts=$(date -uIs)
 clean=$(grep -oP 'nightly soak end: seeds=[0-9]+ clean=\K[0-9]+' <<<"$out" | head -1)
+end_seeds=$(grep -oP 'nightly soak end: seeds=\K[0-9]+' <<<"$out" | head -1)
+# bn-2qamr: accrue ONLY what this slot allocated, and only if the harness
+# provably ran it. The begin line must echo back SLOT_SEEDS / STEPS / base (an
+# env value the harness failed to parse silently falls back to its default —
+# the op-step count would be wrong and the seeds could overlap other slots).
+# The harness also replays CANONICAL_BN_CM63_SEED first in EVERY slot: the
+# same deterministic plan each time, so it adds no new op-steps and is not
+# counted (range_clean = clean minus the seeds outside the allocated range).
+begin_line=$(grep -m1 'nightly soak begin:' <<<"$out" || true)
+b_seeds=$(grep -oP '\bseeds=\K[0-9]+' <<<"$begin_line" | head -1)
+b_steps=$(grep -oP '\bsteps=\K[0-9]+' <<<"$begin_line" | head -1)
+b_base=$(grep -oP '\bbase_seed=0x\K[0-9a-fA-F]+' <<<"$begin_line" | head -1)
+range_clean=""
+if [ -n "$clean" ] && [ -n "$end_seeds" ] && [ "$clean" = "$end_seeds" ] \
+   && [ "$b_seeds" = "$SLOT_SEEDS" ] && [ "$b_steps" = "$STEPS" ] \
+   && [ "${b_base,,}" = "$(printf '%016x' "$base")" ] \
+   && [ "$end_seeds" -ge "$SLOT_SEEDS" ] && [ "$end_seeds" -le $(( SLOT_SEEDS + 1 )) ]; then
+  range_clean=$SLOT_SEEDS
+fi
 # bn-25pac evidence totals from the same summary line (JSON null when the
 # pinned binary predates them). Recorded in the ledger so a campaign's
 # accrual can be audited against what the oracles actually judged.
@@ -103,15 +122,21 @@ if [ "$rc" -eq "$INFRA_EXIT_CODE" ] && [ -n "$infra_line" ] && [ -z "$viol_seen"
   echo "SG1 soak slot hit an INFRASTRUCTURE failure at base_seed=$base (rc=$rc): $reason" >&2
   echo "  not an Oracle verdict; no op-steps accrued; seed range recorded as infra. log: $log" >&2
   if [ "$streak" -ge "$INFRA_HALT_AFTER" ]; then
-    printf 'INFRA-HALT: %s consecutive infrastructure failures (last: base_seed=%s, %s). Free disk/quota/fds, check TMPDIR=%s, then rm STOP to resume. Last log: %s\n' \
-      "$streak" "$base" "$reason" "$TMPDIR" "$log" > "$STATE/STOP"
+    # bn-2qamr: noclobber (O_EXCL) — never overwrite a STOP a PARALLEL slot
+    # wrote (e.g. a VIOLATION): "rm STOP to resume" would then silently resume
+    # the campaign past a real finding. A violation still overwrites an
+    # INFRA-HALT (it writes without noclobber), so a finding always wins.
+    ( set -C
+      printf 'INFRA-HALT: %s consecutive infrastructure failures (last: base_seed=%s, %s). Free disk/quota/fds, check TMPDIR=%s, then rm STOP to resume. Last log: %s\n' \
+        "$streak" "$base" "$reason" "$TMPDIR" "$log" > "$STATE/STOP" ) 2>/dev/null \
+      || echo "  (STOP already present — left as is: $(head -1 "$STATE/STOP" 2>/dev/null))" >&2
     echo "SG1 SOAK INFRA-HALT: $streak consecutive infra failures (limit $INFRA_HALT_AFTER). Campaign STOPped for a human." >&2
     exit 1
   fi
   exit 0
 fi
 
-if [ "$rc" -ne 0 ] || [ -z "$clean" ]; then
+if [ "$rc" -ne 0 ] || [ -z "$clean" ] || [ -z "$range_clean" ]; then
   mkdir -p "$STATE/violations"
   log="$STATE/violations/base-${base}-${ts//[:]/-}.log"
   printf '%s\n' "$out" > "$log"
@@ -125,16 +150,19 @@ if [ "$rc" -ne 0 ] || [ -z "$clean" ]; then
   exit 1
 fi
 
-op=$(( clean * STEPS ))
-printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"status":"clean"}\n' \
-  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" >> "$STATE/ledger.jsonl"
+op=$(( range_clean * STEPS ))
+printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"range_clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"status":"clean"}\n' \
+  "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$range_clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" >> "$STATE/ledger.jsonl"
 
 exec {tf}>"$STATE/total.lock"; flock "$tf"
 cum=$(( $(cat "$STATE/cumulative") + op )); echo "$cum" > "$STATE/cumulative"
 echo 0 > "$STATE/infra_consecutive"   # a clean slot ends an infra streak
 flock -u "$tf"; exec {tf}>&-
 
-if [ "$cum" -ge "$TARGET_OPSTEPS" ]; then
+# bn-2qamr: never declare DONE over a violation. A PARALLEL slot may have
+# written STOP (or a VIOLATION_OR_ERROR row) while this slot was running.
+if [ "$cum" -ge "$TARGET_OPSTEPS" ] && [ ! -e "$STATE/STOP" ] \
+   && ! grep -q '"status":"VIOLATION_OR_ERROR"' "$STATE/ledger.jsonl"; then
   touch "$STATE/DONE"
   echo "SG1 SOAK DONE: cumulative=$cum >= $TARGET_OPSTEPS (1e8 floor reached, 0 violations)." >&2
 fi

@@ -98,7 +98,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use maw_assurance::in_proc::{DriveStats, InProcDriver, PlantedDefect, StepVerdict};
+use maw_assurance::in_proc::{
+    DriveStats, HarnessErrorClass, InProcDriver, OracleAClass, OracleBClass, PlantedDefect,
+    StepVerdict,
+};
 use maw_assurance::infra::{self, INFRA_EXIT_CODE, INFRA_MARKER, InfraFailure};
 use maw_assurance::scenario::{
     CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
@@ -540,18 +543,14 @@ fn sg1_per_commit_corpus() {
         match entry {
             CorpusEntry::ScenarioPlan { path, entry } => {
                 let outcome = drive_corpus_scenario_plan(entry);
-                let want_violation = entry.expected == "known_violation";
-                let actually_violated = outcome.verdict.is_violation();
                 replayed += 1;
-                if want_violation && !actually_violated {
-                    let msg = format!(
-                        "corpus {}: expected known_violation but oracles were CLEAN \
-                         (the recorded violation no longer reproduces — \
-                         the underlying bug may be re-introduced silently)",
-                        path.display()
-                    );
-                    violations.push(msg);
-                } else if !want_violation && actually_violated {
+                if entry.expected == "known_violation" {
+                    if let Some(why) =
+                        known_violation_mismatch(&entry.description, &outcome.verdict)
+                    {
+                        violations.push(format!("corpus {}: {why}", path.display()));
+                    }
+                } else if outcome.verdict.is_violation() {
                     let replay = format!(
                         "cargo test -p maw-assurance --features oracles --test sg1_dst \
                          sg1_per_commit_corpus -- --exact --nocapture # corpus seed {}",
@@ -597,6 +596,46 @@ fn sg1_per_commit_corpus() {
         "SG1 per-commit corpus FAILED (release-blocking; §7 acceptance gate):\n  - {}",
         violations.join("\n  - ")
     );
+}
+
+/// Why a `known_violation` corpus replay does NOT reproduce its recorded
+/// violation, or `None` when it does.
+///
+/// bn-2qamr: only an ORACLE finding of the recorded class satisfies the pin.
+/// A `HarnessError` means the oracles never judged the plan, and an oracle's
+/// own tooling failure (`OracleA` "Other" / `OracleB` "GitError") is not a
+/// finding either — accepting "any violation" would let a broken harness keep
+/// these permanent regression pins green. The recorded class is the verdict
+/// kind named in the entry's `description` (e.g. "ReachabilityLost",
+/// "DanglingHeadRef").
+fn known_violation_mismatch(description: &str, verdict: &StepVerdict) -> Option<String> {
+    match verdict {
+        StepVerdict::Clean => Some(
+            "expected known_violation but oracles were CLEAN (the recorded violation no \
+             longer reproduces — the underlying bug may be re-introduced silently)"
+                .to_owned(),
+        ),
+        StepVerdict::HarnessError(_) => Some(format!(
+            "expected known_violation but the harness malfunctioned — the oracles did \
+             NOT judge the plan: {verdict:?}"
+        )),
+        StepVerdict::OracleA(_) | StepVerdict::OracleB(_) => {
+            let (kind, _) = verdict.signature();
+            if matches!(kind, "Other" | "GitError") {
+                Some(format!(
+                    "expected known_violation but the oracle hit a tooling error, not a \
+                     finding: {verdict:?}"
+                ))
+            } else if !description.contains(kind) {
+                Some(format!(
+                    "expected the known_violation named in the description but got a \
+                     different class ({kind}): {verdict:?}"
+                ))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -872,6 +911,115 @@ fn sg1_corpus_dir_is_reachable() {
          If you moved the corpus, update `corpus_dir()` in this file.",
         dir.display(),
         env!("CARGO_MANIFEST_DIR")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-2qamr: a `known_violation` corpus pin is satisfied ONLY by the oracle
+// verdict it records — never by a harness error (the oracles did not judge
+// the seed) or by a different violation class.
+// ---------------------------------------------------------------------------
+
+fn corpus_scenario_entry(file: &str) -> ShrinkerCorpusEntry {
+    load_corpus()
+        .into_iter()
+        .find_map(|e| match e {
+            CorpusEntry::ScenarioPlan { path, entry } if path.ends_with(file) => Some(*entry),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("corpus entry {file} not found"))
+}
+
+#[test]
+fn sg1_known_violation_rejects_harness_error_and_other_classes() {
+    let lost =
+        "2026-02-05 lost-commits incident class (seed=6, Oracle A ReachabilityLost on ws-12)";
+    let reach = StepVerdict::OracleA(OracleAClass {
+        kind: "ReachabilityLost",
+        oid: "abc".into(),
+    });
+    assert_eq!(known_violation_mismatch(lost, &reach), None);
+    for (why, verdict) in [
+        ("clean", StepVerdict::Clean),
+        (
+            "harness error",
+            StepVerdict::HarnessError(HarnessErrorClass {
+                site: "oracle_a_check",
+                detail: "fatal: bad object".into(),
+            }),
+        ),
+        (
+            "different oracle class",
+            StepVerdict::OracleB(OracleBClass {
+                kind: "DanglingHeadRef",
+                entity: "ws-12".into(),
+            }),
+        ),
+        (
+            "oracle A tooling failure",
+            StepVerdict::OracleA(OracleAClass {
+                kind: "Other",
+                oid: "git error".into(),
+            }),
+        ),
+        (
+            "oracle B tooling failure",
+            StepVerdict::OracleB(OracleBClass {
+                kind: "GitError",
+                entity: "B1".into(),
+            }),
+        ),
+    ] {
+        assert!(
+            known_violation_mismatch(lost, &verdict).is_some(),
+            "{why} must NOT satisfy a known_violation pin: {verdict:?}"
+        );
+    }
+    // A tooling failure is never a finding, even when the free-text
+    // description happens to contain its kind word.
+    let wordy = "Oracle A ReachabilityLost on ws-12. Other workspaces keep a GitError-free view.";
+    for verdict in [
+        StepVerdict::OracleA(OracleAClass {
+            kind: "Other",
+            oid: "git error".into(),
+        }),
+        StepVerdict::OracleB(OracleBClass {
+            kind: "GitError",
+            entity: "B1".into(),
+        }),
+    ] {
+        assert!(
+            known_violation_mismatch(wordy, &verdict).is_some(),
+            "tooling failure must NOT satisfy a known_violation pin: {verdict:?}"
+        );
+    }
+}
+
+/// End to end: the lost-commits pin replayed on a harness that cannot apply
+/// its plan must fail the corpus check, not pass as "reproduced".
+#[test]
+fn sg1_known_violation_pin_is_not_satisfied_by_a_broken_harness() {
+    let entry = corpus_scenario_entry("lost-commits-2026-02-05.json");
+    assert_eq!(entry.expected, "known_violation");
+    let first_ws = entry
+        .plan
+        .steps
+        .iter()
+        .find_map(|s| match &s.op {
+            maw_assurance::scenario::Op::WsCreate { ws, .. } => Some(ws.0.clone()),
+            _ => None,
+        })
+        .expect("plan creates a workspace");
+    let mut driver = new_driver().with_planted(entry.planted.clone());
+    // A FILE where the first workspace's directory must go: WsCreate cannot
+    // apply, so the oracles never judge the plan.
+    fs::write(driver.repo_root().join("ws").join(&first_ws), "obstruction").unwrap();
+    let out = driver.drive(&entry.plan);
+    assert!(out.verdict.is_harness_error(), "{:?}", out.verdict);
+    assert!(
+        known_violation_mismatch(&entry.description, &out.verdict).is_some(),
+        "a harness error must not count as the pin reproducing: {:?}",
+        out.verdict
     );
 }
 

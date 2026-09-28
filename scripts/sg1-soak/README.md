@@ -21,7 +21,11 @@ accrual at low parallelism. Run it as a background cron at `nice -19` +
   with `SG1_SOAK_STATE`) so cron never dirties your working tree.
 - Each slot runs `SLOT_SEEDS` seeds × `STEPS` steps from a **disjoint** base
   seed (atomically allocated cursor), appends a row to `ledger.jsonl`, and adds
-  `clean × STEPS` op-steps to `cumulative`.
+  `SLOT_SEEDS × STEPS` op-steps to `cumulative`. The harness also replays
+  `CANONICAL_BN_CM63_SEED` in every slot; that fixed plan is judged but NOT
+  counted (the ledger's `clean` includes it, `range_clean` does not). The slot
+  only accrues if the harness's begin line echoes back the allocated
+  `SLOT_SEEDS`/`STEPS`/base seed; any mismatch fails closed like a violation.
 - `flock` bounds concurrency to `PARALLEL` (default 2). Cron can fire often; if
   all slots are busy it exits immediately.
 - **A slot whose binary exits non-zero = an Oracle violation.** The slot writes
