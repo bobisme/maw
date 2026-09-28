@@ -54,7 +54,9 @@
 //!   (`dst_production_tier_survives_faults`, run via
 //!   `just sg1-production-tier-faults`) DOES honor `PlannedStep.fault`: every
 //!   step the generator marks with a `FaultSpec::Failpoint` is executed via a
-//!   `--features failpoints` `maw` binary with `MAW_FP=<name>=abort`, crashing
+//!   `--features failpoints` `maw` binary with `MAW_FP=<name>=abort` (or
+//!   `=error` for the handled error-style sites in
+//!   `maw_assurance::fault::HANDLED_ERROR_FAILPOINTS`), crashing
 //!   the op mid-flight, and the oracles must still hold on the post-crash repo
 //!   (maw's merge-state recovery is what makes this true). A violation under
 //!   faults is a candidate REAL maw recovery/work-loss bug.
@@ -727,7 +729,7 @@ fn out_of_maw_commit(
 /// the failpoints binary here; any other op (defensively) falls back to the
 /// plain unfaulted path.
 ///
-/// Returns `(outcome, crashed)`:
+/// Returns `(outcome, crashed, output)`:
 /// - `outcome.succeeded` is `true` iff the maw invocation exited 0 (liveness),
 /// - `crashed` is `true` iff the process did not exit cleanly (non-zero or
 ///   killed by a signal — the realistic "mid-op kill"). A crash is EXPECTED,
@@ -742,11 +744,14 @@ fn out_of_maw_commit(
 /// still runs), and matches the bn-18mv model where the armed env trips a later
 /// merge.
 #[cfg(feature = "assurance")]
-fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (OpOutcome, bool) {
+fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (OpOutcome, bool, String) {
     use std::process::Command;
 
     let bin = failpoints_maw_bin();
-    let maw_fp = format!("{fp_name}=abort");
+    // bn-1sbjf: `abort` for every crash site, `error` for the handled
+    // error-style sites (FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT drives the bn-3jqfk
+    // snapshot-failed fallback, which an abort would skip).
+    let maw_fp = maw::assurance::fault::production_fp_spec(fp_name);
 
     // Build the argv for the op, matching `execute_op`'s mapping exactly.
     let run = |args: &[&str]| -> std::process::Output {
@@ -785,12 +790,14 @@ fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (OpOutcome, bo
         // The generator never attaches a fault to any other op; if that ever
         // changes, fall back to the unfaulted plain-binary path rather than
         // silently dropping the op.
-        _ => return (execute_op(repo, op), false),
+        _ => return (execute_op(repo, op), false, String::new()),
     };
 
     let succeeded = out.status.success();
     let crashed = !out.status.success();
-    (OpOutcome::from(succeeded), crashed)
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (OpOutcome::from(succeeded), crashed, text)
 }
 
 /// Merge target name. Increment 1 always merges into `default`.
@@ -910,7 +917,7 @@ fn run_seed(
             // likely crash mid-flight. That is EXPECTED — the oracle judges the
             // post-crash state below.
             live.faults_injected += 1;
-            let (out, _crashed) = execute_op_faulted(&repo, op, fp_name);
+            let (out, _crashed, _text) = execute_op_faulted(&repo, op, fp_name);
             out
         } else {
             execute_op(&repo, op)
@@ -1371,6 +1378,40 @@ struct RegressionRun {
 fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan) -> RegressionRun {
     let repo = TestRepo::new();
     repo.seed_files(&[("base.txt", "base content\n")]);
+    drive_plan_on(&repo, plan, false, &mut |_, _| {}).0
+}
+
+/// One faulted step of a regression plan driven with faults honored.
+#[cfg(feature = "assurance")]
+struct FaultedStep {
+    index: usize,
+    /// The `MAW_FP` spec armed on the failpoints binary.
+    spec: String,
+    /// Whether the faulted `maw` invocation exited 0.
+    succeeded: bool,
+    /// Its combined stdout + stderr.
+    output: String,
+    /// The merge journal was on disk right after the faulted op.
+    journal_after: bool,
+    /// A target-checkout intent (bn-15fzo) was on disk right after it.
+    checkout_intent_after: bool,
+}
+
+/// Drive `plan` on an already-seeded `repo`, running every oracle after every
+/// op. With `inject_faults`, a step carrying a `FaultSpec::Failpoint` runs on
+/// the failpoints binary with
+/// [`maw::assurance::fault::production_fp_spec`] (exactly as the faulted
+/// tier does). `before_step(repo, i)` runs before step `i` executes, for
+/// harness-side setup the op vocabulary cannot express (bn-1sbjf: a trunk
+/// symlink).
+#[cfg(feature = "assurance")]
+fn drive_plan_on(
+    repo: &TestRepo,
+    plan: &maw::assurance::scenario::ScenarioPlan,
+    inject_faults: bool,
+    before_step: &mut dyn FnMut(&TestRepo, usize),
+) -> (RegressionRun, Vec<FaultedStep>) {
+    let mut faulted_steps = Vec::new();
 
     let mut oracle_a = OracleA::new(repo.root());
     let mut sibling_oracle = SiblingRefFaithfulness::new();
@@ -1383,7 +1424,22 @@ fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan)
     for (i, step) in plan.steps.iter().enumerate() {
         let op = &step.op;
         let name = op_name(op);
-        let outcome = execute_op(&repo, op);
+        before_step(repo, i);
+        let outcome = match (&step.fault, inject_faults) {
+            (FaultSpec::Failpoint { name: fp, .. }, true) => {
+                let (outcome, _crashed, output) = execute_op_faulted(repo, op, fp);
+                faulted_steps.push(FaultedStep {
+                    index: i,
+                    spec: maw::assurance::fault::production_fp_spec(fp),
+                    succeeded: outcome.succeeded,
+                    output,
+                    journal_after: merge_journal_path(repo.root()).exists(),
+                    checkout_intent_after: checkout_intent_path(repo.root(), "default").exists(),
+                });
+                outcome
+            }
+            _ => execute_op(repo, op),
+        };
         let succeeded = outcome.succeeded;
 
         if let Op::CorruptWorktreeStatMasked { ws, .. } = op
@@ -1439,14 +1495,33 @@ fn drive_regression_plan_reported(plan: &maw::assurance::scenario::ScenarioPlan)
 
     let conflicted_workspaces = workspaces_with_conflict_sidecar(repo.root());
     let saw_conflict_marker_blob = repo_has_conflict_marker_blob(repo.root());
-    RegressionRun {
-        violations,
-        conflicted_workspaces,
-        saw_conflict_marker_blob,
-        masked_paths,
-        masked_overwrites_judged: masked_oracle.overwrites_judged(),
-        recovery_refs: recovery_ref_names(repo.root()),
-    }
+    (
+        RegressionRun {
+            violations,
+            conflicted_workspaces,
+            saw_conflict_marker_blob,
+            masked_paths,
+            masked_overwrites_judged: masked_oracle.overwrites_judged(),
+            recovery_refs: recovery_ref_names(repo.root()),
+        },
+        faulted_steps,
+    )
+}
+
+/// The merge journal (`merge-state.json`) path for `root`'s layout.
+#[cfg(feature = "assurance")]
+fn merge_journal_path(root: &std::path::Path) -> std::path::PathBuf {
+    maw_core::merge_state::MergeStateFile::default_path(
+        &maw_core::model::layout::LayoutFlavor::detect(root).manifold_dir(root),
+    )
+}
+
+/// The bn-15fzo target-checkout intent record for workspace `ws`.
+#[cfg(feature = "assurance")]
+fn checkout_intent_path(root: &std::path::Path, ws: &str) -> std::path::PathBuf {
+    maw_core::model::layout::LayoutFlavor::detect(root)
+        .manifold_dir(root)
+        .join(format!("target-checkout-{ws}.json"))
 }
 
 /// Every `refs/manifold/recovery/*` ref name in the repo, sorted.
@@ -1716,4 +1791,247 @@ fn dst_production_tier_masked_stale_corruption() {
         failing_seeds,
         violations.join("\n"),
     );
+}
+
+// ---------------------------------------------------------------------------
+// bn-1sbjf: targeted crashes inside the target update
+// ---------------------------------------------------------------------------
+
+/// The `(path, bytes)` the bn-1sbjf plan's `DirtyTrunkWrite` step wrote.
+#[cfg(feature = "assurance")]
+fn bn_1sbjf_dirty_writes(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<(String, String)> {
+    plan.steps
+        .iter()
+        .find_map(|s| match &s.op {
+            Op::DirtyTrunkWrite { files } => Some(
+                files
+                    .iter()
+                    .map(|f| (f.path.clone(), f.content.clone()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("the bn-1sbjf plan dirties the trunk")
+}
+
+/// Strict end-state judgement of a bn-1sbjf run, on top of the oracles.
+///
+/// `TrunkDirtyPreservation` accepts dirty bytes that survive only inside a
+/// recovery ref, which is exactly where both bugs left them (bn-15fzo: the
+/// user's edits "survived only in a recovery ref"; bn-3jqfk: the pin is still
+/// written). So after a successful recovery the harness also demands the
+/// end state the live merge produces: every dirty write back on disk, both
+/// merges' work present, the journal and checkout intent gone, and nothing
+/// but the user's own paths showing as local changes (the merge's own
+/// changes must not be recorded as "user edits").
+#[cfg(feature = "assurance")]
+fn assert_bn_1sbjf_target_state(
+    repo: &TestRepo,
+    plan: &maw::assurance::scenario::ScenarioPlan,
+    extra_local_paths: &[&str],
+    context: &str,
+) {
+    let default_ws = repo.default_workspace();
+    let dirty = bn_1sbjf_dirty_writes(plan);
+    for (path, content) in &dirty {
+        assert_eq!(
+            std::fs::read_to_string(default_ws.join(path))
+                .ok()
+                .as_deref(),
+            Some(content.as_str()),
+            "bn-1sbjf: uncommitted trunk bytes at '{path}' are not back on disk after \
+             recovery\n{context}"
+        );
+    }
+    for ws in ["ws-a", "ws-b"] {
+        assert_eq!(
+            std::fs::read_to_string(default_ws.join(ws).join("merged.txt"))
+                .ok()
+                .as_deref(),
+            Some(format!("{ws} committed work (bn-1sbjf)\n").as_str()),
+            "bn-1sbjf: {ws}'s merged work is missing from the target\n{context}"
+        );
+    }
+    assert!(
+        !merge_journal_path(repo.root()).exists(),
+        "bn-1sbjf: the interrupted merge's journal was never recovered\n{context}"
+    );
+    assert!(
+        !checkout_intent_path(repo.root(), "default").exists(),
+        "bn-1sbjf: the target-checkout intent was left behind\n{context}"
+    );
+    let status = manifold_common::git_ok(
+        &default_ws,
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    let mut local: Vec<String> = status
+        .lines()
+        .filter_map(|l| l.get(3..))
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.starts_with(".maw") && !p.starts_with(".manifold"))
+        .collect();
+    local.sort();
+    let mut expected: Vec<String> = dirty
+        .iter()
+        .map(|(p, _)| p.clone())
+        .chain(extra_local_paths.iter().map(|p| (*p).to_owned()))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        local, expected,
+        "bn-1sbjf: local changes vs the merged commit must be exactly the user's \
+         own edits\n{status}\n{context}"
+    );
+}
+
+/// bn-1sbjf / bn-15fzo: the DST harness crashes a dirty-trunk merge at
+/// `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` (real `abort` on the failpoints
+/// binary), then the next planned merge's start recovers it.
+///
+/// Non-vacuity: the crash must land INSIDE the window — journal on disk,
+/// checkout intent on disk, and (observed right before the recovering merge)
+/// the target already holding the merged tree while the user's tracked edit is
+/// only in the snapshot. Then every oracle must be green and the strict end
+/// state must match the live merge. Neutering the bn-15fzo resume (ignoring
+/// the checkout intent in `update_default_workspace`) turns this RED.
+#[cfg(feature = "assurance")]
+#[test]
+#[ignore = "heavyweight: builds a --features failpoints maw binary. Run via just sg1-production-tier-faults"]
+fn bn_1sbjf_crash_after_default_checkout_is_recovered() {
+    let plan = maw::assurance::scenario::bn_1sbjf_target_update_crash_plan(
+        "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+    );
+    let (tracked_path, tracked_dirty) = bn_1sbjf_dirty_writes(&plan)
+        .into_iter()
+        .next()
+        .expect("tracked dirty write");
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base content\n")]);
+
+    let mut in_window: Option<(bool, bool)> = None;
+    let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
+        if i == 8 {
+            let ws = repo.default_workspace();
+            let merged_on_disk = ws.join("ws-a").join("merged.txt").is_file();
+            let user_edit_on_disk =
+                std::fs::read_to_string(ws.join(&tracked_path)).is_ok_and(|c| c == tracked_dirty);
+            in_window = Some((merged_on_disk, user_edit_on_disk));
+        }
+    });
+
+    assert_eq!(faulted.len(), 1, "exactly one faulted step");
+    let f = &faulted[0];
+    let ctx = format!(
+        "faulted step {} ({}), exit ok={}\n{}",
+        f.index, f.spec, f.succeeded, f.output
+    );
+    assert_eq!(f.spec, "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort", "{ctx}");
+    assert!(!f.succeeded, "NON-VACUITY: the merge must crash\n{ctx}");
+    assert!(
+        f.journal_after,
+        "NON-VACUITY: the crash must leave the merge journal\n{ctx}"
+    );
+    assert!(
+        f.checkout_intent_after,
+        "NON-VACUITY: the crash must land after the checkout intent was written\n{ctx}"
+    );
+    assert_eq!(
+        in_window,
+        Some((true, false)),
+        "NON-VACUITY: before recovery the target must hold the merged tree \
+         (ws-a/merged.txt) with the user's edit only in the snapshot\n{ctx}"
+    );
+    assert!(
+        run.violations.is_empty(),
+        "bn-1sbjf: oracle violations after a crash at FP_CLEANUP_AFTER_DEFAULT_CHECKOUT:\n{}\n{ctx}",
+        run.violations.join("\n"),
+    );
+    assert_bn_1sbjf_target_state(&repo, &plan, &[], &ctx);
+}
+
+/// bn-1sbjf / bn-3jqfk: the DST harness injects `error` at
+/// `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` into a dirty-trunk merge whose trunk
+/// also carries a retargeted tracked SYMLINK (planted by the harness: the op
+/// vocabulary has no symlink write). The merge must take the snapshot-failed
+/// fallback, still succeed, pin the symlink AS a symlink, and put it back on
+/// disk. Neutering the bn-3jqfk symlink-preserving capture (`DiskSide::capture`
+/// following the link) turns this RED.
+#[cfg(all(feature = "assurance", unix))]
+#[test]
+#[ignore = "heavyweight: builds a --features failpoints maw binary. Run via just sg1-production-tier-faults"]
+fn bn_1sbjf_failed_snapshot_fallback_keeps_trunk_edits_and_symlink() {
+    let plan = maw::assurance::scenario::bn_1sbjf_target_update_crash_plan(
+        "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+    );
+    let untracked = maw::assurance::scenario::BN_1SBJF_DIRTY_UNTRACKED_PATH;
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base content\n")]);
+    // A tracked symlink in the epoch the workspaces are created from.
+    std::os::unix::fs::symlink("base.txt", repo.default_workspace().join("link"))
+        .expect("seed symlink");
+    repo.advance_epoch("chore: seed tracked symlink (bn-1sbjf)");
+    let pins_before = recovery_ref_names(repo.root());
+
+    let (run, faulted) = drive_plan_on(&repo, &plan, true, &mut |repo, i| {
+        if i == 7 {
+            // Retarget the tracked link right before the faulted merge.
+            let link = repo.default_workspace().join("link");
+            std::fs::remove_file(&link).expect("rm link");
+            std::os::unix::fs::symlink(untracked, &link).expect("retarget link");
+        }
+    });
+
+    assert_eq!(faulted.len(), 1, "exactly one faulted step");
+    let f = &faulted[0];
+    let ctx = format!(
+        "faulted step {} ({}), exit ok={}\n{}",
+        f.index, f.spec, f.succeeded, f.output
+    );
+    assert_eq!(
+        f.spec, "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected",
+        "{ctx}"
+    );
+    assert!(
+        f.succeeded,
+        "the snapshot-failed fallback is handled: the merge must succeed\n{ctx}"
+    );
+    assert!(
+        f.output.contains("snapshot_working_copy failed"),
+        "NON-VACUITY: the injected error must force the fallback path\n{ctx}"
+    );
+    assert!(!f.journal_after, "the handled merge must finish\n{ctx}");
+    assert!(
+        run.violations.is_empty(),
+        "bn-1sbjf: oracle violations after the snapshot-failed fallback:\n{}\n{ctx}",
+        run.violations.join("\n"),
+    );
+
+    let link = repo.default_workspace().join("link");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+        "bn-3jqfk: the user's symlink must be back on disk AS a symlink\n{ctx}"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).ok(),
+        Some(std::path::PathBuf::from(untracked)),
+        "bn-3jqfk: the user's symlink retarget was lost\n{ctx}"
+    );
+    // The fallback's recovery pin records the link as a symlink.
+    let new_pins: Vec<String> = recovery_ref_names(repo.root())
+        .into_iter()
+        .filter(|r| !pins_before.contains(r))
+        .collect();
+    let pinned_as_link = new_pins.iter().any(|r| {
+        let entry = manifold_common::git_ok(repo.root(), &["ls-tree", r, "link"]);
+        entry.starts_with("120000 ")
+            && entry.split_whitespace().nth(2).is_some_and(|oid| {
+                manifold_common::git_ok(repo.root(), &["cat-file", "blob", oid]) == untracked
+            })
+    });
+    assert!(
+        pinned_as_link,
+        "bn-3jqfk: no new recovery pin records `link` as a symlink to {untracked}: \
+         {new_pins:?}\n{ctx}"
+    );
+    assert_bn_1sbjf_target_state(&repo, &plan, &["link"], &ctx);
 }

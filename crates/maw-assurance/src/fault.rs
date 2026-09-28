@@ -72,7 +72,39 @@ pub const DANGEROUS_FAILPOINTS: &[&str] = &[
     "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
     "FP_PREPARE_BEFORE_STATE_WRITE",
     "FP_PREPARE_AFTER_STATE_WRITE",
+    // bn-1sbjf (bn-15fzo window): the target tree is already the merged tree
+    // and the user's pre-merge edits exist only in the pinned snapshot, so a
+    // crash here is only proven by a real kill + the checkout-intent resume.
+    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
 ];
+
+/// Error-style sites (bn-1sbjf): an injected `error` here is not a crash, it
+/// is a failure maw HANDLES in-line and the handling is what the site exists
+/// to test. `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` (bn-3jqfk) makes the
+/// dirty-trunk snapshot fail, so the merge takes the snapshot-failed fallback
+/// (pin the in-memory pre-merge capture, force checkout, repair from memory)
+/// and still exits 0. An `abort` at the same site would be a crash between
+/// `FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT` and the snapshot, where the worktree
+/// has not been touched yet, i.e. a near-duplicate of that site.
+///
+/// Never a member of [`DANGEROUS_FAILPOINTS`] (a SIGKILL would skip the very
+/// fallback the site exercises). Drivers that pick a single action per site
+/// (the production-code DST tier) use [`production_fp_spec`].
+pub const HANDLED_ERROR_FAILPOINTS: &[&str] = &["FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"];
+
+/// The `MAW_FP` spec a single-action driver (the production-code DST tier,
+/// which runs each faulted op as one real `maw` process) arms for
+/// `failpoint`: `error:dst-injected` for [`HANDLED_ERROR_FAILPOINTS`] (drive
+/// the handled fallback), `abort` for every other crashable site (a real
+/// mid-op process death).
+#[must_use]
+pub fn production_fp_spec(failpoint: &str) -> String {
+    if HANDLED_ERROR_FAILPOINTS.contains(&failpoint) {
+        format!("{failpoint}=error:dst-injected")
+    } else {
+        format!("{failpoint}=abort")
+    }
+}
 
 /// The full pool of crashable `FP_*` sites, grouped by FSM phase, that the
 /// seed selects from. Mirrors the canonical
@@ -524,6 +556,71 @@ mod tests {
         }
         for (phase, _) in CRASHABLE_BY_PHASE {
             assert!(seen.contains(*phase), "phase {phase} never selected");
+        }
+    }
+
+    /// bn-1sbjf: both target-update windows are in the crash pool, in the
+    /// cleanup phase, with the right delivery: the post-checkout window is a
+    /// real-kill boundary, the pre-snapshot site is a handled error.
+    #[test]
+    fn target_update_windows_are_crashable() {
+        let cleanup: Vec<&str> = CRASHABLE_BY_PHASE
+            .iter()
+            .find(|(p, _)| *p == "cleanup")
+            .map(|(_, s)| s.to_vec())
+            .expect("cleanup phase");
+        for fp in [
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+        ] {
+            assert!(cleanup.contains(&fp), "{fp} missing from cleanup pool");
+            assert!(
+                failpoints::KNOWN_FAILPOINTS.contains(&fp),
+                "{fp} is not a registered failpoint"
+            );
+        }
+        assert!(DANGEROUS_FAILPOINTS.contains(&"FP_CLEANUP_AFTER_DEFAULT_CHECKOUT"));
+        assert!(!DANGEROUS_FAILPOINTS.contains(&"FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"));
+        assert_eq!(
+            production_fp_spec("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"),
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected"
+        );
+        assert_eq!(
+            production_fp_spec("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT"),
+            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort"
+        );
+        // Both sites are actually drawn by the seed space.
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..4000_u64 {
+            seen.insert(FaultPlan::from_seed(seed).failpoint);
+        }
+        for fp in [
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+        ] {
+            assert!(seen.contains(fp), "{fp} never selected by from_seed");
+        }
+    }
+
+    /// Every dangerous / handled-error site is in the crash pool, the two
+    /// lists are disjoint, and every pool site is a registered failpoint.
+    #[test]
+    fn crash_lists_are_coherent() {
+        let pool: std::collections::HashSet<&str> = CRASHABLE_BY_PHASE
+            .iter()
+            .flat_map(|(_, sites)| sites.iter().copied())
+            .collect();
+        for fp in DANGEROUS_FAILPOINTS.iter().chain(HANDLED_ERROR_FAILPOINTS) {
+            assert!(pool.contains(fp), "{fp} not in CRASHABLE_BY_PHASE");
+        }
+        for fp in HANDLED_ERROR_FAILPOINTS {
+            assert!(!DANGEROUS_FAILPOINTS.contains(fp), "{fp} in both lists");
+        }
+        for fp in &pool {
+            assert!(
+                failpoints::KNOWN_FAILPOINTS.contains(fp),
+                "{fp} is not a registered failpoint"
+            );
         }
     }
 

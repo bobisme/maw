@@ -144,8 +144,9 @@ Use uppercase IDs with stable namespace prefixes:
   - Description: the tree is the merged tree and the user's pre-merge edits exist
     only in the pinned snapshot. Recovery (or a re-crashed recovery) must resume
     from the `target-checkout-<ws>.json` intent, not re-snapshot the merged tree
-    against `epoch_before`. Not yet in the DST crash pools (`CRASHABLE_BY_PHASE`,
-    `DANGEROUS_FAILPOINTS`).
+    against `epoch_before`. In the DST crash pools since bn-1sbjf (cleanup phase of
+    `CRASHABLE_BY_PHASE`, and `DANGEROUS_FAILPOINTS`); pinned by
+    `tests/dst_production_tier.rs::bn_1sbjf_crash_after_default_checkout_is_recovered`.
 
 - `FP_CLEANUP_BEFORE_STATE_REMOVE`
   - Location: `src/workspace/merge.rs:2492-2497` (before merge-state file removal via `run_cleanup_phase`)
@@ -178,6 +179,10 @@ Use uppercase IDs with stable namespace prefixes:
   `update_default_workspace`): `error` makes the dirty-trunk snapshot fail so the merge
   takes the fallback (pin the in-memory capture, force checkout, repair from memory).
   Used by `crates/maw-cli/tests/pre_merge_capture_symlink_bn_3jqfk.rs` (bn-3jqfk).
+  In the DST crash pool since bn-1sbjf (cleanup phase of `CRASHABLE_BY_PHASE`) as a
+  handled error-style site (`maw_assurance::fault::HANDLED_ERROR_FAILPOINTS`): the
+  production-code DST tier arms it with `error`, not `abort`; pinned by
+  `tests/dst_production_tier.rs::bn_1sbjf_failed_snapshot_fallback_keeps_trunk_edits_and_symlink`.
 
 ### RECOVER/search paths
 

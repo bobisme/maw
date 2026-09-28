@@ -127,6 +127,18 @@ pub const CRASHABLE_BY_PHASE: &[(&str, &[&str])] = &[
         &[
             "FP_CLEANUP_AFTER_CAPTURE",
             "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
+            // bn-1sbjf: the two target-update windows added by bn-3jqfk and
+            // bn-15fzo, in execution order inside `update_default_workspace`.
+            // `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` is an error-style site: an
+            // injected `error` is HANDLED (snapshot-failed fallback: pin the
+            // in-memory capture, force checkout, repair from memory), see
+            // `maw_assurance::fault::HANDLED_ERROR_FAILPOINTS`.
+            // `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` is a real crash window (tree
+            // already merged, user edits only in the pinned snapshot).
+            // Appending here widened the cleanup phase's site range, which
+            // deliberately re-pinned the op-stream digests (campaign reset).
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
         ],
     ),
 ];
@@ -756,6 +768,21 @@ pub const BN_286G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0003;
 /// [`BN_RAH2_REGRESSION_SEED`].
 pub const BN_154G_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0004;
 
+/// Sentinel seed tagging the [`bn_1sbjf_target_update_crash_plan`] family
+/// (a merge faulted inside the target update, with a dirty trunk, recovered by
+/// the next merge). The low byte is the failpoint's index in the cleanup
+/// phase of [`CRASHABLE_BY_PHASE`], so each targeted site has its own stable
+/// seed. See [`BN_RAH2_REGRESSION_SEED`].
+pub const BN_1SBJF_REGRESSION_SEED_BASE: u64 = 0x2BCC_0000_0000_0500;
+
+/// Tracked trunk path the [`bn_1sbjf_target_update_crash_plan`] dirties. It is
+/// seeded by `TestRepo::seed_files` and touched by no workspace, so after the
+/// recovered merges its bytes must be on disk verbatim.
+pub const BN_1SBJF_DIRTY_TRACKED_PATH: &str = "base.txt";
+
+/// Untracked trunk path the [`bn_1sbjf_target_update_crash_plan`] writes.
+pub const BN_1SBJF_DIRTY_UNTRACKED_PATH: &str = "trunk/untracked.txt";
+
 /// Tracked path the [`bn_154g_regression_plan`] poisons. Seeded into every
 /// production-tier repo by `TestRepo::seed_files`, so it is tracked in every
 /// workspace's HEAD from the moment the workspace exists.
@@ -1124,6 +1151,112 @@ pub fn bn_154g_regression_plan() -> ScenarioPlan {
     ScenarioPlan {
         seed: BN_154G_REGRESSION_SEED,
         profile: ConditionProfile::default().with_corrupt_weight(1),
+        steps,
+    }
+}
+
+/// The **bn-1sbjf** targeted crash plan: a merge into a DIRTY default
+/// workspace faulted at `failpoint` inside the target update
+/// (`update_default_workspace`), then recovered by the next merge's start.
+///
+/// `failpoint` must be a cleanup-phase site of [`CRASHABLE_BY_PHASE`]; the
+/// plan's only fault is attached to step 7. With
+/// `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` the merge dies with the merged tree on
+/// disk and the user's edits only in the pinned snapshot, and the bn-15fzo
+/// checkout-intent resume must replay them. With
+/// `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` (an `error`-style site) the merge takes
+/// the bn-3jqfk snapshot-failed fallback.
+///
+/// Steps:
+/// 0-2. create `ws-a`, edit `ws-a/merged.txt`, commit
+/// 3-5. create `ws-b`, edit `ws-b/merged.txt`, commit
+/// 6. dirty the trunk: modify [`BN_1SBJF_DIRTY_TRACKED_PATH`], add
+///    [`BN_1SBJF_DIRTY_UNTRACKED_PATH`] (both disjoint from every merge)
+/// 7. merge `ws-a` into default — FAULTED at `failpoint`
+/// 8. merge `ws-b` into default — its start recovers the interrupted merge
+///
+/// # Panics
+///
+/// If `failpoint` is not a cleanup-phase site of [`CRASHABLE_BY_PHASE`].
+#[must_use]
+pub fn bn_1sbjf_target_update_crash_plan(failpoint: &str) -> ScenarioPlan {
+    let cleanup = CRASHABLE_BY_PHASE
+        .iter()
+        .find(|(phase, _)| *phase == "cleanup")
+        .map(|(_, sites)| *sites)
+        .expect("cleanup phase in CRASHABLE_BY_PHASE");
+    let site_index = cleanup
+        .iter()
+        .position(|s| *s == failpoint)
+        .unwrap_or_else(|| panic!("{failpoint} is not a cleanup-phase crash site"));
+    let ws_a = WsId("ws-a".to_owned());
+    let ws_b = WsId("ws-b".to_owned());
+    let mut steps = Vec::new();
+    for (base, ws) in [(0, &ws_a), (3, &ws_b)] {
+        steps.push(regression_step(
+            base,
+            Op::WsCreate {
+                ws: ws.clone(),
+                from: BaseRef::Main,
+            },
+        ));
+        steps.push(regression_step(
+            base + 1,
+            Op::EditFiles {
+                ws: ws.clone(),
+                files: vec![edit(
+                    &format!("{}/merged.txt", ws.0),
+                    &format!("{} committed work (bn-1sbjf)\n", ws.0),
+                )],
+            },
+        ));
+        steps.push(regression_step(
+            base + 2,
+            Op::Commit {
+                ws: ws.clone(),
+                msg: Seeded(format!("{}: work (bn-1sbjf)", ws.0)),
+            },
+        ));
+    }
+    steps.push(regression_step(
+        6,
+        Op::DirtyTrunkWrite {
+            files: vec![
+                edit(
+                    BN_1SBJF_DIRTY_TRACKED_PATH,
+                    "base content\nUNCOMMITTED trunk edit (bn-1sbjf)\n",
+                ),
+                edit(
+                    BN_1SBJF_DIRTY_UNTRACKED_PATH,
+                    "UNCOMMITTED untracked trunk file (bn-1sbjf)\n",
+                ),
+            ],
+        },
+    ));
+    let mut faulted = regression_step(
+        7,
+        Op::Merge {
+            srcs: vec![ws_a],
+            into: Target::Default,
+            destroy: false,
+        },
+    );
+    faulted.fault = FaultSpec::Failpoint {
+        name: failpoint.to_owned(),
+        phase: "cleanup".to_owned(),
+    };
+    steps.push(faulted);
+    steps.push(regression_step(
+        8,
+        Op::Merge {
+            srcs: vec![ws_b],
+            into: Target::Default,
+            destroy: false,
+        },
+    ));
+    ScenarioPlan {
+        seed: BN_1SBJF_REGRESSION_SEED_BASE + u64::try_from(site_index).unwrap_or(0xFF),
+        profile: ConditionProfile::default().with_escape_weight(1),
         steps,
     }
 }
@@ -2177,6 +2310,46 @@ mod tests {
         validate_plan_against_model(&plan, plan.seed);
     }
 
+    /// bn-1sbjf: the targeted crash plan faults exactly one merge, at the
+    /// requested cleanup-phase site, after the trunk is dirtied, and a later
+    /// merge follows it (the recovery trigger). One distinct seed per site.
+    #[test]
+    fn bn_1sbjf_target_update_crash_plan_has_expected_shape() {
+        let mut seeds = std::collections::BTreeSet::new();
+        for fp in [
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+        ] {
+            let plan = bn_1sbjf_target_update_crash_plan(fp);
+            assert!(seeds.insert(plan.seed), "seed reused for {fp}");
+            let faulted: Vec<usize> = plan
+                .steps
+                .iter()
+                .filter(|s| s.fault.is_some())
+                .map(|s| s.index)
+                .collect();
+            assert_eq!(faulted, vec![7], "{fp}");
+            assert_eq!(
+                plan.steps[7].fault,
+                FaultSpec::Failpoint {
+                    name: fp.to_owned(),
+                    phase: "cleanup".to_owned(),
+                }
+            );
+            assert!(matches!(plan.steps[6].op, Op::DirtyTrunkWrite { .. }));
+            assert!(matches!(plan.steps[7].op, Op::Merge { .. }));
+            assert!(matches!(plan.steps[8].op, Op::Merge { .. }));
+            validate_plan_against_model(&plan, plan.seed);
+        }
+    }
+
+    /// A non-cleanup site is refused (the plan's fault phase would lie).
+    #[test]
+    #[should_panic(expected = "not a cleanup-phase crash site")]
+    fn bn_1sbjf_target_update_crash_plan_rejects_other_phases() {
+        let _ = bn_1sbjf_target_update_crash_plan("FP_COMMIT_BETWEEN_CAS_OPS");
+    }
+
     /// The bn-1xmk regression plan dirties the same tracked trunk path the
     /// merge changes.
     #[test]
@@ -2487,12 +2660,24 @@ pub fn op_stream_digest(profile: &ConditionProfile) -> u64 {
 /// Pinned alongside [`DEFAULT_PROFILE_OP_STREAM_DIGEST`] because that tier —
 /// not the bare default — is what CI actually executes, so it is the stream a
 /// regression would silently perturb.
-pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x7353_896e_acca_2728;
+///
+/// Re-pinned by bn-1sbjf (deliberate, user-approved campaign reset): the
+/// cleanup phase of [`CRASHABLE_BY_PHASE`] gained two sites, so the
+/// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
+/// `git_time`s are byte-identical to the previous pin (verified by diffing
+/// the 3 x 256 x 128 step streams with fault names masked).
+pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x6449_2302_02ed_7fc2;
 
 /// Op-stream digest with BOTH pre-bn-22jy gated knobs turned up
 /// (`advance_weight = 8`, `escape_weight = 8`), captured at trunk `4537c51e`.
 /// Guards the soak-shaped corner of the knob space as well as CI's.
-pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0xceff_ff94_f36b_dfd6;
+///
+/// Re-pinned by bn-1sbjf (deliberate, user-approved campaign reset): the
+/// cleanup phase of [`CRASHABLE_BY_PHASE`] gained two sites, so the
+/// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
+/// `git_time`s are byte-identical to the previous pin (verified by diffing
+/// the 3 x 256 x 128 step streams with fault names masked).
+pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0x8e09_b3f9_d8e9_cdf1;
 
 /// The digest [`default_profile_op_stream_digest`] produced at trunk
 /// `4537c51e` — the last commit **before** bn-22jy added the
@@ -2506,7 +2691,13 @@ pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0xceff_ff94_f36b_dfd6;
 /// If you are here because this test went red: you changed the default op
 /// stream. That is allowed only as a deliberate campaign reset — not as a side
 /// effect of adding an opt-in op.
-pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x61c7_8834_e645_f514;
+///
+/// Re-pinned by bn-1sbjf (deliberate, user-approved campaign reset): the
+/// cleanup phase of [`CRASHABLE_BY_PHASE`] gained two sites, so the
+/// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
+/// `git_time`s are byte-identical to the previous pin (verified by diffing
+/// the 3 x 256 x 128 step streams with fault names masked).
+pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x47e8_0c03_96be_778b;
 
 #[cfg(test)]
 mod bn_22jy_tests {
