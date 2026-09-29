@@ -332,6 +332,15 @@ impl WorkspaceId {
     /// workspace edits and previously-merged epoch changes.
     pub const EPOCH_DELTA: &'static str = "epoch-delta";
 
+    /// Reserved workspace name: the recovery-ref namespace of `maw undo`'s
+    /// pins (`refs/manifold/recovery/undo/<ts>`, bn-43x5k).
+    ///
+    /// A workspace's destroy pins land in `refs/manifold/recovery/<ws>/`, so
+    /// a workspace named `undo` would share that namespace with `maw undo`
+    /// (bn-asqh7). Refused at creation; an existing legacy `undo` workspace
+    /// still parses (and `maw doctor` suggests renaming it).
+    pub const UNDO_PIN_NAMESPACE: &'static str = "undo";
+
     /// Create a new `WorkspaceId` from a string, validating format.
     ///
     /// # Errors
@@ -345,7 +354,8 @@ impl WorkspaceId {
     /// attached as a new tracked workspace).
     ///
     /// This is [`Self::new`] plus a reservation check: names the merge engine
-    /// uses for synthetic sides ([`Self::EPOCH_DELTA`]) and names starting
+    /// uses for synthetic sides ([`Self::EPOCH_DELTA`]), the `maw undo` pin
+    /// namespace ([`Self::UNDO_PIN_NAMESPACE`], bn-asqh7) and names starting
     /// with the merge-quarantine prefix (`merge-quarantine-`, bn-ggo5) are
     /// refused. A real workspace named `epoch-delta` would be
     /// indistinguishable from the synthetic epoch-delta `PatchSet` injected
@@ -423,8 +433,9 @@ impl WorkspaceId {
     }
 
     /// Byte-level core of [`Self::new_for_create`]: [`Self::check_name_bytes`]
-    /// plus refusal of reserved synthetic ids ([`Self::EPOCH_DELTA`]) and of
-    /// the `merge-quarantine-` prefix.
+    /// plus refusal of reserved synthetic ids ([`Self::EPOCH_DELTA`]), of the
+    /// `maw undo` pin namespace ([`Self::UNDO_PIN_NAMESPACE`]) and of the
+    /// `merge-quarantine-` prefix.
     ///
     /// # Errors
     /// Returns the first violated [`WorkspaceNameRule`].
@@ -432,6 +443,9 @@ impl WorkspaceId {
         Self::check_name_bytes(b)?;
         if b == Self::EPOCH_DELTA.as_bytes() {
             return Err(WorkspaceNameRule::Reserved);
+        }
+        if b == Self::UNDO_PIN_NAMESPACE.as_bytes() {
+            return Err(WorkspaceNameRule::ReservedUndo);
         }
         // bn-ggo5: `merge-quarantine-<id>` names are what `maw ws merge`
         // gives validation-failure quarantines; `ws sync` / `ws merge` refuse
@@ -461,6 +475,8 @@ pub enum WorkspaceNameRule {
     Reserved,
     /// Starts with the merge-quarantine prefix (creation only).
     ReservedQuarantinePrefix,
+    /// The `maw undo` pin namespace (creation only, bn-asqh7).
+    ReservedUndo,
 }
 
 impl WorkspaceNameRule {
@@ -480,6 +496,11 @@ impl WorkspaceNameRule {
             Self::Reserved => format!(
                 "'{s}' is reserved: the merge engine uses it for the synthetic \
                  epoch-delta side of stale-workspace conflicts; choose another name"
+            ),
+            Self::ReservedUndo => format!(
+                "'{s}' is reserved: `maw undo` keeps its pins under \
+                 refs/manifold/recovery/{s}/, where this workspace's recovery \
+                 snapshots would also go; choose another name (e.g. '{s}-work')"
             ),
             Self::ReservedQuarantinePrefix => format!(
                 "'{s}' is reserved: names starting with '{}' belong to merge \
@@ -1144,6 +1165,20 @@ mod tests {
         assert!(WorkspaceId::new_for_create("merge-quarantine").is_ok());
         assert!(WorkspaceId::new_for_create("my-merge-quarantine-x").is_ok());
         assert!(WorkspaceId::new("merge-quarantine-abc123def456").is_ok());
+
+        // bn-asqh7: `undo` is reserved at creation (its destroy pins would
+        // share refs/manifold/recovery/undo/ with `maw undo`'s redo pins),
+        // but an existing legacy `undo` workspace still parses.
+        let err =
+            WorkspaceId::new_for_create("undo").expect_err("undo must be refused at creation");
+        let msg = err.to_string();
+        assert!(msg.contains("reserved"), "{msg}");
+        assert!(msg.contains("maw undo"), "names the owner: {msg}");
+        assert!(msg.contains("undo-work"), "suggests another name: {msg}");
+        assert!(WorkspaceId::new("undo").is_ok());
+        assert!(WorkspaceId::new_for_create("undo-work").is_ok());
+        assert!(WorkspaceId::new_for_create("redo").is_ok());
+        assert!(WorkspaceId::new_for_create("undoer").is_ok());
 
         let parsed = WorkspaceId::new(WorkspaceId::EPOCH_DELTA).expect("parses");
         assert!(parsed.is_epoch_delta());

@@ -59,8 +59,9 @@ const REDO_TAG: &str = "maw-redo";
 ///
 /// The undone merge result is pinned at `refs/manifold/recovery/undo/<ts>`. It is not a
 /// workspace; `maw gc --recovery-snapshots` classifies these pins with
-/// [`pending_redo_target`].
-pub const UNDO_PIN_NAMESPACE: &str = "undo";
+/// [`pending_redo_target`]. The name is reserved for workspaces (bn-asqh7:
+/// `maw ws create undo` is refused) so no destroy pin lands here.
+pub const UNDO_PIN_NAMESPACE: &str = WorkspaceId::UNDO_PIN_NAMESPACE;
 
 /// Which way the next `maw undo` moves the epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

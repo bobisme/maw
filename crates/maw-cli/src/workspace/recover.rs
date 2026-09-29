@@ -1988,6 +1988,10 @@ fn warn_unresolved_lfs_pointers(_git_cwd: &Path, _ws_path: &Path, _oid: &str) {}
 pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     validate_recovery_ref(recovery_ref)?;
     validate_workspace_name(new_name)?;
+    // bn-asqh7: refuse reserved names (e.g. `undo`) before the audit entry
+    // or anything else is written; `create` re-checks.
+    maw_core::model::types::WorkspaceId::new_for_create(new_name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
     require_config_for_restore_to()?;
 
     audit::log_audit(&AuditEvent::Restore {
@@ -2027,6 +2031,10 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     maw::fp!("FP_RECOVER_BEFORE_RESTORE")?;
     validate_workspace_name(name)?;
     validate_workspace_name(new_name)?;
+    // bn-asqh7: refuse reserved names (e.g. `undo`) before the audit entry
+    // or anything else is written; `create` re-checks.
+    maw_core::model::types::WorkspaceId::new_for_create(new_name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
     require_config_for_restore_to()?;
 
     audit::log_audit(&AuditEvent::Restore {

@@ -83,7 +83,7 @@ fn dry_run_on_dirty_workspace_predicts_refuse_and_recommends_merge_destroy() {
         .as_str()
         .expect("recommended_command is a string");
     assert!(
-        rec.contains("maw ws merge bob") && rec.contains("--destroy"),
+        rec.contains("maw ws merge bob") && rec.contains("--destroy") && rec.contains("--message"),
         "recommended should be merge-with-destroy, got: {rec}"
     );
 

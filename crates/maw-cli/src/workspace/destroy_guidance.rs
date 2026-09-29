@@ -172,14 +172,14 @@ impl DestroyRefusal {
 
         let (recommended_action, recommended_action_kind) = match lifecycle_state {
             LifecycleState::CommittedUnintegrated => (
-                format!("maw ws merge {workspace} --into default --destroy"),
+                format!("maw ws merge {workspace} --into default --destroy --message \"<msg>\""),
                 RecommendedAction::MergeAndDestroy,
             ),
             LifecycleState::DirtyUncommitted => (
                 format!(
                     "maw exec {workspace} -- git add -A && \
                      maw exec {workspace} -- git commit -m \"wip: <message>\" && \
-                     maw ws merge {workspace} --into default --destroy"
+                     maw ws merge {workspace} --into default --destroy --message \"<msg>\""
                 ),
                 RecommendedAction::CommitThenMerge,
             ),
@@ -203,7 +203,7 @@ impl DestroyRefusal {
         // the second leg (after the commit step). Carried separately
         // so JSON consumers see both paths without parsing the chain.
         let merge_destroy_alternative =
-            format!("maw ws merge {workspace} --into default --destroy");
+            format!("maw ws merge {workspace} --into default --destroy --message \"<msg>\"");
 
         Self {
             workspace: workspace.to_string(),
@@ -344,6 +344,9 @@ mod tests {
         assert!(r.recommended_action.starts_with("maw ws merge alice"));
         assert!(r.recommended_action.contains("--into default"));
         assert!(r.recommended_action.contains("--destroy"));
+        // bn-hfge7: works non-interactively.
+        assert!(r.recommended_action.contains("--message"));
+        assert!(r.merge_destroy_alternative.contains("--message"));
     }
 
     #[test]
@@ -357,6 +360,7 @@ mod tests {
         assert!(r.recommended_action.contains("git add -A"));
         assert!(r.recommended_action.contains("git commit"));
         assert!(r.recommended_action.contains("maw ws merge bob"));
+        assert!(r.recommended_action.contains("--message"));
     }
 
     #[test]

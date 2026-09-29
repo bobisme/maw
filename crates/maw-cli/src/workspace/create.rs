@@ -467,7 +467,9 @@ pub fn attach_branch(name: &str, branch: &str) -> Result<()> {
         .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
 
     println!("Workspace '{name}' attached to branch '{branch}'.");
-    println!("Merge into it with: maw ws merge <workspace> --into {name} --destroy");
+    println!(
+        "Merge into it with: maw ws merge <workspace> --into {name} --destroy --message \"<msg>\""
+    );
     Ok(())
 }
 
@@ -955,7 +957,7 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
             // `ws_recover_invoked` cluster turns.
             println!(
                 "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
-                     && maw ws merge {name}-restored --into default --destroy"
+                     && maw ws merge {name}-restored --into default --destroy --message \"<msg>\""
             );
             println!("Workspace '{name}' destroyed.");
             // Emit full recovery surface contract

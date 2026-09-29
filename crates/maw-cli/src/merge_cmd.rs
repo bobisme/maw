@@ -611,7 +611,7 @@ fn abandon(merge_id: &str) -> Result<()> {
     }
     println!();
     println!("Source workspaces are preserved.");
-    println!("To retry the merge: maw ws merge <workspace...>");
+    println!("To retry the merge: maw ws merge <workspace...> --into <target> --message \"<msg>\"");
 
     Ok(())
 }
@@ -880,7 +880,7 @@ fn resume_cmd(resolve: &[String], resolve_all: Option<&str>, dry_run: bool) -> R
             "No persisted last-conflict to resume from.\n  \
              A `maw merge resume` requires a prior `maw ws merge` that surfaced conflicts.\n  \
              Check: maw merge last-conflict\n  \
-             Or run a fresh merge: maw ws merge <workspaces> --into <target>"
+             Or run a fresh merge: maw ws merge <workspaces> --into <target> --message \"<msg>\""
         )
     })?;
 

@@ -1749,7 +1749,9 @@ fn changes_create_guidance_avoids_invalid_self_merge_instructions() {
     );
     assert!(
         stdout.contains("maw ws create --change ch-guide <agent-workspace>")
-            && stdout.contains("maw ws merge <agent-workspace> --into change:ch-guide --destroy"),
+            && stdout.contains(
+                "maw ws merge <agent-workspace> --into change:ch-guide --destroy --message \"<msg>\""
+            ),
         "output should suggest worker-workspace merge flow, got: {stdout}"
     );
 }
@@ -1799,7 +1801,7 @@ fn changes_create_json_advice_avoids_invalid_self_merge_instructions() {
     assert!(
         advice.contains(&"maw ws create --change ch-guide-json <agent-workspace>")
             && advice
-                .contains(&"maw ws merge <agent-workspace> --into change:ch-guide-json --destroy",),
+                .contains(&"maw ws merge <agent-workspace> --into change:ch-guide-json --destroy --message \"<msg>\"",),
         "JSON advice should include worker workspace merge guidance: {payload}"
     );
 }

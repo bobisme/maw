@@ -957,7 +957,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
                      but git could not determine commit count. Skipping auto-sync to preserve committed work."
                 );
                 eprintln!(
-                    "  The lead agent should merge this workspace: maw ws merge {name} --into default"
+                    "  The lead agent should merge this workspace: maw ws merge {name} --into default --message \"<msg>\""
                 );
             }
             return Ok(());
@@ -971,7 +971,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
                 );
                 eprintln!("  Skipping auto-sync to preserve committed work.");
                 eprintln!(
-                    "  The lead agent should merge or rebase this workspace: maw ws merge {name} --into default  or  maw ws sync {name}"
+                    "  The lead agent should merge or rebase this workspace: maw ws merge {name} --into default --message \"<msg>\"  or  maw ws sync {name}"
                 );
             }
             return Ok(());

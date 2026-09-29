@@ -686,6 +686,14 @@ fn bn_c6l3_refusal_emits_machine_readable_json_under_format_flag() {
             .contains("maw ws merge json-ws"),
         "JSON recommended_action must be a paste-ready command; got:\n{json_text}"
     );
+    // bn-hfge7: paste-ready means non-interactive: it carries --message.
+    assert!(
+        v["recommended_action"]
+            .as_str()
+            .expect("recommended_action present")
+            .contains("--message"),
+        "JSON recommended_action must be a paste-ready command; got:\n{json_text}"
+    );
     assert!(
         v["force_safety_note"]
             .as_str()

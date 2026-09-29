@@ -159,6 +159,7 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
     checks.push(check_default_workspace(root.as_deref()));
     checks.push(check_lfs(root.as_deref()));
     checks.push(check_root_bare(root.as_deref()));
+    checks.push(check_reserved_workspace_names(root.as_deref()));
     // State-coherence checks (ghost-working-copy, dangling-snapshots,
     // abandoned-with-snapshot, destroy-record-unpinned, stale-head-refs,
     // merge-state) are backed by the shared fsck invariant catalog so the
@@ -632,6 +633,97 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Warn about workspaces whose names are now reserved (bn-asqh7).
+///
+/// Older maw accepted `maw ws create undo` (and `epoch-delta`). An `undo`
+/// workspace's destroy pins share `refs/manifold/recovery/undo/` with
+/// `maw undo`'s pins; gc then keeps every pin there (it cannot tell them
+/// apart while the workspace exists), so nothing is lost, but the name should
+/// go. Live workspaces and (for `undo`) destroyed ones with destroy records
+/// are reported with a rename hint. Quarantine names are maw's own and are
+/// not reported.
+fn check_reserved_workspace_names(root: Option<&Path>) -> DoctorCheck {
+    let Some(root) = root else {
+        return reserved_names_check(&[], &[]);
+    };
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let mut live: Vec<String> = std::fs::read_dir(flavor.workspaces_dir(root))
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| is_reserved_legacy_name(n))
+                .collect()
+        })
+        .unwrap_or_default();
+    live.sort();
+    let destroyed: Vec<String> = workspace::destroy_record::list_destroyed_workspaces(root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n == maw_core::model::types::WorkspaceId::UNDO_PIN_NAMESPACE)
+        .filter(|n| !live.contains(n))
+        .collect();
+    reserved_names_check(&live, &destroyed)
+}
+
+/// A name that parses as an existing workspace id but may no longer be
+/// created because it is reserved for a synthetic side or `maw undo` pins.
+fn is_reserved_legacy_name(name: &str) -> bool {
+    use maw_core::model::types::{WorkspaceId, WorkspaceNameRule};
+    WorkspaceId::check_name_bytes(name.as_bytes()).is_ok()
+        && matches!(
+            WorkspaceId::check_create_name_bytes(name.as_bytes()),
+            Err(WorkspaceNameRule::Reserved | WorkspaceNameRule::ReservedUndo)
+        )
+}
+
+/// Pure core of [`check_reserved_workspace_names`].
+fn reserved_names_check(live: &[String], destroyed_undo: &[String]) -> DoctorCheck {
+    let name = "reserved workspace names".to_string();
+    if live.is_empty() && destroyed_undo.is_empty() {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "reserved workspace names: none in use".to_string(),
+            fix: None,
+        };
+    }
+    let why = |ws: &str| {
+        if ws == maw_core::model::types::WorkspaceId::UNDO_PIN_NAMESPACE {
+            format!(
+                "its recovery snapshots share refs/manifold/recovery/{ws}/ with `maw undo` pins, \
+                 so gc keeps them all"
+            )
+        } else {
+            "the merge engine uses it for the synthetic stale-workspace side".to_string()
+        }
+    };
+    let mut parts = Vec::new();
+    let mut fixes = Vec::new();
+    for ws in live {
+        parts.push(format!(
+            "workspace '{ws}' uses a reserved name ({})",
+            why(ws)
+        ));
+        fixes.push(format!(
+            "maw ws destroy {ws} --force && maw ws recover {ws} --to {ws}-work"
+        ));
+    }
+    for ws in destroyed_undo {
+        parts.push(format!(
+            "destroyed workspace '{ws}' has destroy records under a reserved name ({})",
+            why(ws)
+        ));
+        fixes.push(format!("maw ws recover {ws} --to {ws}-work"));
+    }
+    DoctorCheck {
+        name,
+        status: "warn".to_string(),
+        message: format!("reserved workspace names: {}", parts.join("; ")),
+        fix: Some(format!("Rename: {}", fixes.join("  |  "))),
+    }
+}
+
 /// Report the repo-level epoch lock state (bn-13rc). Informational only —
 /// always `ok`. Names who currently holds the single-writer epoch lock (if
 /// anyone) so an operator can see why a mutation might be waiting, and
@@ -1061,6 +1153,26 @@ mod tests {
             message: "x: message".to_string(),
             fix: None,
         }
+    }
+
+    // bn-asqh7
+    #[test]
+    fn reserved_names_check_flags_undo_and_epoch_delta_only() {
+        assert!(is_reserved_legacy_name("undo"));
+        assert!(is_reserved_legacy_name("epoch-delta"));
+        assert!(!is_reserved_legacy_name("undo-work"));
+        assert!(!is_reserved_legacy_name("merge-quarantine-abc123def456"));
+        assert!(!is_reserved_legacy_name("default"));
+        assert!(!is_reserved_legacy_name(".hidden"));
+
+        assert_eq!(reserved_names_check(&[], &[]).status, "ok");
+        let c = reserved_names_check(&["undo".to_string()], &[]);
+        assert_eq!(c.status, "warn");
+        assert!(c.message.contains("maw undo"), "{}", c.message);
+        let fix = c.fix.expect("fix");
+        assert!(fix.contains("maw ws recover undo --to undo-work"), "{fix}");
+        let c = reserved_names_check(&[], &["undo".to_string()]);
+        assert!(c.message.contains("destroy record"), "{}", c.message);
     }
 
     #[test]

@@ -396,7 +396,7 @@ fn print_empty_history(name: &str, format: OutputFormat) -> Result<()> {
             println!("Workspace '{name}' has no history.");
             println!();
             println!(
-                "Next: edit files in the workspace, then merge with maw ws merge {name} --into default"
+                "Next: edit files in the workspace, then merge with maw ws merge {name} --into default --message \"<msg>\""
             );
         }
         OutputFormat::Pretty => {

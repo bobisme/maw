@@ -1343,15 +1343,19 @@ fn print_conflict_report_with_resolve(
     let resolve_args = prebuilt_resolve_args.unwrap_or(resolve_args_owned.as_slice());
     println!("To resolve, re-run with --resolve:");
     println!(
-        "  maw ws merge {} --into {} {}",
+        "  maw ws merge {} --into {} {} --message {}",
         ws_args,
         into,
-        resolve_args.join(" ")
+        resolve_args.join(" "),
+        conflict_retry_message(into)
     );
     println!();
     let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
     println!("Or resolve all at once:");
-    println!("  maw ws merge {ws_args} --into {into} --resolve-all={default_ws}");
+    println!(
+        "  maw ws merge {ws_args} --into {into} --resolve-all={default_ws} --message {}",
+        conflict_retry_message(into)
+    );
     println!();
     println!("Options:  ID=WORKSPACE | ID=content:PATH");
     println!();
@@ -2805,7 +2809,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
                 workspaces.join(", ")
             );
             println!(
-                "To merge: maw ws merge {} --into {}",
+                "To merge: maw ws merge {} --into {} --message \"<msg>\"",
                 workspaces.join(" "),
                 default_ws
             );
@@ -3032,7 +3036,10 @@ fn preview_merge(
                 "Previewed merge of {} workspace(s); no commits were created.",
                 workspaces.len()
             ),
-            to_fix: format!("maw ws merge {} --into {into}", workspaces.join(" ")),
+            to_fix: format!(
+                "maw ws merge {} --into {into} --message \"<msg>\"",
+                workspaces.join(" ")
+            ),
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -3102,7 +3109,10 @@ fn preview_merge(
     println!("=== Summary ===");
     println!();
     println!("To perform this merge, run without --dry-run:");
-    println!("  maw ws merge {} --into {into}", workspaces.join(" "));
+    println!(
+        "  maw ws merge {} --into {into} --message \"<msg>\"",
+        workspaces.join(" ")
+    );
     println!();
 
     let _ = root; // used implicitly via get_backend()
@@ -3265,7 +3275,7 @@ fn assert_sources_clean_for_merge(
                 "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
                  {file_list}\n  \
                  Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                 To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                 To force merge anyway: maw ws merge {ws_name} --into {into_target} --force --message \"<msg>\"",
                 unresolved.len()
             );
         }
@@ -3416,7 +3426,7 @@ fn append_only_refusal_message(root: &Path, violations: &[(PathBuf, &'static str
          the merge result must keep the epoch's content as an exact byte prefix.\n  \
          Verify the source workspace change is intentional, then either fix the workspace content \
          or override:\n  \
-         To force merge anyway (bypasses this check, prints a warning): maw ws merge <workspace> --into <target> --force",
+         To force merge anyway (bypasses this check, prints a warning): maw ws merge <workspace> --into <target> --force --message \"<msg>\"",
         violations.len(),
         config_path.display(),
     )

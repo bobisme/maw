@@ -289,14 +289,14 @@ fn recommendation(action: PreviewAction, name: &str, touched_count: usize) -> (S
             ),
         ),
         PreviewAction::WouldRefuse => (
-            format!("maw ws merge {name} --into default --destroy"),
+            format!("maw ws merge {name} --into default --destroy --message \"<msg>\""),
             format!(
                 "Destroy refused: {touched_count} unmerged change(s). \
                  Prefer merge-then-destroy over `--force` to avoid a recover round-trip."
             ),
         ),
         PreviewAction::WouldForceSnapshot => (
-            format!("maw ws merge {name} --into default --destroy"),
+            format!("maw ws merge {name} --into default --destroy --message \"<msg>\""),
             format!(
                 "Force-destroy with {touched_count} unmerged change(s) WILL capture a \
                  recovery snapshot, but the work will need a separate recover+merge \
@@ -360,6 +360,22 @@ mod tests {
         }
     }
 
+    // bn-hfge7: the merge recommendations work non-interactively.
+    #[test]
+    fn merge_recommendations_carry_message() {
+        for action in [
+            PreviewAction::WouldRefuse,
+            PreviewAction::WouldForceSnapshot,
+        ] {
+            let (cmd, _) = recommendation(action, "alice", 2);
+            assert!(
+                cmd.starts_with("maw ws merge alice --into default --destroy"),
+                "{cmd}"
+            );
+            assert!(cmd.contains("--message"), "{cmd}");
+        }
+    }
+
     #[test]
     fn preview_serializes_with_stable_fields() {
         // Sanity-check that the JSON shape carries every field the
@@ -373,7 +389,8 @@ mod tests {
             would_capture_snapshot: false,
             would_need_recovery: false,
             touched_count: 3,
-            recommended_command: "maw ws merge alice --into default --destroy".to_string(),
+            recommended_command: "maw ws merge alice --into default --destroy --message \"<msg>\""
+                .to_string(),
             rationale: "Destroy refused: 3 unmerged change(s).".to_string(),
             has_prior_snapshot: false,
         };
