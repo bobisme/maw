@@ -192,11 +192,12 @@ fn assert_preserved(root: &Path, text: &str) -> String {
         None,
         "d/inner.txt is deleted on the user's side (never read through the link):\n{text}"
     );
-    // The type change is reported, with the command that shows the user's side.
-    let show = format!("maw ws recover --ref {pin} --show d");
+    // The type change is reported, with the one-step command that puts the
+    // user's side back (bn-1eg2u; it was `--show d` before).
+    let restore = format!("maw ws recover --ref {pin} --restore-file d");
     assert!(
-        text.contains(&show),
-        "the type change must be reported with `{show}`:\n{text}"
+        text.contains(&format!("restore yours: {restore}")),
+        "the type change must be reported with `{restore}`:\n{text}"
     );
     // The on-disk state is coherent: either side of d, never an empty dir.
     match link_target(&root.join("d")) {
@@ -207,6 +208,22 @@ fn assert_preserved(root: &Path, text: &str) -> String {
             "d on disk must be the merged directory, complete:\n{text}"
         ),
     }
+    // Run the printed command verbatim: d is the user's symlink again.
+    let out = Command::new("sh")
+        .current_dir(root)
+        .args(["-c", &restore.replacen("maw ", &format!("{MAW} "), 1)])
+        .output()
+        .expect("run printed restore");
+    assert!(
+        out.status.success(),
+        "printed command failed: {restore}\n{}\n---\n{text}",
+        combined(&out)
+    );
+    assert_eq!(
+        link_target(&root.join("d")),
+        Some(PathBuf::from("x")),
+        "the printed command must put the user's symlink back:\n{text}"
+    );
     pin
 }
 
@@ -463,13 +480,32 @@ fn fallback_capture_never_reads_through_a_symlinked_parent() {
     );
     assert_eq!(read(&root.join("other.txt")), "other\nedit\n", "{text}");
     assert_eq!(read(&root.join("x/inner.txt")), "target\n", "{text}");
-    // The report must describe the user's side of d/inner.txt truthfully.
+    // The report must describe the user's side of d/inner.txt truthfully:
+    // not the link target's file, and (bn-1eg2u) not a bare "deleted".
     assert!(
-        text.contains("    d/inner.txt\n      yours (uncommitted): deleted"),
-        "d/inner.txt is deleted on the user's side, not the link target's file:\n{text}"
+        text.contains("    d/inner.txt\n      yours (uncommitted): replaced by symlink d"),
+        "d/inner.txt is replaced by the user's symlink d, not the link target's file:\n{text}"
     );
     match link_target(&root.join("d")) {
         Some(_) => {}
         None => assert_eq!(read(&root.join("d/inner.txt")), "inner\n", "{text}"),
     }
+    // bn-1eg2u: one printed command puts the user's symlink back.
+    let restore = format!("maw ws recover --ref {pin} --restore-file d");
+    assert!(
+        text.contains(&format!("restore yours: {restore}")),
+        "{text}"
+    );
+    let out = Command::new("sh")
+        .current_dir(root)
+        .args(["-c", &restore.replacen("maw ", &format!("{MAW} "), 1)])
+        .output()
+        .expect("run printed restore");
+    assert!(out.status.success(), "{}\n---\n{text}", combined(&out));
+    assert_eq!(
+        link_target(&root.join("d")),
+        Some(PathBuf::from("x")),
+        "{text}"
+    );
+    assert_eq!(read(&root.join("x/inner.txt")), "target\n", "{text}");
 }

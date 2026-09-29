@@ -7474,6 +7474,10 @@ pub fn update_default_workspace(
     // deleted on clean replay and is invisible to recover.
     let mut durable_recovery_ref: Option<String> = None;
 
+    // bn-1eg2u: what a resumed run found on disk beyond the interrupted
+    // update, pinned; reported path by path once the replay is done.
+    let mut residual_pin: Option<ResidualPin> = None;
+
     // bn-15fzo: resuming, the snapshot is the one the interrupted run took.
     let resumed = resume
         .as_ref()
@@ -7501,8 +7505,9 @@ pub fn update_default_workspace(
                 snapshot_working_copy_preserving_tree(default_ws_path, repo_root, ws_name)
             })
         },
-        |(snap, pinned)| {
+        |(snap, pinned, residual)| {
             durable_recovery_ref = pinned;
+            residual_pin = residual;
             Ok(snap)
         },
     ) {
@@ -7544,8 +7549,45 @@ pub fn update_default_workspace(
                     ),
                 ));
             }
+            // bn-1eg2u: record the intent before the force checkout, as the
+            // main path does, with the in-memory pin as the snapshot (a
+            // commit on the anchor, which the replay handles like a stash).
+            // A crash from here on resumes by replaying the pin against the
+            // anchor instead of re-snapshotting the merged tree.
+            let pin_oid = match durable_recovery_ref.as_deref() {
+                Some(pin) => Some(
+                    maw_core::refs::read_ref(repo_root, pin)
+                        .ok()
+                        .flatten()
+                        .map(|oid| oid.as_str().to_owned())
+                        .ok_or_else(|| {
+                            refuse_uncaptured_checkout(
+                                default_ws_path,
+                                ws_name,
+                                branch,
+                                epoch_after,
+                                &format!(
+                                    "the snapshot failed ({e:#}) and the recovery pin {pin} cannot be read back"
+                                ),
+                            )
+                        })?,
+                ),
+                None => None,
+            };
+            let intent = checkout_intent::CheckoutIntent {
+                epoch_after: epoch_after.to_owned(),
+                anchor: anchor_epoch.clone(),
+                snapshot: pin_oid,
+                recovery_ref: durable_recovery_ref.clone(),
+            };
+            checkout_intent::write(repo_root, ws_name, &intent)
+                .context("cannot record target checkout intent; keep the merge journal and retry maw ws merge --recover")?;
             eprintln!("  Falling back to force checkout (recovering trunk edits from memory)...");
             force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
+            // FP: crash inside the snapshot-failed fallback, after its force
+            // checkout and before the repair from memory (bn-1eg2u). The tree
+            // is the merged tree; the user's edits exist only in the pin.
+            maw::fp!("FP_CLEANUP_FALLBACK_AFTER_CHECKOUT")?;
             lfs_post_checkout(default_ws_path, epoch_after);
             verify_trunk_replay_fidelity(
                 default_ws_path,
@@ -7626,6 +7668,9 @@ pub fn update_default_workspace(
     // Step 3: REPLAY — if there was a snapshot, replay it.
     let Some(snapshot) = snapshot else {
         // Clean workspace — checkout was enough.
+        if let Some(pin) = &residual_pin {
+            report_resume_residual(default_ws_path, ws_name, pin, &anchor_epoch, epoch_after);
+        }
         record_workspace_epoch();
         if text_mode {
             println!("  {}", updated_message());
@@ -7790,6 +7835,10 @@ pub fn update_default_workspace(
         durable_recovery_ref.as_deref(),
     );
 
+    if let Some(pin) = &residual_pin {
+        report_resume_residual(default_ws_path, ws_name, pin, &anchor_epoch, epoch_after);
+    }
+
     record_workspace_epoch();
 
     Ok(())
@@ -7822,7 +7871,8 @@ fn tree_of(ws_path: &Path, rev: &str) -> Option<String> {
 /// or the fully replayed snapshot (crash after the replay), e.g. a partial
 /// replay or edits made since — and the interrupted run's snapshot is
 /// returned for the caller to replay against the intent's anchor. Returns
-/// the snapshot and its durable recovery ref.
+/// the snapshot and its durable recovery ref, plus the pin of any residual
+/// changes that were neither (bn-1eg2u).
 fn resume_interrupted_checkout(
     ws_path: &Path,
     repo_root: &Path,
@@ -7831,7 +7881,11 @@ fn resume_interrupted_checkout(
     epoch_after: &str,
     intent: &checkout_intent::CheckoutIntent,
     text_mode: bool,
-) -> Result<(Option<super::working_copy::SnapshotRef>, Option<String>)> {
+) -> Result<(
+    Option<super::working_copy::SnapshotRef>,
+    Option<String>,
+    Option<ResidualPin>,
+)> {
     use super::working_copy::{
         SnapshotRef, clean_snapshotted_working_copy, cleanup_snapshot, snapshot_ref_name,
         snapshot_working_copy_preserving_tree,
@@ -7845,6 +7899,7 @@ fn resume_interrupted_checkout(
     eprintln!("  resuming an interrupted update of '{ws_name}' (its pre-merge edits: {source})");
 
     let (residual_dirty, residual_incomplete) = capture_pre_merge_dirty(ws_path);
+    let mut residual_pin: Option<ResidualPin> = None;
     // FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT (bn-1dlkd): `error` drives the
     // resume's snapshot-failed branch, as it does the live update's.
     match maw::fp!("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
@@ -7866,6 +7921,10 @@ fn resume_interrupted_checkout(
                      (a partial replay, or edits made since). They are pinned at {pin}; \
                      the pre-merge edits are replayed from {source}."
                 );
+                residual_pin = Some(ResidualPin {
+                    ref_name: pin,
+                    oid: residual.oid.clone(),
+                });
             }
             clean_snapshotted_working_copy(ws_path, &residual)?;
         }
@@ -7900,6 +7959,13 @@ fn resume_interrupted_checkout(
             }
             if let Some(pin) = pin {
                 eprintln!("  Its content is pinned at {pin}.");
+                residual_pin = maw_core::refs::read_ref(repo_root, &pin)
+                    .ok()
+                    .flatten()
+                    .map(|oid| ResidualPin {
+                        oid: oid.as_str().to_owned(),
+                        ref_name: pin,
+                    });
             }
             force_checkout_fallback(ws_path, ws_name, branch, text_mode);
         }
@@ -7927,7 +7993,141 @@ fn resume_interrupted_checkout(
     {
         tracing::warn!("failed to clean up snapshot ref: {e}");
     }
-    Ok((snapshot, intent.recovery_ref.clone()))
+    Ok((snapshot, intent.recovery_ref.clone(), residual_pin))
+}
+
+/// Residual worktree changes a resumed target update found and pinned
+/// (bn-1eg2u): edits made after the crash, or a partial replay.
+struct ResidualPin {
+    /// The durable recovery ref pinning them.
+    ref_name: String,
+    /// The pinned commit (its first parent is the merged commit).
+    oid: String,
+}
+
+/// Whether the worktree entry `disk` is the tree entry `entry` (mode, bytes).
+fn disk_matches_tree_entry(
+    disk: &DiskSide,
+    entry: Option<&(maw_git::EntryMode, maw_git::GitOid, Vec<u8>)>,
+) -> bool {
+    match (disk, entry) {
+        (DiskSide::Absent, None) => true,
+        (DiskSide::Symlink(target), Some((maw_git::EntryMode::Link, _, content))) => {
+            symlink_target_bytes(target) == *content
+        }
+        (DiskSide::File { bytes, mode }, Some((tree_mode, _, content))) => {
+            bytes == content
+                && match tree_mode {
+                    maw_git::EntryMode::Blob => mode & 0o111 == 0,
+                    maw_git::EntryMode::BlobExecutable => mode & 0o111 != 0,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// After a resumed target update (bn-1eg2u): name every path whose pinned
+/// residual version is lost from the worktree, with the exact command that
+/// restores it.
+///
+/// The residual is NOT merged back automatically. It was captured against
+/// the merged commit, but it may be (a) the anchor tree plus edits made after
+/// a crash before the checkout, where every merged path reads as "reverted",
+/// (b) a partial or complete replay of the pre-merge edits, which the replay
+/// just redid, or (c) a mid-checkout mix of both. No single base makes a
+/// 3-way merge of it correct in all three cases, and a wrong base would
+/// silently revert merged content or duplicate replayed hunks. So it stays
+/// pinned, and only what is genuinely new is listed: a path whose pinned
+/// version is neither the anchor's version (the pre-merge state the replay
+/// reproduces) nor what is on disk now.
+fn report_resume_residual(
+    ws_path: &Path,
+    ws_name: &str,
+    pin: &ResidualPin,
+    anchor_epoch: &str,
+    epoch_after: &str,
+) {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return;
+    };
+    let resolve = |rev: &str| repo.rev_parse(rev).ok();
+    let (Some(after), Some(pinned), Some(anchor)) = (
+        resolve(epoch_after),
+        resolve(&pin.oid),
+        resolve(anchor_epoch),
+    ) else {
+        return;
+    };
+    let tree = |commit| repo.read_commit(commit).ok().map(|c| c.tree_oid);
+    let (Some(after_tree), Some(pinned_tree)) = (tree(after), tree(pinned)) else {
+        return;
+    };
+    let Ok(changes) = repo.diff_trees(Some(after_tree), pinned_tree) else {
+        return;
+    };
+    let entry_at = |commit, rel: &str| repo.read_blob_at_path(commit, rel).ok().flatten();
+    let mut lost = Vec::new();
+    for change in changes {
+        let rel = change.path;
+        let pinned_entry = entry_at(pinned, &rel);
+        let anchor_entry = entry_at(anchor, &rel);
+        let same_as_anchor = match (&pinned_entry, &anchor_entry) {
+            (None, None) => true,
+            (Some((pm, po, _)), Some((am, ao, _))) => pm == am && po == ao,
+            _ => false,
+        };
+        if same_as_anchor {
+            continue;
+        }
+        let disk = DiskSide::capture_at(ws_path, Path::new(&rel)).ok();
+        if disk
+            .as_ref()
+            .is_some_and(|d| disk_matches_tree_entry(d, pinned_entry.as_ref()))
+        {
+            continue;
+        }
+        let disk_is_merged = disk
+            .as_ref()
+            .is_some_and(|d| disk_matches_tree_entry(d, entry_at(after, &rel).as_ref()));
+        lost.push((rel, pinned_entry.is_some(), disk_is_merged));
+    }
+    if lost.is_empty() {
+        eprintln!(
+            "  Nothing pinned at {} is missing from '{ws_name}' now (it held the replay's own output).",
+            pin.ref_name
+        );
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "  WARNING: {} path(s) pinned at {} are not in '{ws_name}' as pinned (edits made after the interruption):",
+        lost.len(),
+        pin.ref_name
+    );
+    let ws_quoted = shell_quote_path(ws_path);
+    for (rel, in_pin, disk_is_merged) in lost {
+        let quoted = shell_quote_path(Path::new(&rel));
+        eprintln!("    {rel}");
+        if !in_pin {
+            eprintln!("      yours: deleted");
+            eprintln!("      restore yours: maw exec {ws_name} -- rm -f -- {quoted}");
+        } else if ws_name == "default" {
+            // `--restore-file` refuses to overwrite an uncommitted change;
+            // the one on disk now is the replay's, and the user asked for
+            // the pinned version instead.
+            let force = if disk_is_merged { "" } else { "--force " };
+            eprintln!(
+                "      restore yours: maw ws recover --ref {} {force}--restore-file {quoted}",
+                pin.ref_name
+            );
+        } else {
+            eprintln!(
+                "      inspect yours: git -C {ws_quoted} show {}:{quoted}",
+                pin.oid
+            );
+        }
+    }
 }
 
 /// Print the dirty-replay type conflicts (bn-2ygs0): a symlink vs a file (or
@@ -7945,6 +8145,9 @@ fn report_replay_type_conflicts(
     use super::working_copy::{EntryKind, KeptSide};
 
     let snapshot_name = recovery_ref.unwrap_or(snapshot_oid);
+    // bn-1eg2u: one restore command per file <-> directory group, printed
+    // at its first member.
+    let mut restored_groups: Vec<String> = Vec::new();
     eprintln!();
     eprintln!(
         "  WARNING: {} path(s) in '{ws_name}' have a type conflict (symlink vs file, file vs directory, or two symlink targets).",
@@ -7970,8 +8173,24 @@ fn report_replay_type_conflicts(
             // would go, is in the way of one side; neither `--restore-file`
             // nor a single `rm` can swap them, so point at the user's copy.
             eprintln!("      on disk now: the merged version");
+            // bn-1eg2u: `--restore-file` restores a whole directory and
+            // replaces a committed file or directory in its way, so the
+            // group's top-most path puts every one of its paths back.
+            if let (Some(r), "default") = (recovery_ref, ws_name) {
+                let root = directory_conflict_group_root(c, conflicts);
+                if restored_groups.contains(&root) {
+                    eprintln!("      restore yours: the command above (it restores all of {root})");
+                } else {
+                    eprintln!(
+                        "      restore yours: maw ws recover --ref {r} --restore-file {}",
+                        shell_quote_path(Path::new(&root))
+                    );
+                    restored_groups.push(root);
+                }
+                continue;
+            }
             match (&tc.local, recovery_ref) {
-                (EntryKind::Deleted | EntryKind::Directory, _) => {}
+                (EntryKind::Deleted | EntryKind::Directory | EntryKind::ReplacedBy { .. }, _) => {}
                 (_, Some(r)) => {
                     eprintln!("      inspect yours: maw ws recover --ref {r} --show {quoted}");
                 }
@@ -8009,6 +8228,45 @@ fn report_replay_type_conflicts(
     }
     eprintln!();
     eprintln!("  To keep what is on disk, do nothing: the working copy is consistent.");
+}
+
+/// The top-most path of the file <-> directory group `conflict` belongs to
+/// (bn-1eg2u): the highest `directory_change` path at or above it, or the
+/// merged file or symlink that replaced one of their parent directories.
+/// Restoring the user's side of that one path from the snapshot restores the
+/// whole group, including the user's untouched and untracked files in it.
+fn directory_conflict_group_root(
+    conflict: &super::working_copy::WorkingCopyConflict,
+    conflicts: &[&super::working_copy::WorkingCopyConflict],
+) -> String {
+    use super::working_copy::EntryKind;
+
+    let depth = |p: &str| p.split('/').filter(|c| !c.is_empty()).count();
+    let at_or_above = |above: &str| {
+        conflict.path == above
+            || conflict
+                .path
+                .strip_prefix(above)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let mut root = conflict.path.clone();
+    for other in conflicts
+        .iter()
+        .filter(|o| o.conflict_type == "directory_change" && at_or_above(&o.path))
+    {
+        let mut candidates = vec![other.path.clone()];
+        if let Some(tc) = &other.type_conflict
+            && let EntryKind::ReplacedBy { path, .. } = &tc.merged
+        {
+            candidates.push(path.clone());
+        }
+        for candidate in candidates {
+            if depth(&candidate) < depth(&root) {
+                root = candidate;
+            }
+        }
+    }
+    root
 }
 
 /// Last-resort force checkout when snapshot/replay fails.
@@ -8586,6 +8844,8 @@ fn report_fallback_unreplayed(
         unreplayed.len()
     );
     eprintln!("  The merged version is on disk. Your version is in the recovery pin:");
+    // bn-1eg2u: one restore command per file <-> directory group.
+    let mut restored_groups: Vec<PathBuf> = Vec::new();
     for (path, entry) in unreplayed {
         let quoted = shell_quote_path(path);
         let blocked = super::working_copy::is_directory_blocked_at(&repo, epoch_after, path)
@@ -8594,11 +8854,29 @@ fn report_fallback_unreplayed(
         eprintln!("    {}", path.display());
         eprintln!(
             "      yours (uncommitted): {}",
-            describe_pre_merge_entry(entry)
+            describe_pre_merge_entry_in(path, entry, pre_merge_dirty)
         );
         match (entry, recovery_ref) {
             (DiskSide::Absent, _) if !blocked => {
                 eprintln!("      restore yours: maw exec {ws_name} -- rm -f -- {quoted}");
+            }
+            (_, Some(r)) if blocked && ws_name == "default" => {
+                // `--restore-file` restores the whole directory from the pin
+                // (untracked files included) and replaces the merged file or
+                // directory in its way.
+                let root = fallback_group_root(&repo, epoch_after, path, pre_merge_dirty);
+                if restored_groups.contains(&root) {
+                    eprintln!(
+                        "      restore yours: the command above (it restores all of {})",
+                        root.display()
+                    );
+                } else {
+                    eprintln!(
+                        "      restore yours: maw ws recover --ref {r} --restore-file {}",
+                        shell_quote_path(&root)
+                    );
+                    restored_groups.push(root);
+                }
             }
             (DiskSide::Absent, _) => {}
             (_, Some(r)) if blocked => {
@@ -8617,6 +8895,63 @@ fn report_fallback_unreplayed(
             }
         }
     }
+}
+
+/// The top-most path of the file <-> directory group `path` belongs to in the
+/// snapshot-failed fallback (bn-1eg2u): the highest uncommitted path at or
+/// above it, or the merged file or symlink that replaced one of their parent
+/// directories. Restoring that path from the pin restores the whole group.
+fn fallback_group_root(
+    repo: &maw_git::GixRepo,
+    epoch_after: &str,
+    path: &Path,
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
+) -> PathBuf {
+    let mut root = path.to_path_buf();
+    for (other, _) in pre_merge_dirty.iter().filter(|(o, _)| path.starts_with(o)) {
+        let mut candidates = vec![other.clone()];
+        candidates.extend(super::working_copy::blocking_parent_at(
+            repo,
+            epoch_after,
+            other,
+        ));
+        for candidate in candidates {
+            if candidate.components().count() < root.components().count() {
+                root = candidate;
+            }
+        }
+    }
+    root
+}
+
+/// [`describe_pre_merge_entry`], naming what took the place of a path the
+/// user removed to make room for a directory or file (bn-1eg2u): "replaced
+/// by directory p" / "replaced by file d" rather than "deleted".
+fn describe_pre_merge_entry_in(
+    path: &Path,
+    entry: &DiskSide,
+    pre_merge_dirty: &[(PathBuf, DiskSide)],
+) -> String {
+    if *entry != DiskSide::Absent {
+        return describe_pre_merge_entry(entry);
+    }
+    let present = || {
+        pre_merge_dirty
+            .iter()
+            .filter(|(_, e)| *e != DiskSide::Absent)
+    };
+    if let Some((parent, e)) = present().find(|(o, _)| o != path && path.starts_with(o)) {
+        let kind = if matches!(e, DiskSide::Symlink(_)) {
+            "symlink"
+        } else {
+            "file"
+        };
+        return format!("replaced by {kind} {}", parent.display());
+    }
+    if present().any(|(o, _)| o != path && o.starts_with(path)) {
+        return format!("replaced by directory {}", path.display());
+    }
+    describe_pre_merge_entry(entry)
 }
 
 /// Run the native LFS smudge post-pass on a workspace after a `git checkout`

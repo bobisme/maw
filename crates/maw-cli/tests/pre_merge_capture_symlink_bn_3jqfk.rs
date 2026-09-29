@@ -153,7 +153,6 @@ fn read_regular(path: &Path) -> String {
 }
 
 /// Run the restore command maw printed for `path`, verbatim, from `root`.
-#[cfg(feature = "failpoints")]
 fn run_printed_restore(root: &Path, text: &str, path: &str) {
     let cmd = text
         .lines()
@@ -392,26 +391,12 @@ fn assert_type_conflict_reported(text: &str, path: &str, local_desc: &str) {
     );
 }
 
-/// Run the `inspect yours:` command maw printed for `path`, verbatim, from
-/// `root`; returns its stdout.
-fn run_printed_inspect(root: &Path, text: &str, path: &str) -> String {
-    let cmd = text
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("inspect yours: "))
-        .find(|c| c.ends_with(&format!(" {path}")))
-        .unwrap_or_else(|| panic!("no inspect command printed for {path}:\n{text}"));
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(cmd.replacen("maw ", &format!("{MAW} "), 1))
-        .current_dir(root)
-        .output()
-        .expect("run inspect");
-    assert!(
-        out.status.success(),
-        "printed inspect command `{cmd}` failed:\n{}",
-        combined(&out)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+/// Run the `restore yours:` command maw printed for the group rooted at
+/// `group` (bn-1eg2u: one command restores the user's whole side), then read
+/// `path`.
+fn restore_group_and_read(root: &Path, text: &str, group: &str, path: &str) -> String {
+    run_printed_restore(root, text, group);
+    read_regular(&root.join(path))
 }
 
 /// The merge turned file `p` into directory `p/`; the user edited `p`.
@@ -441,7 +426,10 @@ fn merged_file_to_dir_vs_local_edit_is_a_conflict() {
         "other\nuser\n",
         "non-overlapping edits are replayed:\n{text}"
     );
-    assert_eq!(run_printed_inspect(root, &text, "p"), "one\ntwo\nuser\n");
+    assert_eq!(
+        restore_group_and_read(root, &text, "p", "p"),
+        "one\ntwo\nuser\n"
+    );
 }
 
 /// The merge turned directory `d/` into file `d`; the user edited `d/x`.
@@ -467,7 +455,7 @@ fn merged_dir_to_file_vs_local_edit_inside_is_a_conflict() {
         "other\nuser\n",
         "{text}"
     );
-    assert_eq!(run_printed_inspect(root, &text, "d/x"), "x\nuser\n");
+    assert_eq!(restore_group_and_read(root, &text, "d", "d/x"), "x\nuser\n");
 }
 
 /// The user turned file `p` into directory `p/`; the merge edited `p`.
@@ -497,7 +485,7 @@ fn local_file_to_dir_vs_merged_edit_is_a_conflict() {
         "other\nuser\n",
         "{text}"
     );
-    assert_eq!(run_printed_inspect(root, &text, "p/x"), "user x\n");
+    assert_eq!(restore_group_and_read(root, &text, "p", "p/x"), "user x\n");
     assert!(
         !text.contains("Automatic repair FAILED"),
         "the fidelity repair must leave a reported conflict alone:\n{text}"
@@ -528,7 +516,7 @@ fn local_dir_to_file_vs_merged_edit_inside_is_a_conflict() {
         "other\nuser\n",
         "{text}"
     );
-    assert_eq!(run_printed_inspect(root, &text, "d"), "user file\n");
+    assert_eq!(restore_group_and_read(root, &text, "d", "d"), "user file\n");
     assert!(
         !text.contains("Automatic repair FAILED"),
         "the fidelity repair must leave a reported conflict alone:\n{text}"
@@ -559,5 +547,5 @@ fn local_new_file_vs_merged_new_dir_is_a_conflict() {
         "other\nuser\n",
         "{text}"
     );
-    assert_eq!(run_printed_inspect(root, &text, "n"), "user n\n");
+    assert_eq!(restore_group_and_read(root, &text, "n", "n"), "user n\n");
 }

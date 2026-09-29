@@ -148,6 +148,26 @@ Use uppercase IDs with stable namespace prefixes:
     `CRASHABLE_BY_PHASE`, and `DANGEROUS_FAILPOINTS`); pinned by
     `tests/dst_production_tier.rs::bn_1sbjf_crash_after_default_checkout_is_recovered`.
 
+- `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` (implemented, bn-1eg2u)
+  - Location: `crates/maw-cli/src/workspace/merge.rs` `update_default_workspace`
+    (snapshot-failed fallback: after its force checkout, before the repair from
+    the in-memory capture and the per-workspace epoch ref write)
+  - Risk: HIGH
+  - Invariants: G3, Prime Invariant (dirty target edits)
+  - Description: the tree is the merged tree and the user's edits exist only in
+    the in-memory recovery pin. The fallback writes the `target-checkout-<ws>.json`
+    intent (snapshot = the pin) before its checkout, so recovery replays the pin
+    against the anchor. Not in the DST crash pools (bn-36chi decides).
+
+- `FP_CLEANUP_REPLAY_BEFORE_APPLY` (implemented, bn-1eg2u)
+  - Location: `crates/maw-cli/src/workspace/working_copy.rs`
+    `replay_snapshot_with_merge_protection` (after the file <-> directory split
+    and its `refs/manifold/replay/<ws>` pin, before `stash_apply`)
+  - Risk: LOW
+  - Invariants: G1 (reachability of the filtered replay commit)
+  - Description: test hook for a concurrent `git prune`/`gc` between building
+    the filtered replay commit and applying it. Not in the DST crash pools.
+
 - `FP_CLEANUP_BEFORE_STATE_REMOVE`
   - Location: `src/workspace/merge.rs:2492-2497` (before merge-state file removal via `run_cleanup_phase`)
   - Risk: MEDIUM

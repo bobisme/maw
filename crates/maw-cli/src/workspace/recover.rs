@@ -1468,9 +1468,18 @@ fn dest_has_uncommitted(default_ws: &Path, path: &str) -> Result<bool> {
     } else {
         format!("{path}/")
     };
-    Ok(entries
-        .iter()
-        .any(|e| e.path == path || e.path.starts_with(&dir_prefix)))
+    // bn-1eg2u: a restore may have to remove a file or symlink that sits
+    // where one of the path's parent directories goes; that entry must be
+    // clean too.
+    let path = path.trim_end_matches('/');
+    Ok(entries.iter().any(|e| {
+        let status_path = e.path.trim_end_matches('/');
+        e.path == path
+            || e.path.starts_with(&dir_prefix)
+            || path
+                .strip_prefix(status_path)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }))
 }
 
 #[cfg(unix)]
@@ -1533,7 +1542,191 @@ fn write_with_mode(dest: &Path, content: &[u8], _mode: &str) -> Result<()> {
     Ok(())
 }
 
-/// Restore a single file from snapshot `oid` into the default workspace's worktree.
+/// The blob/symlink entries `path` names in snapshot `oid`, as
+/// `(path, entry)`: the entry itself, or every one under it when `path` is a
+/// directory in the snapshot (bn-1eg2u). Empty if `path` is absent.
+fn snapshot_entries_at(
+    git_cwd: &Path,
+    oid: &str,
+    path: &str,
+) -> Result<(bool, Vec<(String, LsTreeEntry)>)> {
+    if let Some(entry) = ls_tree_entry(git_cwd, oid, path)? {
+        return Ok((false, vec![(path.to_owned(), entry)]));
+    }
+    let repo = open_repo(git_cwd)?;
+    let Some((EntryMode::Tree, tree_oid)) = repo
+        .find_entry_at_path(parse_oid(oid)?, path)
+        .map_err(|e| anyhow::anyhow!("find_entry_at_path failed: {e}"))?
+    else {
+        return Ok((false, Vec::new()));
+    };
+    let blobs = repo
+        .walk_tree_blob_paths(tree_oid)
+        .map_err(|e| anyhow::anyhow!("walk_tree_blob_paths failed: {e}"))?;
+    let entries = blobs
+        .into_iter()
+        .filter_map(|b| {
+            let mode = match b.mode {
+                EntryMode::Blob => "100644",
+                EntryMode::BlobExecutable => "100755",
+                EntryMode::Link => "120000",
+                EntryMode::Tree | EntryMode::Commit => return None,
+            };
+            Some((
+                format!("{path}/{}", b.path),
+                LsTreeEntry {
+                    mode: mode.to_owned(),
+                    oid: b.oid.to_string(),
+                },
+            ))
+        })
+        .collect();
+    Ok((true, entries))
+}
+
+/// What stands in the way of writing `entries` into `default_ws`
+/// (bn-1eg2u): a file or symlink where a parent directory of an entry goes,
+/// or a real directory where an entry's file goes — e.g. the merged file `p`
+/// when the user's directory `p/` is restored, or the merged directory `d/`
+/// when the user's file `d` is. Deduplicated, top-most first.
+fn restore_blockers(default_ws: &Path, entries: &[(String, LsTreeEntry)]) -> Result<Vec<String>> {
+    let mut blockers: Vec<String> = Vec::new();
+    for (path, _) in entries {
+        let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        for end in 1..=components.len() {
+            let rel = components[..end].join("/");
+            let meta = match default_ws.join(&rel).symlink_metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => {
+                    return Err(e).with_context(|| format!("inspect restore path '{rel}'"));
+                }
+            };
+            let is_last = end == components.len();
+            let blocking = if is_last {
+                meta.is_dir()
+            } else {
+                !meta.is_dir()
+            };
+            if blocking {
+                blockers.push(rel);
+                break;
+            }
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    Ok(blockers)
+}
+
+/// Refuse to remove a blocker that holds anything but committed content
+/// (bn-1eg2u): every file or symlink it is, or has under it, must be tracked
+/// in HEAD. Its uncommitted changes were already refused by
+/// [`dest_has_uncommitted`]; this catches untracked-but-ignored entries,
+/// which status does not report. `--force` skips that check, but never the
+/// symlink rule: a symlink in the way is replaced only when it is exactly
+/// the committed symlink (an untracked one may point outside the workspace,
+/// and the restore refuses to have anything to do with it).
+fn check_blockers_removable(default_ws: &Path, blockers: &[String], force: bool) -> Result<()> {
+    let repo = open_repo(default_ws)?;
+    let head = repo.rev_parse("HEAD").ok();
+    let tracked = |rel: &str| {
+        head.is_some_and(|h| {
+            matches!(
+                repo.find_entry_at_path(h, rel),
+                Ok(Some((mode, _))) if mode != EntryMode::Tree
+            )
+        })
+    };
+    for blocker in blockers {
+        let full = default_ws.join(blocker);
+        let meta = full
+            .symlink_metadata()
+            .with_context(|| format!("inspect {}", full.display()))?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&full)
+                .with_context(|| format!("read symlink {}", full.display()))?;
+            let committed = head
+                .and_then(|h| repo.read_blob_at_path(h, blocker).ok().flatten())
+                .is_some_and(|(mode, _, content)| {
+                    mode == EntryMode::Link && symlink_target_bytes(&target) == content
+                });
+            if !committed {
+                bail!(
+                    "Refusing restore path '{blocker}': '{}' is a symlink that is not committed \
+                     content. No files were changed.",
+                    full.display()
+                );
+            }
+            continue;
+        }
+        if force {
+            continue;
+        }
+        let mut stack = vec![blocker.clone()];
+        while let Some(rel) = stack.pop() {
+            let full = default_ws.join(&rel);
+            let meta = full
+                .symlink_metadata()
+                .with_context(|| format!("inspect {}", full.display()))?;
+            if meta.is_dir() {
+                for child in std::fs::read_dir(&full)
+                    .with_context(|| format!("read directory {}", full.display()))?
+                {
+                    let child = child.with_context(|| format!("read {}", full.display()))?;
+                    let Some(name) = child.file_name().to_str().map(str::to_owned) else {
+                        bail!(
+                            "Refusing to remove '{blocker}': it holds a non-UTF-8 name. No files were changed."
+                        );
+                    };
+                    stack.push(format!("{rel}/{name}"));
+                }
+            } else if !tracked(&rel) {
+                bail!(
+                    "Refusing to remove '{blocker}' to make room for the restore: '{rel}' is not \
+                     committed content (untracked or ignored). No files were changed.\n  \
+                     Move it aside, or re-run with --force to remove it."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A symlink's target as the raw bytes git stores for it.
+#[cfg(unix)]
+fn symlink_target_bytes(target: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    target.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn symlink_target_bytes(target: &Path) -> Vec<u8> {
+    target.to_string_lossy().replace('\\', "/").into_bytes()
+}
+
+/// Remove the restore blockers found by [`restore_blockers`], never
+/// following a symlink.
+fn remove_blockers(default_ws: &Path, blockers: &[String]) -> Result<()> {
+    for blocker in blockers {
+        let full = default_ws.join(blocker);
+        let meta = full
+            .symlink_metadata()
+            .with_context(|| format!("inspect {}", full.display()))?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&full)
+                .with_context(|| format!("remove directory {}", full.display()))?;
+        } else {
+            std::fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Restore a file, symlink or whole directory (bn-1eg2u) from snapshot `oid`
+/// into the default workspace's worktree. A file or directory of the other
+/// kind in the way is replaced when it holds only committed content (any
+/// content with `--force`).
 fn restore_file_at_oid(
     git_cwd: &Path,
     default_ws: &Path,
@@ -1542,7 +1735,9 @@ fn restore_file_at_oid(
     force: bool,
     audit_ref: &str,
 ) -> Result<()> {
-    let Some(entry) = ls_tree_entry(git_cwd, oid, path)? else {
+    let path = path.trim_end_matches('/');
+    let (is_dir, entries) = snapshot_entries_at(git_cwd, oid, path)?;
+    if entries.is_empty() {
         let oid_short = &oid[..oid.len().min(12)];
         // Best-effort hint: list paths in the snapshot, or suggest --search.
         match ls_tree_paths(git_cwd, oid) {
@@ -1566,7 +1761,7 @@ fn restore_file_at_oid(
                  Search across snapshots: maw ws recover --search <pattern>"
             ),
         }
-    };
+    }
 
     if !force && dest_has_uncommitted(default_ws, path)? {
         bail!(
@@ -1575,16 +1770,25 @@ fn restore_file_at_oid(
         );
     }
 
-    let content = cat_file_blob(git_cwd, &entry.oid)?;
-    let content = maybe_smudge(git_cwd, oid, path, &entry.mode, content);
-
-    let dest = checked_restore_destination(default_ws, path)?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent dir for {}", dest.display()))?;
+    // Read (and smudge) everything before touching the worktree.
+    let mut contents = Vec::with_capacity(entries.len());
+    for (entry_path, entry) in &entries {
+        let content = cat_file_blob(git_cwd, &entry.oid)?;
+        contents.push(maybe_smudge(git_cwd, oid, entry_path, &entry.mode, content));
     }
 
-    write_with_mode(&dest, &content, &entry.mode)?;
+    let blockers = restore_blockers(default_ws, &entries)?;
+    check_blockers_removable(default_ws, &blockers, force)?;
+    remove_blockers(default_ws, &blockers)?;
+
+    for ((entry_path, entry), content) in entries.iter().zip(contents) {
+        let dest = checked_restore_destination(default_ws, entry_path)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create parent dir for {}", dest.display()))?;
+        }
+        write_with_mode(&dest, &content, &entry.mode)?;
+    }
 
     audit::log_audit(&AuditEvent::Show {
         ref_name: audit_ref.to_string(),
@@ -1592,8 +1796,22 @@ fn restore_file_at_oid(
     });
 
     let oid_short = &oid[..oid.len().min(12)];
-    println!("restored: {path} from {oid_short}");
-    println!("Next: maw exec default -- git diff {path}  # review before commit");
+    if is_dir {
+        println!(
+            "restored: {path}/ ({} file(s)) from {oid_short}",
+            entries.len()
+        );
+    } else {
+        println!("restored: {path} from {oid_short}");
+    }
+    for blocker in &blockers {
+        println!("  replaced: {blocker} (it was in the way)");
+    }
+    if is_dir || !blockers.is_empty() {
+        println!("Next: maw exec default -- git status -- {path}  # review before commit");
+    } else {
+        println!("Next: maw exec default -- git diff {path}  # review before commit");
+    }
     Ok(())
 }
 

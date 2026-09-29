@@ -150,6 +150,15 @@ pub enum EntryKind {
     },
     /// A directory (bn-3jqfk: a file <-> directory change).
     Directory,
+    /// The path cannot exist because a parent of it is a file or symlink
+    /// (bn-1eg2u): e.g. the merge turned directory `p/` into file `p`, so
+    /// `p/x` is not "deleted" but "replaced by file p".
+    ReplacedBy {
+        /// The parent path that is a file or symlink (slash-separated).
+        path: String,
+        /// Whether that parent is a symlink (else a regular file).
+        symlink: bool,
+    },
 }
 
 impl std::fmt::Display for EntryKind {
@@ -160,6 +169,14 @@ impl std::fmt::Display for EntryKind {
             Self::File { executable: true } => f.write_str("executable regular file"),
             Self::Symlink { target } => write!(f, "symlink -> {target}"),
             Self::Directory => f.write_str("directory"),
+            Self::ReplacedBy {
+                path,
+                symlink: false,
+            } => write!(f, "replaced by file {path}"),
+            Self::ReplacedBy {
+                path,
+                symlink: true,
+            } => write!(f, "replaced by symlink {path}"),
         }
     }
 }
@@ -864,6 +881,11 @@ pub fn replay_snapshot_with_merge_protection(
     // them out.
     let (directory_conflicts, apply_snapshot) =
         split_directory_collisions(ws_path, snapshot, epoch_after, &stash_paths)?;
+    // bn-1eg2u: the filtered copy is a new commit no ref points at; pin it
+    // until the replay is done so a concurrent `git gc --prune` cannot drop
+    // it between here and `stash_apply`. Unpinned on every return below.
+    let _replay_pin = ReplayPin::pin(ws_path, target_workspace_name, snapshot, &apply_snapshot)?;
+    maw::fp!("FP_CLEANUP_REPLAY_BEFORE_APPLY")?;
     let overlapping: Vec<PathBuf> = stash_paths
         .iter()
         .filter(|p| {
@@ -1547,8 +1569,14 @@ enum PathShape {
     /// Neither the path nor any ancestor that would block it exists.
     Absent,
     /// A proper ancestor of the path is a file, symlink or gitlink, so the
-    /// path cannot exist.
-    Blocked,
+    /// path cannot exist. Carries that ancestor's component count and
+    /// whether it is a symlink (bn-1eg2u: reported as "replaced by ...").
+    Blocked {
+        /// Number of leading path components that form the blocking entry.
+        depth: usize,
+        /// Whether the blocking entry is a symlink.
+        symlink: bool,
+    },
     /// The path is a directory.
     Tree,
     /// The path is a file, symlink or gitlink.
@@ -1570,7 +1598,12 @@ fn tree_path_shape(
         match lookup(&components[..end].join("/"))? {
             None => return Ok(PathShape::Absent),
             Some((maw_git::EntryMode::Tree, _)) => {}
-            Some(_) => return Ok(PathShape::Blocked),
+            Some((mode, _)) => {
+                return Ok(PathShape::Blocked {
+                    depth: end,
+                    symlink: mode == maw_git::EntryMode::Link,
+                });
+            }
         }
     }
     Ok(match lookup(rel)? {
@@ -1588,7 +1621,16 @@ fn tree_path_kind(
     shape: PathShape,
 ) -> Result<EntryKind> {
     Ok(match shape {
-        PathShape::Absent | PathShape::Blocked => EntryKind::Deleted,
+        PathShape::Absent => EntryKind::Deleted,
+        PathShape::Blocked { depth, symlink } => EntryKind::ReplacedBy {
+            path: rel
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .take(depth)
+                .collect::<Vec<_>>()
+                .join("/"),
+            symlink,
+        },
         PathShape::Tree => EntryKind::Directory,
         PathShape::Entry => TreeSide::kind(read_tree_side(repo, commit, rel)?.as_ref()),
     })
@@ -1601,7 +1643,24 @@ pub fn is_directory_blocked_at(repo: &maw_git::GixRepo, rev: &str, path: &Path) 
     let commit = repo.rev_parse(rev).ok()?;
     let rel = path.to_str()?.replace('\\', "/");
     let shape = tree_path_shape(repo, commit, &rel).ok()?;
-    Some(matches!(shape, PathShape::Tree | PathShape::Blocked))
+    Some(matches!(shape, PathShape::Tree | PathShape::Blocked { .. }))
+}
+
+/// The parent of `path` that is a file or symlink in `rev` (so `path`
+/// cannot exist there), if any. `None` also when the tree cannot be read.
+/// (bn-1eg2u)
+pub fn blocking_parent_at(repo: &maw_git::GixRepo, rev: &str, path: &Path) -> Option<PathBuf> {
+    let commit = repo.rev_parse(rev).ok()?;
+    let rel = path.to_str()?.replace('\\', "/");
+    match tree_path_shape(repo, commit, &rel).ok()? {
+        PathShape::Blocked { depth, .. } => Some(
+            rel.split('/')
+                .filter(|c| !c.is_empty())
+                .take(depth)
+                .collect::<PathBuf>(),
+        ),
+        _ => None,
+    }
 }
 
 /// Split the file <-> directory collisions out of a dirty-trunk replay.
@@ -1645,7 +1704,7 @@ fn split_directory_collisions(
         if tree_path_shape(&repo, theirs_oid, &rel)? == PathShape::Entry
             && matches!(
                 tree_path_shape(&repo, ours_oid, &rel)?,
-                PathShape::Tree | PathShape::Blocked
+                PathShape::Tree | PathShape::Blocked { .. }
             )
         {
             colliding.push(path);
@@ -1700,6 +1759,55 @@ fn split_directory_collisions(
 
     let filtered = snapshot_without_paths(&repo, snapshot, theirs_oid, &dropped)?;
     Ok((conflicts, filtered))
+}
+
+/// Ref that pins the filtered replay commit of [`split_directory_collisions`]
+/// while `ws_name`'s replay runs (bn-1eg2u).
+pub(super) fn replay_pin_ref_name(ws_name: &str) -> String {
+    format!("refs/manifold/replay/{ws_name}")
+}
+
+/// Keeps the filtered replay commit reachable for the duration of one
+/// replay; the ref is deleted when this is dropped. The original snapshot
+/// stays pinned by its own refs, so the filtered copy is never needed again.
+struct ReplayPin {
+    ws_path: PathBuf,
+    ref_name: Option<String>,
+}
+
+impl ReplayPin {
+    fn pin(
+        ws_path: &Path,
+        ws_name: &str,
+        snapshot: &SnapshotRef,
+        apply_snapshot: &SnapshotRef,
+    ) -> Result<Self> {
+        if apply_snapshot.oid == snapshot.oid {
+            return Ok(Self {
+                ws_path: ws_path.to_path_buf(),
+                ref_name: None,
+            });
+        }
+        let ref_name = replay_pin_ref_name(ws_name);
+        let oid = GitOid::new(&apply_snapshot.oid)
+            .map_err(|e| anyhow::anyhow!("invalid replay OID '{}': {e}", apply_snapshot.oid))?;
+        manifold_refs::write_ref(ws_path, &ref_name, &oid)
+            .map_err(|e| anyhow::anyhow!("failed to pin the replay commit at {ref_name}: {e}"))?;
+        Ok(Self {
+            ws_path: ws_path.to_path_buf(),
+            ref_name: Some(ref_name),
+        })
+    }
+}
+
+impl Drop for ReplayPin {
+    fn drop(&mut self) {
+        if let Some(ref_name) = &self.ref_name
+            && let Err(e) = manifold_refs::delete_ref(&self.ws_path, ref_name)
+        {
+            tracing::warn!("failed to remove replay pin {ref_name}: {e}");
+        }
+    }
 }
 
 /// `snapshot` minus `dropped`: a commit on the snapshot's base whose tree puts
@@ -2893,6 +3001,83 @@ mod tests {
                 "snapshot must not delete admin/git dir `{d}` (bn-3bkn)"
             );
         }
+    }
+
+    /// bn-1eg2u: the filtered replay commit that `split_directory_collisions`
+    /// builds (the snapshot minus its file <-> directory collisions) must stay
+    /// reachable until the replay has applied it. A `git prune` between the
+    /// split and `stash_apply` used to delete it and fail the whole replay.
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn filtered_replay_commit_survives_prune_during_replay() {
+        use maw_core::failpoints::{self, FailpointAction};
+
+        let (_dir, root, _) = setup_repo();
+        fs::write(root.join("p"), "one\n").expect("write p");
+        fs::write(root.join("other.txt"), "other\n").expect("write other");
+        let anchor = maw_git::test_support::commit_all(&root, "anchor");
+        fs::write(root.join("p"), "one\nmerged\n").expect("edit p");
+        let target = maw_git::test_support::commit_all(&root, "target");
+        let out = Command::new("git")
+            .args(["checkout", "--force", "-q", &anchor])
+            .current_dir(&root)
+            .output()
+            .expect("checkout anchor");
+        assert!(out.status.success());
+
+        // The user replaced file `p` with directory `p/`.
+        fs::remove_file(root.join("p")).expect("rm p");
+        fs::create_dir(root.join("p")).expect("mkdir p");
+        fs::write(root.join("p/x"), "user x\n").expect("write p/x");
+        fs::write(root.join("other.txt"), "other\nuser\n").expect("edit other");
+
+        let snapshot = snapshot_working_copy(&root, &root, "test-ws")
+            .expect("snapshot")
+            .expect("dirty");
+        checkout_to(&root, &target, None).expect("checkout target");
+
+        let prune_root = root.clone();
+        let fp = failpoints::set_for_this_thread(
+            "FP_CLEANUP_REPLAY_BEFORE_APPLY",
+            FailpointAction::Callback(std::sync::Arc::new(move || {
+                let out = Command::new("git")
+                    .args(["prune", "--expire=now"])
+                    .current_dir(&prune_root)
+                    .output()
+                    .expect("git prune");
+                assert!(out.status.success(), "git prune failed");
+            })),
+        );
+        let result = replay_snapshot_with_merge_protection(
+            &root,
+            &snapshot,
+            &anchor,
+            &target,
+            &["a".to_owned()],
+            "test-ws",
+        );
+        drop(fp);
+
+        let result = result.expect("replay must not lose its filtered commit to a prune");
+        let SnapshotReplayResult::Conflicts(conflicts) = result else {
+            panic!("expected the directory conflict to be reported");
+        };
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.path == "p/x" && c.conflict_type == "directory_change"),
+            "{conflicts:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("other.txt")).expect("read other"),
+            "other\nuser\n",
+            "the non-conflicting edit must be replayed"
+        );
+        assert_eq!(
+            maw_core::refs::read_ref(&root, &replay_pin_ref_name("test-ws")).expect("read ref"),
+            None,
+            "the replay pin must be removed once the replay is done"
+        );
     }
 
     #[test]
