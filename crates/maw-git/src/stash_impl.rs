@@ -271,7 +271,16 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     })?;
 
     // 5. For each changed file, read the blob from stash tree and write it to worktree.
-    for change in &recorder.records {
+    //
+    // Deletions go first (bn-ihi4h): a file <-> directory swap is a deletion
+    // plus additions at or under the same path, and the new entry can only
+    // be written once the old one is gone (`p` must be removed before
+    // `p/x` can be created; `d/x` before file `d`).
+    let mut ordered: Vec<&gix::diff::tree::recorder::Change> = recorder.records.iter().collect();
+    ordered.sort_by_key(|change| {
+        !matches!(change, gix::diff::tree::recorder::Change::Deletion { .. })
+    });
+    for change in ordered {
         match change {
             gix::diff::tree::recorder::Change::Addition {
                 entry_mode,
@@ -323,6 +332,18 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                     && (meta.is_symlink() || meta.is_file())
                 {
                     let _ = std::fs::remove_file(&file_path);
+                }
+                // A directory where the entry goes (bn-ihi4h: the user turned
+                // directory `d/` into file or symlink `d`). The deletions of
+                // its tracked files ran above; what is left may only be empty
+                // directories, which git does not track. Anything else is
+                // refused, never deleted.
+                if std::fs::symlink_metadata(&file_path).is_ok_and(|m| m.is_dir()) {
+                    remove_empty_dir_tree(&file_path).map_err(|e| GitError::BackendError {
+                        message: format!(
+                            "cannot write '{path_str}': a non-empty directory is in the way: {e}"
+                        ),
+                    })?;
                 }
 
                 if entry_mode.kind() == gix::objs::tree::EntryKind::Link {
@@ -423,6 +444,23 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
         })?;
 
     Ok(())
+}
+
+/// Remove `dir` if it holds nothing but (nested) empty directories; never
+/// follows a symlink, and fails without removing anything else otherwise.
+fn remove_empty_dir_tree(dir: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_empty_dir_tree(&entry.path())?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::DirectoryNotEmpty,
+                format!("{} is not empty", dir.display()),
+            ));
+        }
+    }
+    std::fs::remove_dir(dir)
 }
 
 /// Materialize the current working tree (including untracked files) into a
@@ -779,6 +817,102 @@ mod tests {
         let content =
             std::fs::read_to_string(root.join("link.txt")).expect("test setup should succeed");
         assert_eq!(content, "regular content\n");
+    }
+
+    fn commit_all(root: &std::path::Path, msg: &str) {
+        for args in [&["add", "-A"][..], &["commit", "-q", "-m", msg][..]] {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+    }
+
+    /// bn-ihi4h: a snapshot that turned tracked directory `d/` into file `d`
+    /// replays onto the unchanged tree: the deletions under `d/` run first,
+    /// the empty directories left behind make way, and file `d` is written.
+    #[test]
+    fn stash_apply_replays_dir_to_file_swap() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("d/sub")).expect("mkdir");
+        std::fs::write(root.join("d/x"), "x\n").expect("write");
+        std::fs::write(root.join("d/sub/y"), "y\n").expect("write");
+        commit_all(root, "dir");
+
+        std::fs::remove_dir_all(root.join("d")).expect("rm d");
+        std::fs::write(root.join("d"), "user file\n").expect("write d");
+        let snap = worktree_state_commit(&repo, "snap")
+            .expect("snapshot")
+            .expect("dirty");
+
+        // Back to the committed tree, then replay.
+        std::fs::remove_file(root.join("d")).expect("rm d");
+        std::fs::create_dir_all(root.join("d/sub")).expect("mkdir");
+        std::fs::write(root.join("d/x"), "x\n").expect("write");
+        std::fs::write(root.join("d/sub/y"), "y\n").expect("write");
+        stash_apply(&repo, snap).expect("replay the swap");
+
+        let meta = std::fs::symlink_metadata(root.join("d")).expect("stat d");
+        assert!(meta.is_file(), "d must be the user's file");
+        assert_eq!(
+            std::fs::read_to_string(root.join("d")).expect("read d"),
+            "user file\n"
+        );
+    }
+
+    /// bn-ihi4h: a snapshot that turned tracked file `p` into directory `p/`.
+    #[test]
+    fn stash_apply_replays_file_to_dir_swap() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::write(root.join("p"), "one\n").expect("write");
+        commit_all(root, "file");
+
+        std::fs::remove_file(root.join("p")).expect("rm p");
+        std::fs::create_dir(root.join("p")).expect("mkdir p");
+        std::fs::write(root.join("p/x"), "user x\n").expect("write p/x");
+        let snap = worktree_state_commit(&repo, "snap")
+            .expect("snapshot")
+            .expect("dirty");
+
+        std::fs::remove_dir_all(root.join("p")).expect("rm p");
+        std::fs::write(root.join("p"), "one\n").expect("write");
+        stash_apply(&repo, snap).expect("replay the swap");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("p/x")).expect("read p/x"),
+            "user x\n"
+        );
+    }
+
+    /// bn-ihi4h: a directory in the way that still holds a file is never
+    /// deleted to make room; the replay fails and the file survives.
+    #[test]
+    fn stash_apply_refuses_to_remove_non_empty_directory() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::create_dir(root.join("d")).expect("mkdir");
+        std::fs::write(root.join("d/x"), "x\n").expect("write");
+        commit_all(root, "dir");
+
+        std::fs::remove_dir_all(root.join("d")).expect("rm d");
+        std::fs::write(root.join("d"), "user file\n").expect("write d");
+        let snap = worktree_state_commit(&repo, "snap")
+            .expect("snapshot")
+            .expect("dirty");
+
+        std::fs::remove_file(root.join("d")).expect("rm d");
+        std::fs::create_dir(root.join("d")).expect("mkdir");
+        std::fs::write(root.join("d/x"), "x\n").expect("write");
+        std::fs::write(root.join("d/keep"), "not tracked, not captured\n").expect("write");
+        assert!(stash_apply(&repo, snap).is_err(), "must refuse");
+        assert_eq!(
+            std::fs::read_to_string(root.join("d/keep")).expect("d/keep survives"),
+            "not tracked, not captured\n"
+        );
     }
 
     /// Regression test (bn-17o1): `worktree_state_commit` must go through the

@@ -161,8 +161,9 @@ fn link_target(path: &Path) -> Option<PathBuf> {
         .then(|| std::fs::read_link(path).expect("readlink"))
 }
 
-/// Shared assertions: the edits survive (on disk or pinned) and the user's
-/// symlink is recoverable with the command maw printed.
+/// Shared assertions: the edits survive on disk and pinned. The merge did
+/// not touch `d`, so the user's symlink stays in place, unreported (bn-ihi4h;
+/// before, every such swap was displaced and reported as a type conflict).
 fn assert_preserved(root: &Path, text: &str) -> String {
     assert!(
         !text.contains("Falling back to force checkout"),
@@ -192,43 +193,20 @@ fn assert_preserved(root: &Path, text: &str) -> String {
         None,
         "d/inner.txt is deleted on the user's side (never read through the link):\n{text}"
     );
-    // The type change is reported, with the one-step command that puts the
-    // user's side back (bn-1eg2u; it was `--show d` before).
-    let restore = format!("maw ws recover --ref {pin} --restore-file d");
     assert!(
-        text.contains(&format!("restore yours: {restore}")),
-        "the type change must be reported with `{restore}`:\n{text}"
-    );
-    // The on-disk state is coherent: either side of d, never an empty dir.
-    match link_target(&root.join("d")) {
-        Some(_) => {}
-        None => assert_eq!(
-            read(&root.join("d/inner.txt")),
-            "inner\n",
-            "d on disk must be the merged directory, complete:\n{text}"
-        ),
-    }
-    // Run the printed command verbatim: d is the user's symlink again.
-    let out = Command::new("sh")
-        .current_dir(root)
-        .args(["-c", &restore.replacen("maw ", &format!("{MAW} "), 1)])
-        .output()
-        .expect("run printed restore");
-    assert!(
-        out.status.success(),
-        "printed command failed: {restore}\n{}\n---\n{text}",
-        combined(&out)
+        !text.contains("type conflict"),
+        "the merge did not touch d: the user's swap is not a conflict:\n{text}"
     );
     assert_eq!(
         link_target(&root.join("d")),
         Some(PathBuf::from("x")),
-        "the printed command must put the user's symlink back:\n{text}"
+        "the user's symlink must stay in place:\n{text}"
     );
     pin
 }
 
 /// The field repro (dangling symlink): the merge succeeds, the unrelated edit
-/// survives, the symlink is pinned and reported.
+/// survives, the symlink is pinned and stays in place.
 #[test]
 fn dir_replaced_by_dangling_symlink_keeps_trunk_edits() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -485,17 +463,62 @@ fn fallback_capture_never_reads_through_a_symlinked_parent() {
     );
     assert_eq!(read(&root.join("other.txt")), "other\nedit\n", "{text}");
     assert_eq!(read(&root.join("x/inner.txt")), "target\n", "{text}");
-    // The report must describe the user's side of d/inner.txt truthfully:
-    // not the link target's file, and (bn-1eg2u) not a bare "deleted".
+    // bn-ihi4h: the merge did not touch d, so the user's swap stays in
+    // place, unreported.
+    assert!(!text.contains("type conflict"), "{text}");
+    assert!(!text.contains("could not be replayed"), "{text}");
+    assert_eq!(
+        link_target(&root.join("d")),
+        Some(PathBuf::from("x")),
+        "{text}"
+    );
+    assert_eq!(read(&root.join("x/inner.txt")), "target\n", "{text}");
+}
+
+/// As above, but the merge also edits `d/inner.txt`, so the user's
+/// directory -> symlink swap collides with it: the fallback reports
+/// `d/inner.txt` truthfully (not the link target's file, and (bn-1eg2u) not
+/// a bare "deleted"), and one printed command puts the user's symlink back.
+#[cfg(feature = "failpoints")]
+#[test]
+fn fallback_reports_merge_touched_symlinked_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let ws = root.join(".maw/workspaces/wa");
+    std::fs::write(ws.join("d/inner.txt"), "inner\nmerged\n").expect("edit inner");
+    maw(
+        root,
+        &["exec", "wa", "--", "git", "commit", "-am", "wa inner"],
+    );
+    std::fs::create_dir(root.join("x")).expect("mkdir x");
+    std::fs::write(root.join("x/inner.txt"), "target\n").expect("write x");
+    dirty_trunk(root, "x");
+
+    let out = merge_wa(
+        root,
+        Some("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:injected"),
+    );
+    let text = combined(&out);
+    assert!(out.status.success(), "merge failed:\n{text}");
+    assert!(
+        text.contains("Falling back to force checkout"),
+        "the failpoint must force the in-memory fallback:\n{text}"
+    );
+    let refs = recovery_refs(root);
+    assert_eq!(refs.len(), 1, "exactly one recovery pin: {refs:?}\n{text}");
+    let pin = &refs[0];
+    assert_eq!(read(&root.join("other.txt")), "other\nedit\n", "{text}");
+    assert_eq!(read(&root.join("x/inner.txt")), "target\n", "{text}");
     assert!(
         text.contains("    d/inner.txt\n      merged (wa): regular file\n      yours (uncommitted): replaced by symlink d"),
         "d/inner.txt is replaced by the user's symlink d, not the link target's file:\n{text}"
     );
-    match link_target(&root.join("d")) {
-        Some(_) => {}
-        None => assert_eq!(read(&root.join("d/inner.txt")), "inner\n", "{text}"),
-    }
-    // bn-1eg2u: one printed command puts the user's symlink back.
+    assert_eq!(
+        read(&root.join("d/inner.txt")),
+        "inner\nmerged\n",
+        "the merged directory is on disk until restored:\n{text}"
+    );
     let restore = format!("maw ws recover --ref {pin} --restore-file d");
     assert!(
         text.contains(&format!("restore yours: {restore}")),

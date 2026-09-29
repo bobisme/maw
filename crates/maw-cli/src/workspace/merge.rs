@@ -7794,10 +7794,11 @@ pub fn update_default_workspace(
                 eprintln!("    [{:>20}] {}", c.conflict_type, c.path);
             }
             eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
-            eprintln!(
-                "  To recover clean state: git -C {} stash apply {}",
-                default_ws_path.display(),
-                snapshot.oid,
+            report_unreplayed_snapshot(
+                default_ws_path,
+                ws_name,
+                &snapshot.oid,
+                durable_recovery_ref.as_deref(),
             );
             if text_mode {
                 println!(
@@ -7810,9 +7811,24 @@ pub fn update_default_workspace(
         Err(e) => {
             // Replay hard-failed. Snapshot ref is kept for recovery.
             eprintln!("  WARNING: replay_snapshot failed: {e:#}");
-            if in_fallback {
-                // bn-2ds48: name each merge-changed path left at the merged
-                // version, with its restore command from the pin.
+            eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
+            if pre_merge_dirty.is_empty() {
+                // bn-7xuvm: resumed (no in-memory capture, so no fidelity
+                // repair below): every snapshot path not on disk as
+                // snapshotted, with a command that works as printed. (The
+                // snapshot is a single-parent commit, so the old
+                // `git stash apply <oid>` hint always failed.)
+                report_unreplayed_snapshot(
+                    default_ws_path,
+                    ws_name,
+                    &snapshot.oid,
+                    durable_recovery_ref.as_deref(),
+                );
+            } else {
+                // bn-2ds48 / bn-7xuvm: the fidelity repair below puts back
+                // every path the merge left alone; name each merge-changed
+                // path left at the merged version, with its restore command
+                // from the pin.
                 report_fallback_unreplayed(
                     default_ws_path,
                     ws_name,
@@ -7822,12 +7838,6 @@ pub fn update_default_workspace(
                     durable_recovery_ref.as_deref(),
                 );
             }
-            eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
-            eprintln!(
-                "  To recover: git -C {} stash apply {}",
-                default_ws_path.display(),
-                snapshot.oid,
-            );
             if text_mode {
                 println!(
                     "  {} (replay failed, snapshot preserved).",
@@ -8150,6 +8160,85 @@ fn report_resume_residual(
             eprintln!(
                 "      inspect yours: git -C {ws_quoted} show {}:{quoted}",
                 pin.oid
+            );
+        }
+    }
+}
+
+/// After a failed dirty-trunk replay with no in-memory capture to repair
+/// from (bn-7xuvm, the resumed update): name every path of the snapshot that
+/// is not on disk as snapshotted, with a command that restores it and works
+/// as printed. `snapshot_oid` is a commit whose first parent is the anchor
+/// and whose tree is the anchor plus the user's edits; `recovery_ref`, when
+/// set, pins the same tree.
+fn report_unreplayed_snapshot(
+    ws_path: &Path,
+    ws_name: &str,
+    snapshot_oid: &str,
+    recovery_ref: Option<&str>,
+) {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return;
+    };
+    let Ok(snap) = repo.rev_parse(snapshot_oid) else {
+        return;
+    };
+    let Ok(commit) = repo.read_commit(snap) else {
+        return;
+    };
+    let base_tree = commit
+        .parents
+        .first()
+        .and_then(|p| repo.read_commit(*p).ok())
+        .map(|c| c.tree_oid);
+    let Ok(changes) = repo.diff_trees(base_tree, commit.tree_oid) else {
+        return;
+    };
+    let head = repo.rev_parse("HEAD").ok();
+    let mut lost = Vec::new();
+    for change in changes {
+        let rel = change.path;
+        let pinned = repo.read_blob_at_path(snap, &rel).ok().flatten();
+        let disk = DiskSide::capture_at(ws_path, Path::new(&rel)).ok();
+        if disk
+            .as_ref()
+            .is_some_and(|d| disk_matches_tree_entry(d, pinned.as_ref()))
+        {
+            continue;
+        }
+        let committed = head.and_then(|h| repo.read_blob_at_path(h, &rel).ok().flatten());
+        let disk_is_committed = disk
+            .as_ref()
+            .is_some_and(|d| disk_matches_tree_entry(d, committed.as_ref()));
+        lost.push((rel, pinned.is_some(), disk_is_committed));
+    }
+    if lost.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "  WARNING: {} uncommitted path(s) of '{ws_name}' were not replayed; the version on disk is not yours:",
+        lost.len()
+    );
+    let ws_quoted = shell_quote_path(ws_path);
+    for (rel, in_snapshot, disk_is_committed) in lost {
+        let quoted = shell_quote_path(Path::new(&rel));
+        eprintln!("    {rel}");
+        if !in_snapshot {
+            eprintln!("      yours: deleted");
+            eprintln!("      restore yours: maw exec {ws_name} -- rm -f -- {quoted}");
+        } else if let (Some(r), "default") = (recovery_ref, ws_name) {
+            // `--restore-file` refuses to overwrite an uncommitted change
+            // unless forced; a dirty entry here is a partial replay.
+            let force = if disk_is_committed { "" } else { "--force " };
+            eprintln!(
+                "      restore yours: maw ws recover --ref {r} {force}--restore-file {quoted}"
+            );
+        } else {
+            // `--restore-file` only targets the default workspace. This
+            // writes the worktree only (nothing is staged).
+            eprintln!(
+                "      restore yours: git -C {ws_quoted} restore --source={snapshot_oid} --worktree -- {quoted}"
             );
         }
     }
@@ -8614,33 +8703,42 @@ fn trunk_replay_content_matches(
 }
 
 /// Whether the merge changed `path` itself, so the dirty replay (not the
-/// fidelity repair) owns it: its committed bytes changed, it turned from a
-/// symlink into a file or back (bn-2ygs0), or the merged tree has a directory
-/// there or a file where one of its parent directories would go (bn-3jqfk).
+/// fidelity repair) owns the user's pre-merge `entry` there: its committed
+/// bytes changed, it turned from a symlink into a file or back (bn-2ygs0),
+/// the merged tree has a directory there or a file where one of its parent
+/// directories would go and the merge changed that obstacle (bn-3jqfk,
+/// bn-ihi4h), or the merge flipped only the executable bit of a file the
+/// user replaced with a symlink (bn-ihi4h: a type conflict).
 fn merge_changed_path(
     repo: &maw_git::GixRepo,
     anchor_epoch: &str,
     epoch_after: &str,
     path: &Path,
+    entry: &DiskSide,
 ) -> bool {
     let committed_anchor = repo.read_file_at_commit(anchor_epoch, path).ok().flatten();
     let committed_after = repo.read_file_at_commit(epoch_after, path).ok().flatten();
     committed_anchor != committed_after
         || super::working_copy::is_symlink_at(repo, anchor_epoch, path)
             != super::working_copy::is_symlink_at(repo, epoch_after, path)
-        || super::working_copy::is_directory_blocked_at(repo, epoch_after, path) != Some(false)
+        || super::working_copy::is_changed_collision_at(repo, anchor_epoch, epoch_after, path)
+            != Some(false)
+        || (matches!(entry, DiskSide::Symlink(_))
+            && super::working_copy::file_mode_changed(repo, anchor_epoch, epoch_after, path))
 }
 
 /// Whether `path` belongs to a file <-> directory collision group of the dirty
 /// trunk (bn-1dlkd): some uncommitted entry at, above or below `path` is a
 /// file or symlink where the merged tree has a directory (or a file where one
-/// of its parents would go). The replay leaves the whole group on the merged
+/// of its parents would go) that the merge changed (bn-ihi4h: an obstacle the
+/// merge left alone is the user's own swap, replayed in place). The replay leaves the whole group on the merged
 /// side and reports it (bn-3jqfk `directory_change`); e.g. after
 /// `rm -r d && ln -s x d` the deletion of `d/inner.txt` is part of the
 /// symlink's change. Repairing only the deletion from memory would leave an
 /// empty `d/` that is neither side, and contradict the report.
 fn in_directory_collision_group(
     repo: &maw_git::GixRepo,
+    anchor_epoch: &str,
     epoch_after: &str,
     path: &Path,
     pre_merge_dirty: &[(PathBuf, DiskSide)],
@@ -8648,7 +8746,8 @@ fn in_directory_collision_group(
     pre_merge_dirty.iter().any(|(other, entry)| {
         *entry != DiskSide::Absent
             && (path.starts_with(other) || other.starts_with(path))
-            && super::working_copy::is_directory_blocked_at(repo, epoch_after, other) != Some(false)
+            && super::working_copy::is_changed_collision_at(repo, anchor_epoch, epoch_after, other)
+                != Some(false)
     })
 }
 
@@ -8672,12 +8771,23 @@ fn verify_trunk_replay_fidelity(
     let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
         return;
     };
-    for (path, pre_entry) in pre_merge_dirty {
+    // Deletions first (bn-ihi4h): an untouched file <-> directory swap is a
+    // deletion plus an entry at or under the same path, and the entry can be
+    // put back only once the old one is gone.
+    let ordered = pre_merge_dirty
+        .iter()
+        .filter(|(_, e)| *e == DiskSide::Absent)
+        .chain(
+            pre_merge_dirty
+                .iter()
+                .filter(|(_, e)| *e != DiskSide::Absent),
+        );
+    for (path, pre_entry) in ordered {
         // Only files the merge left committed-unchanged are unambiguously owned
         // by the user's uncommitted edits. If the merge changed the committed
         // content, the driver-aware 3-way replay owns the outcome.
-        if merge_changed_path(&repo, anchor_epoch, epoch_after, path)
-            || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty)
+        if merge_changed_path(&repo, anchor_epoch, epoch_after, path, pre_entry)
+            || in_directory_collision_group(&repo, anchor_epoch, epoch_after, path, pre_merge_dirty)
         {
             continue;
         }
@@ -8856,8 +8966,14 @@ fn report_fallback_unreplayed(
     let unreplayed: Vec<&(PathBuf, DiskSide)> = pre_merge_dirty
         .iter()
         .filter(|(path, entry)| {
-            (merge_changed_path(&repo, anchor_epoch, epoch_after, path)
-                || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty))
+            (merge_changed_path(&repo, anchor_epoch, epoch_after, path, entry)
+                || in_directory_collision_group(
+                    &repo,
+                    anchor_epoch,
+                    epoch_after,
+                    path,
+                    pre_merge_dirty,
+                ))
                 && DiskSide::capture_at(ws_path, path).ok().as_ref() != Some(entry)
         })
         .collect();
@@ -8876,7 +8992,13 @@ fn report_fallback_unreplayed(
         let quoted = shell_quote_path(path);
         let blocked = super::working_copy::is_directory_blocked_at(&repo, epoch_after, path)
             != Some(false)
-            || in_directory_collision_group(&repo, epoch_after, path, pre_merge_dirty);
+            || in_directory_collision_group(
+                &repo,
+                anchor_epoch,
+                epoch_after,
+                path,
+                pre_merge_dirty,
+            );
         eprintln!("    {}", path.display());
         eprintln!(
             "      yours (uncommitted): {}",

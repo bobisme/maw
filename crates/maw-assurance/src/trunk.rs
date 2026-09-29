@@ -77,11 +77,6 @@
 //!   either side added is missing, not the exact bytes. A clean reference
 //!   merge IS checked byte-for-byte (bn-36chi), including a user file that
 //!   still carries an earlier conflict's markers.
-//! - **A merge that changes ONLY the exec bit of a file the user turned into
-//!   a symlink**: the replay's overlap test compares content, not modes, so
-//!   it keeps the user's link without a report. Accepted (nothing is lost;
-//!   see `judge_replay`) — noted to the lead as a contract deviation from
-//!   bn-2ygs0's "type conflicts are reported".
 //! - **Whole-snapshot notices** (`replay_snapshot failed`, a stale intent's
 //!   `pre-merge edits pinned at`): acknowledge every user-changed path. The
 //!   resume's residual notice (`held changes beyond the interrupted
@@ -94,6 +89,12 @@
 //!   resolve` commands are separate paragraphs of one section.
 //! - Byte oracles record only UTF-8 file content and symlink targets; mode
 //!   changes and non-UTF-8 content are judged by the replay model alone.
+//!
+//! Closed by bn-ihi4h: a merge that changes ONLY the exec bit of a file the
+//! user turned into a symlink is a reported type conflict (merged side on
+//! disk), like any symlink-vs-file change; a user file<->directory swap over
+//! a group the merge left alone must stay in place (displacing it, even with
+//! a report, is a violation).
 //!
 //! Closed by bn-36chi (were blind spots): the exec bit of a path absent (or a
 //! symlink) at the anchor (the user's mode wins); recoveries of a TAINTED
@@ -662,7 +663,6 @@ fn df_involved(maps: &[&EntryMap]) -> BTreeSet<String> {
 /// | changed | deleted | the user's entry (kept local) |
 /// | deleted | changed | the merged entry, or nothing |
 /// | changed | changed, a symlink on either side | the MERGED entry, and the output names the path with a way back (bn-2ygs0 type conflict) |
-/// | changed (symlink) | only the exec bit changed | the user's link (not an overlap for the replay) |
 /// | changed | changed, both regular files | a regular file; bytes: the side that changed them; both changed ⇒ the clean `git merge-file` result, or reported markers (bn-36chi); exec bit: the user's if the user changed it (or the anchor had no regular file), else the merged one (bn-3fcbu) |
 ///
 /// File<->directory paths are judged per group (see `judge_df_groups`). A
@@ -747,31 +747,11 @@ pub fn judge_replay(
             }
             continue;
         };
-        // The merge changed only the executable bit of a regular file the
-        // user turned into a symlink. The replay's overlap test compares
-        // committed CONTENT, not modes (`committed_content_changed`), so the
-        // path is not an overlap: the user's link is restored and nothing is
-        // reported. Nothing is lost (the mode change is committed, and a
-        // mode has no meaning on a link), so the model accepts the user's
-        // entry here — and requires it.
-        if let (
-            TrunkEntry::Symlink(_),
-            TrunkEntry::File { bytes: mb, .. },
-            Some(TrunkEntry::File { bytes: bb, .. }),
-        ) = (ue, me, b)
-            && mb == bb
-        {
-            if d != u {
-                fail(
-                    "the user's symlink over a mode-only merge change was not kept",
-                    TrunkEntry::describe(u),
-                );
-            }
-            continue;
-        }
         if ue.is_symlink() || me.is_symlink() {
             // bn-2ygs0: a symlink and a file (or two targets) cannot merge;
             // the merged side is kept on disk and the conflict is reported.
+            // bn-ihi4h: this includes a merge that changed ONLY the exec bit
+            // of the file the user turned into a symlink.
             if d != m {
                 fail(
                     "symlink type conflict did not keep the merged side",
@@ -977,9 +957,10 @@ fn reference_merge(base: &[u8], merged: &[u8], user: &[u8]) -> std::io::Result<O
 /// group (a group = one path that is a file on some side and a directory on
 /// another, plus everything under it). When only ONE side touched a group
 /// the outcome is determined: the user did not touch it ⇒ the merged
-/// entries, exactly; only the user touched it ⇒ the user's entries exactly,
-/// or the merged (= anchor) entries with a report (the replay's conservative
-/// `directory_change`). A group BOTH sides touched is a directory collision
+/// entries, exactly; only the user touched it ⇒ the user's entries exactly
+/// (bn-ihi4h: an uncommitted swap the merge left alone stays in place;
+/// displacing it, even with a report, is a violation). A group BOTH sides
+/// touched is a directory collision
 /// the replay settles path by path; it is left to the byte oracles
 /// (documented blind spot).
 fn judge_df_groups(
@@ -1015,24 +996,18 @@ fn judge_df_groups(
         }
         j.judged += members.len() as u64;
         let (ok, want, why) = if by_user {
-            // The replay reports a user file<->directory swap that collides
-            // with the MERGED tree's shape as a `directory_change` and keeps
-            // the merged side — even when the merge did not touch the group
-            // (it compares shapes against the merged tree, not changes):
-            // conservative, reported, nothing lost. Accepted outcomes: the
-            // whole group is the user's,
-            // or the whole group is merged AND some member is reported with
-            // a way back. Never a mix. (Only reached when the merge left the
-            // group alone, so "merged" is also the anchor's shape.)
-            let reported = members.iter().any(|p| {
-                crate::oracle_escape::report_for(output, p)
-                    == crate::oracle_escape::Report::Displaced
-            });
+            // Only reached when the merge left the group alone: the user's
+            // swap is an uncommitted change to paths the merge did not touch,
+            // so it must survive in place, exactly (bn-ihi4h). Before
+            // bn-ihi4h the replay compared the user's entry with the merged
+            // tree's SHAPE rather than asking whether the merge changed it,
+            // and displaced every such swap as a reported `directory_change`;
+            // that is now a violation even when reported.
             (
-                all_are(user) || (all_are(merged) && reported),
+                all_are(user),
                 user,
                 "the user's file<->directory change (over a merge that left the group alone) \
-                 was neither kept nor reported",
+                 was not kept in place",
             )
         } else {
             (
@@ -1263,14 +1238,18 @@ mod tests {
         assert!(v.mismatches[0].detail.contains("executable bit"), "{v:?}");
     }
 
-    /// bn-36chi: a merge that only flipped +x on a file the user turned
-    /// into a symlink is not an overlap: the user's link must stay.
+    /// bn-ihi4h: a merge that only flipped +x on a file the user turned
+    /// into a symlink is a type conflict: the merged file on disk and a
+    /// report with a way back. Keeping the user's link silently (the
+    /// pre-bn-ihi4h behaviour) is a violation.
     #[test]
-    fn user_symlink_over_mode_only_merge_change_is_kept() {
+    fn user_symlink_over_mode_only_merge_change_is_a_type_conflict() {
         let b = map(&[("a", f("1"))]);
         let u = map(&[("a", l("t"))]);
         let m = map(&[("a", x("1"))]);
-        assert!(judge_replay(&b, &u, &m, &u, "").mismatches.is_empty());
+        let report = "  WARNING: 1 path(s) in 'default' have a type conflict\n    a\n      restore yours: maw ws recover --ref R --restore-file a\n";
+        assert!(judge_replay(&b, &u, &m, &m, report).mismatches.is_empty());
+        assert_eq!(judge_replay(&b, &u, &m, &u, "").mismatches.len(), 1);
         assert_eq!(judge_replay(&b, &u, &m, &m, "").mismatches.len(), 1);
     }
 
@@ -1285,12 +1264,19 @@ mod tests {
         assert_eq!(j.judged, 3);
         // The stale file left behind: a mismatch.
         assert_eq!(judge_replay(&b, &b, &m, &b, "").mismatches.len(), 1);
-        // Only the user turned `d` into a directory: kept, or merged + reported.
+        // Only the user turned `d` into a directory: kept in place. The
+        // merged (= anchor) side on disk is a violation even when reported
+        // (bn-ihi4h: the pre-bn-ihi4h displacement).
         let u = map(&[("d/inner.txt", f("u")), ("o", f("o"))]);
         assert!(judge_replay(&b, &u, &b, &u, "").mismatches.is_empty());
-        let report = "  WARNING: 1 path(s) in 'default' have a type conflict\n    d\n      inspect yours: maw ws recover --ref R --show d\n";
-        assert!(judge_replay(&b, &u, &b, &b, report).mismatches.is_empty());
+        let report = "  WARNING: 1 path(s) in 'default' have a type conflict\n    d\n      restore yours: maw ws recover --ref R --restore-file d\n";
+        assert_eq!(judge_replay(&b, &u, &b, &b, report).mismatches.len(), 1);
         assert_eq!(judge_replay(&b, &u, &b, &b, "").mismatches.len(), 1);
+        // The reverse swap: directory `d/` turned into file `d`.
+        let bd = map(&[("d/inner.txt", f("i")), ("o", f("o"))]);
+        let ud = map(&[("d", f("u")), ("o", f("o"))]);
+        assert!(judge_replay(&bd, &ud, &bd, &ud, "").mismatches.is_empty());
+        assert_eq!(judge_replay(&bd, &ud, &bd, &bd, report).mismatches.len(), 1);
     }
 
     /// bn-3adck: only a SIGABRT death while an `abort` failpoint is armed is

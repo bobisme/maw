@@ -893,7 +893,16 @@ pub fn replay_snapshot_with_merge_protection(
                 .iter()
                 .any(|c| Path::new(&c.path) == p.as_path())
         })
-        .filter(|p| committed_content_changed(ws_path, anchor_epoch, epoch_after, p))
+        .filter(|p| {
+            committed_content_changed(ws_path, anchor_epoch, epoch_after, p)
+                || exec_bit_change_under_local_symlink(
+                    ws_path,
+                    snapshot,
+                    anchor_epoch,
+                    epoch_after,
+                    p,
+                )
+        })
         .cloned()
         .collect();
 
@@ -1510,10 +1519,15 @@ pub(super) fn write_worktree_entry(ws_path: &Path, rel: &Path, entry: &DiskSide)
     }
     let full = ws_path.join(rel);
     match full.symlink_metadata() {
-        Ok(meta) if meta.is_dir() => bail!(
-            "refusing to replace directory {} with a file or symlink",
-            full.display()
-        ),
+        // bn-ihi4h: a directory holding nothing but empty directories (what
+        // is left of a tracked directory once its files are deleted, e.g. the
+        // user turned `d/` into file `d`) is no data and may be replaced.
+        Ok(meta) if meta.is_dir() => remove_empty_dir_tree(&full).with_context(|| {
+            format!(
+                "refusing to replace non-empty directory {} with a file or symlink",
+                full.display()
+            )
+        })?,
         Ok(_) => {
             std::fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
         }
@@ -1534,6 +1548,23 @@ pub(super) fn write_worktree_entry(ws_path: &Path, rel: &Path, entry: &DiskSide)
             set_file_mode(&file, *mode).with_context(|| format!("chmod {}", full.display()))
         }
     }
+}
+
+/// Remove `dir` if it holds nothing but (nested) empty directories. Never
+/// follows a symlink; anything else in the tree fails the call.
+fn remove_empty_dir_tree(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_empty_dir_tree(&entry.path())?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::DirectoryNotEmpty,
+                format!("{} is not empty", dir.display()),
+            ));
+        }
+    }
+    std::fs::remove_dir(dir)
 }
 
 #[cfg(unix)]
@@ -1694,6 +1725,13 @@ fn split_directory_collisions(
     };
     let ours_oid = resolve(epoch_after)?;
     let theirs_oid = resolve(&snapshot.oid)?;
+    // The snapshot's own base: `stash_apply` replays base -> snapshot.
+    let base_oid = *repo
+        .read_commit(theirs_oid)
+        .map_err(|e| anyhow::anyhow!("read snapshot commit: {e}"))?
+        .parents
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("snapshot {} has no parent", snapshot.oid))?;
 
     let rel_of = |path: &Path| path.to_str().map(|p| p.replace('\\', "/"));
     let mut colliding: Vec<&PathBuf> = Vec::new();
@@ -1702,10 +1740,7 @@ fn split_directory_collisions(
             continue;
         };
         if tree_path_shape(&repo, theirs_oid, &rel)? == PathShape::Entry
-            && matches!(
-                tree_path_shape(&repo, ours_oid, &rel)?,
-                PathShape::Tree | PathShape::Blocked { .. }
-            )
+            && collision_region_changed(&repo, base_oid, ours_oid, &rel)?
         {
             colliding.push(path);
         }
@@ -1759,6 +1794,59 @@ fn split_directory_collisions(
 
     let filtered = snapshot_without_paths(&repo, snapshot, theirs_oid, &dropped)?;
     Ok((conflicts, filtered))
+}
+
+/// Whether the merged tree `ours` is in the way of an entry at `rel` (a
+/// directory there, or a file or symlink where one of its parent directories
+/// would go) AND the merge changed that obstacle relative to `base`.
+///
+/// bn-ihi4h: when the obstacle is identical in `base` and `ours`, the merge
+/// left the region alone: the user's own change (file `p` -> directory `p/`,
+/// directory `d/` -> file or symlink `d`) replays onto the merged tree
+/// exactly as onto the base, so it is not a collision and stays in place,
+/// like any uncommitted change to a path the merge did not touch. A gitlink
+/// obstacle always collides (`stash_apply` cannot remove a submodule).
+fn collision_region_changed(
+    repo: &maw_git::GixRepo,
+    base: maw_git::GitOid,
+    ours: maw_git::GitOid,
+    rel: &str,
+) -> Result<bool> {
+    let obstacle = match tree_path_shape(repo, ours, rel)? {
+        PathShape::Tree => rel.to_owned(),
+        PathShape::Blocked { depth, .. } => rel
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .take(depth)
+            .collect::<Vec<_>>()
+            .join("/"),
+        PathShape::Absent | PathShape::Entry => return Ok(false),
+    };
+    let entry = |commit: maw_git::GitOid| {
+        repo.find_entry_at_path(commit, &obstacle)
+            .map_err(|e| anyhow::anyhow!("read '{obstacle}' at {commit}: {e}"))
+    };
+    let ours_entry = entry(ours)?;
+    if matches!(ours_entry, Some((maw_git::EntryMode::Commit, _))) {
+        return Ok(true);
+    }
+    Ok(entry(base)? != ours_entry)
+}
+
+/// Whether the merge changed the region that makes the user's entry at
+/// `path` collide with the merged tree `epoch_after` (see
+/// [`collision_region_changed`]); the base is `anchor`. `None` if a tree
+/// cannot be read. (bn-ihi4h)
+pub fn is_changed_collision_at(
+    repo: &maw_git::GixRepo,
+    anchor: &str,
+    epoch_after: &str,
+    path: &Path,
+) -> Option<bool> {
+    let base = repo.rev_parse(anchor).ok()?;
+    let ours = repo.rev_parse(epoch_after).ok()?;
+    let rel = path.to_str()?.replace('\\', "/");
+    collision_region_changed(repo, base, ours, &rel).ok()
 }
 
 /// Ref that pins the filtered replay commit of [`split_directory_collisions`]
@@ -2189,6 +2277,48 @@ fn committed_content_changed(ws_path: &Path, before: &str, after: &str, path: &P
         // Read failure — prefer the safe (driver-aware) path.
         _ => true,
     }
+}
+
+/// Whether the merge flipped only the executable bit of `path` while the
+/// user replaced that file with a symlink (bn-ihi4h). The committed bytes
+/// are the same, so the path is not an overlap by content, but the merged
+/// mode change and the user's type change cannot both stand: it goes
+/// through the symlink/type-change settlement and is reported as a
+/// `type_change` conflict, like any other symlink-vs-file change (bn-2ygs0).
+fn exec_bit_change_under_local_symlink(
+    ws_path: &Path,
+    snapshot: &SnapshotRef,
+    anchor_epoch: &str,
+    epoch_after: &str,
+    path: &Path,
+) -> bool {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return false;
+    };
+    is_symlink_at(&repo, &snapshot.oid, path) == Some(true)
+        && file_mode_changed(&repo, anchor_epoch, epoch_after, path)
+}
+
+/// Whether `path` is a regular file in both commits with a different
+/// executable bit.
+pub fn file_mode_changed(repo: &maw_git::GixRepo, before: &str, after: &str, path: &Path) -> bool {
+    let mode_at = |commit: &str| -> Option<maw_git::EntryMode> {
+        let oid = repo.rev_parse(commit).ok()?;
+        let rel = path.to_str()?.replace('\\', "/");
+        repo.read_blob_at_path(oid, &rel)
+            .ok()?
+            .map(|(mode, _, _)| mode)
+    };
+    matches!(
+        (mode_at(before), mode_at(after)),
+        (
+            Some(maw_git::EntryMode::Blob),
+            Some(maw_git::EntryMode::BlobExecutable)
+        ) | (
+            Some(maw_git::EntryMode::BlobExecutable),
+            Some(maw_git::EntryMode::Blob)
+        )
+    )
 }
 
 /// Whether `path` is a symlink in `commit` (`None` if unreadable).
