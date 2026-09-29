@@ -200,8 +200,11 @@ fn pinned_default_ref(root: &Path) -> String {
 ///
 /// The warning is triggered deterministically: an embedded git dir with no
 /// commit checked out makes `git add -A` (and so `snapshot_working_copy`) fail,
-/// which sends the merge down the force-checkout + in-memory repair path that
-/// prints the recovery pointer.
+/// which sends the merge down the force-checkout fallback. Since bn-2ds48 the
+/// fallback replays the in-memory pin, so the replay is failed too
+/// (`FP_CLEANUP_REPLAY_BEFORE_APPLY`) to reach the repair that prints the
+/// recovery pointer.
+#[cfg(feature = "failpoints")]
 #[test]
 fn bn_1xmk_printed_restore_command_works_verbatim() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -224,9 +227,9 @@ fn bn_1xmk_printed_restore_command_works_verbatim() {
     run_git(&root.join("embedded"), &["init", "-b", "main"]);
     std::fs::write(root.join("embedded").join("x.txt"), "x\n").expect("write embedded file");
 
-    let merge = maw_ok(
-        &root,
-        &[
+    let merge = Command::new(MAW)
+        .current_dir(&root)
+        .args([
             "ws",
             "merge",
             "feat",
@@ -234,8 +237,11 @@ fn bn_1xmk_printed_restore_command_works_verbatim() {
             "default",
             "--message",
             "merge: feat",
-        ],
-    );
+        ])
+        .env("MAW_FP", "FP_CLEANUP_REPLAY_BEFORE_APPLY=error:injected")
+        .output()
+        .expect("run maw");
+    assert!(merge.status.success(), "{}", stderr_of(&merge));
     let err = stderr_of(&merge);
     assert!(
         err.contains("WARNING (bn-1xmk)"),

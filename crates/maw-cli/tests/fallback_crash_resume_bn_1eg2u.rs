@@ -203,9 +203,8 @@ fn crash_inside_fallback_recovers_user_edits() {
     setup(live);
     let out = merge_a(live, Some(FAIL_SNAPSHOT));
     assert!(out.status.success(), "live merge:\n{}", combined(&out));
-    // (The live fallback cannot replay shared.txt — the merge changed it —
-    // so only its op trail is compared; the resumed update replays the pin
-    // with the driver-aware 3-way merge and ends better off.)
+    // bn-2ds48: the live fallback replays the pin like the resumed update.
+    assert_target_state(live, &combined(&out));
     let live_kinds = default_op_kinds(live);
 
     for recovery_snapshot_fails in [false, true] {
@@ -362,4 +361,104 @@ fn resume_after_pre_checkout_crash_lists_only_new_edits() {
     );
     std::fs::remove_file(root.join("after-crash.txt")).expect("rm after-crash");
     assert_target_state(root, &text);
+}
+
+/// bn-2ds48: the live (uncrashed) snapshot-failed fallback replays the
+/// in-memory pin with the same driver-aware 3-way merge as a resumed update:
+/// the user's hunk and the merge's hunk of the same file both survive.
+#[test]
+fn live_fallback_merges_user_and_merge_hunks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let out = merge_a(root, Some(FAIL_SNAPSHOT));
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("snapshot_working_copy failed"),
+        "the fallback must run:\n{text}"
+    );
+    assert!(
+        !text.contains("could not be replayed"),
+        "nothing is left unreplayed:\n{text}"
+    );
+    assert_target_state(root, &text);
+    assert!(
+        !root
+            .join(".maw/manifold/target-checkout-default.json")
+            .exists(),
+        "{text}"
+    );
+}
+
+/// bn-2ds48: when the user and the merge edit the SAME hunk, the live
+/// fallback leaves conflict markers holding both sides and reports the path
+/// as a local-vs-merge conflict, exactly like the normal replay.
+#[test]
+fn live_fallback_conflicting_hunks_give_markers_and_report() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    std::fs::write(root.join("shared.txt"), "1-user\n2\n3\n4\n5\n6\n7\n8\n9\n")
+        .expect("conflicting edit");
+    let out = merge_a(root, Some(FAIL_SNAPSHOT));
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("snapshot_working_copy failed"),
+        "the fallback must run:\n{text}"
+    );
+    let shared = std::fs::read_to_string(root.join("shared.txt")).expect("shared.txt");
+    assert!(
+        shared.contains("<<<<<<<") && shared.contains(">>>>>>>"),
+        "conflict markers expected:\n{shared}\n---\n{text}"
+    );
+    assert!(
+        shared.contains("1-a") && shared.contains("1-user"),
+        "both sides must be in the markers:\n{shared}\n---\n{text}"
+    );
+    assert!(
+        text.contains("local-vs-merge conflicts") && text.contains("shared.txt"),
+        "the conflict must be reported:\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).expect("f.txt"),
+        "user edit\n",
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.txt")).expect("new.txt"),
+        "untracked user file\n",
+        "{text}"
+    );
+}
+
+/// bn-2ds48: if the replay of the pin itself fails, the fallback still
+/// repairs the paths the merge left alone from memory and names every
+/// merge-changed path with a command that restores it from the pin.
+#[test]
+fn live_fallback_replay_failure_reports_unreplayed_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup(root);
+    let out = merge_a(
+        root,
+        Some(&format!(
+            "{FAIL_SNAPSHOT};FP_CLEANUP_REPLAY_BEFORE_APPLY=error:injected"
+        )),
+    );
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("could not be replayed"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).expect("f.txt"),
+        "user edit\n",
+        "{text}"
+    );
+    run_printed_restore(root, &text, "shared.txt");
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared.txt")).expect("shared.txt"),
+        "1\n2\n3\n4\n5\n6\n7\n8\n9-user\n",
+        "{text}"
+    );
 }

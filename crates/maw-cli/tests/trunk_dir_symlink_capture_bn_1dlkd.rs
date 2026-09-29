@@ -297,9 +297,14 @@ fn fallback_fidelity_restore_command_quotes_filename() {
     maw(root, &["epoch", "sync"]);
     maw(root, &["ws", "sync", "wa"]);
     std::fs::write(root.join(filename), "user notes\n").expect("edit notes");
+    // bn-2ds48: the fallback now replays the pin; fail that replay so the
+    // fidelity repair (and its restore command) is what puts the edit back.
     let out = merge_wa(
         root,
-        Some("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:injected"),
+        Some(
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:injected;\
+             FP_CLEANUP_REPLAY_BEFORE_APPLY=error:injected",
+        ),
     );
     let text = combined(&out);
     assert!(out.status.success(), "{text}");
@@ -483,7 +488,7 @@ fn fallback_capture_never_reads_through_a_symlinked_parent() {
     // The report must describe the user's side of d/inner.txt truthfully:
     // not the link target's file, and (bn-1eg2u) not a bare "deleted".
     assert!(
-        text.contains("    d/inner.txt\n      yours (uncommitted): replaced by symlink d"),
+        text.contains("    d/inner.txt\n      merged (wa): regular file\n      yours (uncommitted): replaced by symlink d"),
         "d/inner.txt is replaced by the user's symlink d, not the link target's file:\n{text}"
     );
     match link_target(&root.join("d")) {

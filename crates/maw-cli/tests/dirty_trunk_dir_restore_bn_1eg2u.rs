@@ -416,7 +416,9 @@ fn fallback_local_dir_over_merged_file_restores_in_one_step() {
     let text = merge_with_failed_snapshot(root);
     assert_eq!(read_regular(&root.join("p")), "one\nmerged\n", "{text}");
     assert!(
-        text.contains("yours (uncommitted): replaced by directory p"),
+        text.contains(
+            "    p\n      merged (a): regular file\n      yours (uncommitted): directory"
+        ),
         "the user's side of p is a directory, not a deletion:\n{text}"
     );
     run_printed_restore_ok(root, &text, "p");

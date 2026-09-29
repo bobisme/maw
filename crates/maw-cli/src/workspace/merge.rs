@@ -7504,6 +7504,8 @@ pub fn update_default_workspace(
         })
         .transpose()?;
     let resuming = resumed.is_some();
+    // bn-2ds48: the snapshot failed and the in-memory pin stands in for it.
+    let mut in_fallback = false;
 
     // Step 1: SNAPSHOT — capture dirty state if any.
     // FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT (bn-3jqfk): `error` forces the
@@ -7592,31 +7594,23 @@ pub fn update_default_workspace(
             };
             checkout_intent::write(repo_root, ws_name, &intent)
                 .context("cannot record target checkout intent; keep the merge journal and retry maw ws merge --recover")?;
-            eprintln!("  Falling back to force checkout (recovering trunk edits from memory)...");
+            eprintln!("  Falling back to force checkout (replaying trunk edits from memory)...");
             force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
             // FP: crash inside the snapshot-failed fallback, after its force
-            // checkout and before the repair from memory (bn-1eg2u). The tree
+            // checkout and before the replay of the pin (bn-1eg2u). The tree
             // is the merged tree; the user's edits exist only in the pin.
             maw::fp!("FP_CLEANUP_FALLBACK_AFTER_CHECKOUT")?;
-            lfs_post_checkout(default_ws_path, epoch_after);
-            verify_trunk_replay_fidelity(
-                default_ws_path,
-                ws_name,
-                &pre_merge_dirty,
-                &anchor_epoch,
-                epoch_after,
-                durable_recovery_ref.as_deref(),
-            );
-            report_fallback_unreplayed(
-                default_ws_path,
-                ws_name,
-                &pre_merge_dirty,
-                &anchor_epoch,
-                epoch_after,
-                durable_recovery_ref.as_deref(),
-            );
-            record_workspace_epoch();
-            return Ok(());
+            // bn-2ds48: from here on the fallback is the resumed update: the
+            // pin (the anchor tree plus exactly the captured entries) is the
+            // snapshot, replayed below with the driver-aware 3-way merge, so
+            // a path the merge also changed is merged, not left at the
+            // merged version. The capture was complete (checked above), so
+            // the replay touches exactly what the pin holds.
+            in_fallback = true;
+            intent
+                .snapshot
+                .as_deref()
+                .map(|oid| adopt_snapshot(repo_root, ws_name, oid))
         }
     };
 
@@ -7625,6 +7619,7 @@ pub fn update_default_workspace(
     // clean replay too.
     if let Some(snap) = &snapshot
         && !resuming
+        && !in_fallback
     {
         durable_recovery_ref =
             pin_recovery_ref_from_oid(repo_root, ws_name, &snap.oid).or_else(|| {
@@ -7635,7 +7630,7 @@ pub fn update_default_workspace(
     // Persist replay intent BEFORE snapshot cleanup changes the tree. An
     // interrupted cleanup must resume from this snapshot, not snapshot the
     // partially cleaned tree as if it were the user's original edits.
-    if !resuming {
+    if !resuming && !in_fallback {
         let intent = checkout_intent::CheckoutIntent {
             epoch_after: epoch_after.to_owned(),
             anchor: anchor_epoch.clone(),
@@ -7815,6 +7810,18 @@ pub fn update_default_workspace(
         Err(e) => {
             // Replay hard-failed. Snapshot ref is kept for recovery.
             eprintln!("  WARNING: replay_snapshot failed: {e:#}");
+            if in_fallback {
+                // bn-2ds48: name each merge-changed path left at the merged
+                // version, with its restore command from the pin.
+                report_fallback_unreplayed(
+                    default_ws_path,
+                    ws_name,
+                    &pre_merge_dirty,
+                    &anchor_epoch,
+                    epoch_after,
+                    durable_recovery_ref.as_deref(),
+                );
+            }
             eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
             eprintln!(
                 "  To recover: git -C {} stash apply {}",
@@ -7897,8 +7904,7 @@ fn resume_interrupted_checkout(
     Option<ResidualPin>,
 )> {
     use super::working_copy::{
-        SnapshotRef, clean_snapshotted_working_copy, cleanup_snapshot, snapshot_ref_name,
-        snapshot_working_copy_preserving_tree,
+        clean_snapshotted_working_copy, cleanup_snapshot, snapshot_working_copy_preserving_tree,
     };
 
     let source = intent
@@ -7983,27 +7989,36 @@ fn resume_interrupted_checkout(
 
     // `snapshot_working_copy` moved the ephemeral snapshot ref; point it back
     // at the interrupted run's snapshot (kept on a conflicted replay).
-    let snapshot = intent.snapshot.as_ref().map(|oid| {
-        let ref_name = snapshot_ref_name(ws_name);
-        match GitOid::new(oid) {
-            Ok(git_oid) => {
-                if let Err(e) = maw_core::refs::write_ref(repo_root, &ref_name, &git_oid) {
-                    tracing::warn!("failed to restore snapshot ref '{ref_name}': {e}");
-                }
-            }
-            Err(e) => tracing::warn!("invalid snapshot OID '{oid}' in checkout intent: {e}"),
-        }
-        SnapshotRef {
-            oid: oid.clone(),
-            ref_name,
-        }
-    });
+    let snapshot = intent
+        .snapshot
+        .as_deref()
+        .map(|oid| adopt_snapshot(repo_root, ws_name, oid));
     if snapshot.is_none()
         && let Err(e) = cleanup_snapshot(repo_root, ws_name)
     {
         tracing::warn!("failed to clean up snapshot ref: {e}");
     }
     Ok((snapshot, intent.recovery_ref.clone(), residual_pin))
+}
+
+/// Point `ws_name`'s ephemeral snapshot ref at `oid` (kept on a conflicted
+/// replay) and return it as the snapshot to replay: the interrupted run's
+/// snapshot when resuming, or the in-memory recovery pin in the
+/// snapshot-failed fallback (bn-2ds48).
+fn adopt_snapshot(repo_root: &Path, ws_name: &str, oid: &str) -> super::working_copy::SnapshotRef {
+    let ref_name = super::working_copy::snapshot_ref_name(ws_name);
+    match GitOid::new(oid) {
+        Ok(git_oid) => {
+            if let Err(e) = maw_core::refs::write_ref(repo_root, &ref_name, &git_oid) {
+                tracing::warn!("failed to restore snapshot ref '{ref_name}': {e}");
+            }
+        }
+        Err(e) => tracing::warn!("invalid snapshot OID '{oid}' in checkout intent: {e}"),
+    }
+    super::working_copy::SnapshotRef {
+        oid: oid.to_owned(),
+        ref_name,
+    }
 }
 
 /// Residual worktree changes a resumed target update found and pinned
@@ -8821,10 +8836,11 @@ fn settle_fidelity_exec_bit(
     }
 }
 
-/// After the snapshot-failed fallback (force checkout + repair from memory):
-/// name every uncommitted trunk path the merge itself changed, whose user
-/// version therefore could not be put back, with the command that restores
-/// it from the in-memory recovery pin. Before bn-3jqfk the fallback said
+/// After the snapshot-failed fallback (force checkout + repair from memory)
+/// whose replay of the recovery pin also failed (bn-2ds48): name every
+/// uncommitted trunk path the merge itself changed, whose user version
+/// therefore could not be put back, with the command that restores it from
+/// the in-memory recovery pin. Before bn-3jqfk the fallback said
 /// nothing about these paths — the user's version was only in the pin.
 fn report_fallback_unreplayed(
     ws_path: &Path,
@@ -8850,7 +8866,7 @@ fn report_fallback_unreplayed(
     }
     eprintln!();
     eprintln!(
-        "  WARNING: {} uncommitted path(s) in '{ws_name}' were also changed by the merge and could not be replayed (the snapshot failed).",
+        "  WARNING: {} uncommitted path(s) in '{ws_name}' were also changed by the merge and could not be replayed (the snapshot failed, and so did the replay of the recovery pin).",
         unreplayed.len()
     );
     eprintln!("  The merged version is on disk. Your version is in the recovery pin:");
