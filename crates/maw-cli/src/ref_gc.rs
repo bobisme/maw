@@ -30,6 +30,24 @@
 //!   would drop a pin younger than [`YOUNG_PIN_SECS`] or a pin of a live
 //!   workspace, refuses without `force` and lists what it would drop
 //!   ([`GcRefused`]). `dry_run` never refuses; it lists the same refs.
+//!
+//! # Undo pins (bn-43x5k)
+//!
+//! `refs/manifold/recovery/undo/*` is not a workspace's namespace: `maw undo`
+//! pins the undone merge result there, and a following `maw undo` (redo)
+//! re-applies it. A pin whose commit is the pending redo's target
+//! ([`crate::undo::pending_redo_target`]) is protected exactly like a live
+//! workspace's pin: kept unless `include_live`, and dropping it needs `force`
+//! (listed as `UNDO`). If the op log cannot be read, every undo pin is
+//! treated as redoable (fail closed). An undo pin no redo references is aged
+//! like any other pin.
+//!
+//! # Destroy records of reused workspace names (bn-43x5k)
+//!
+//! When `include_live` drops a pin of a workspace whose name was reused after
+//! it was destroyed, the old workspace's destroy record that claims the pin is
+//! pruned in the same pass, so `maw ws recover` and `maw doctor`/`fsck` never
+//! see a record claiming a ref gc deleted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -64,8 +82,9 @@ pub struct RefGcReport {
     /// Details of every recovery ref deleted (or, in a dry run, that would
     /// be), in the same order as `deleted_recovery_refs`.
     pub dropped_pins: Vec<PinInfo>,
-    /// Recovery refs of still-existing workspaces that were kept because
-    /// `include_live` was off (bn-wxg28). Counted in `recovery_refs_kept`.
+    /// Recovery refs of still-existing workspaces, and undo pins a pending
+    /// redo still needs, that were kept because `include_live` was off
+    /// (bn-wxg28, bn-43x5k). Counted in `recovery_refs_kept`.
     pub skipped_live_pins: Vec<PinInfo>,
     /// Why this sweep needs `--force` (empty when it does not). Set on a dry
     /// run so the preview can say so; a real run without `force` fails with
@@ -85,6 +104,9 @@ pub struct PinInfo {
     pub workspace: String,
     /// Whether that workspace currently exists.
     pub live: bool,
+    /// An undo pin (`recovery/undo/*`) that a pending `maw undo` (redo)
+    /// still needs (bn-43x5k).
+    pub redoable: bool,
     /// Pin age in seconds, when known.
     pub age_secs: Option<u64>,
 }
@@ -94,12 +116,23 @@ impl PinInfo {
         self.age_secs.is_some_and(|a| a < YOUNG_PIN_SECS)
     }
 
+    /// Kept unless `include_live`; dropping it needs `force`.
+    const fn is_protected(&self) -> bool {
+        self.live || self.redoable
+    }
+
     /// `<ref>  (workspace <ws>[, LIVE], age <age>)` for listings.
     #[must_use]
     pub fn describe(&self) -> String {
         let age = self
             .age_secs
             .map_or_else(|| "unknown".to_string(), format_age);
+        if self.redoable {
+            return format!(
+                "{}  (UNDO pin, still needed by `maw undo` (redo), pin age {age})",
+                self.ref_name
+            );
+        }
         let live = if self.live { ", LIVE workspace" } else { "" };
         format!(
             "{}  (workspace {}{live}, pin age {age})",
@@ -231,10 +264,17 @@ fn force_reasons(drops: &[PinInfo], older_than_days: u64) -> Vec<String> {
             "{young} snapshot(s) were pinned less than 1 day ago"
         ));
     }
-    let live = drops.iter().filter(|p| p.live).count();
+    let live = drops.iter().filter(|p| p.live && !p.redoable).count();
     if live > 0 {
         reasons.push(format!(
             "{live} snapshot(s) belong to workspaces that still exist (--include-live)"
+        ));
+    }
+    let redoable = drops.iter().filter(|p| p.redoable).count();
+    if redoable > 0 {
+        reasons.push(format!(
+            "{redoable} snapshot(s) are UNDO pins that `maw undo` (redo) still needs \
+             (--include-live)"
         ));
     }
     reasons
@@ -502,6 +542,20 @@ pub fn run_with(root: &Path, opts: &RecoveryGcOptions) -> Result<RefGcReport> {
     let record_claim_times = destroy_record_claim_times(root)?;
     let default_names = default_workspace_names(root);
 
+    // bn-43x5k: which undo pins a pending redo still needs. Read only when an
+    // undo pin exists; an unreadable op log protects every undo pin.
+    let undo_prefix = format!("{recovery_prefix}{}/", crate::undo::UNDO_PIN_NAMESPACE);
+    let redo_target = if recovery_refs
+        .iter()
+        .any(|(n, _)| n.as_str().starts_with(&undo_prefix))
+    {
+        crate::undo::pending_redo_target(root).map_or(RedoTarget::Unknown, |t| {
+            RedoTarget::Known(t.map(|o| o.as_str().to_string()))
+        })
+    } else {
+        RedoTarget::Known(None)
+    };
+
     for (ref_name, oid) in &recovery_refs {
         let name = ref_name.as_str();
         let workspace = name
@@ -515,15 +569,17 @@ pub fn run_with(root: &Path, opts: &RecoveryGcOptions) -> Result<RefGcReport> {
         let pin_ts = pin_created_at_from_ref_name(name)
             .or_else(|| record_claim_times.get(name).copied())
             .or_else(|| get_commit_timestamp(&repo, *oid));
+        let redoable = name.starts_with(&undo_prefix) && redo_target.references(&oid.to_string());
         let info = PinInfo {
             ref_name: name.to_string(),
             workspace,
             live,
+            redoable,
             age_secs: pin_ts.map(|ts| now.saturating_sub(ts)),
         };
         match pin_ts {
             Some(ts) if ts <= cutoff => {
-                if live && !include_live {
+                if info.is_protected() && !include_live {
                     report.recovery_refs_kept += 1;
                     report.skipped_live_pins.push(info);
                 } else {
@@ -576,6 +632,23 @@ pub fn run_with(root: &Path, opts: &RecoveryGcOptions) -> Result<RefGcReport> {
     Ok(report)
 }
 
+/// What the op log says about the pending redo (bn-43x5k).
+enum RedoTarget {
+    /// The commit a pending redo re-applies (`None`: no redo pending).
+    Known(Option<String>),
+    /// The op log could not be read: treat every undo pin as needed.
+    Unknown,
+}
+
+impl RedoTarget {
+    fn references(&self, oid: &str) -> bool {
+        match self {
+            Self::Known(t) => t.as_deref() == Some(oid),
+            Self::Unknown => true,
+        }
+    }
+}
+
 /// Prune destroy records so they stay coherent with recovery refs.
 ///
 /// Driven by two ref-name sets from the recovery-ref pass:
@@ -590,8 +663,11 @@ pub fn run_with(root: &Path, opts: &RecoveryGcOptions) -> Result<RefGcReport> {
 /// - claimed ref is already gone → the record is desynced; prune it when it is
 ///   older than the cutoff.
 ///
-/// `none`-mode records (no snapshot pinned) and records for still-existing
-/// workspaces are never touched.
+/// `none`-mode records (no snapshot pinned) are never touched. Records of a
+/// workspace that exists again (a reused name) are touched only when their
+/// claimed ref is swept in this pass (`--include-live`, bn-43x5k): the record
+/// belongs to the old, destroyed workspace and would otherwise claim a ref gc
+/// just deleted.
 fn prune_desynced_destroy_records(
     root: &Path,
     existing_recovery_refs: &HashSet<String>,
@@ -603,10 +679,7 @@ fn prune_desynced_destroy_records(
     let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
 
     for ws in destroy_record::list_destroyed_workspaces(root)? {
-        // Never touch records for a workspace that currently exists.
-        if flavor.workspace_path(root, &ws).exists() {
-            continue;
-        }
+        let live = flavor.workspace_path(root, &ws).exists();
         for filename in destroy_record::list_record_files(root, &ws)? {
             let Ok(record) = destroy_record::read_record(root, &ws, &filename) else {
                 continue;
@@ -617,8 +690,12 @@ fn prune_desynced_destroy_records(
             };
             let prune = if swept_recovery_refs.contains(claimed) {
                 // Ref is being swept in this pass — prune the record too so no
-                // unpinned-but-claimed state is ever created.
+                // unpinned-but-claimed state is ever created. This holds for a
+                // reused (live) name as well (bn-43x5k).
                 true
+            } else if live {
+                // Otherwise never touch records of a workspace that exists.
+                false
             } else if existing_recovery_refs.contains(claimed) {
                 // Ref still pinned and newer than the cutoff — keep both.
                 false
@@ -745,8 +822,8 @@ pub fn run_cli(root: &Path, opts: &RecoveryGcOptions) -> Result<()> {
     let live_note = || {
         if !report.skipped_live_pins.is_empty() {
             println!(
-                "Kept {} recovery snapshot(s) of workspaces that still exist \
-                 (to include them: {}):",
+                "Kept {} recovery snapshot(s) of workspaces that still exist or UNDO pins \
+                 a redo still needs (to include them: {}):",
                 report.skipped_live_pins.len(),
                 gc_command(
                     &RecoveryGcOptions {
@@ -1619,6 +1696,7 @@ mod tests {
             ref_name: "refs/manifold/recovery/w/x".into(),
             workspace: "w".into(),
             live: false,
+            redoable: false,
             age_secs: Some(YOUNG_PIN_SECS - 1),
         };
         let old = PinInfo {
@@ -1633,6 +1711,39 @@ mod tests {
         );
         let live = PinInfo { live: true, ..old };
         assert_eq!(force_reasons(&[live], 7).len(), 1);
+    }
+
+    #[test]
+    fn redoable_undo_pin_needs_force_and_is_described_as_undo() {
+        // bn-43x5k: an old undo pin a redo still needs is protected like a
+        // live pin but reported as UNDO, never as a LIVE workspace.
+        let pin = PinInfo {
+            ref_name: "refs/manifold/recovery/undo/x".into(),
+            workspace: "undo".into(),
+            live: false,
+            redoable: true,
+            age_secs: Some(YOUNG_PIN_SECS * 60),
+        };
+        assert!(pin.is_protected());
+        let reasons = force_reasons(std::slice::from_ref(&pin), 30);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("UNDO"), "{reasons:?}");
+        let d = pin.describe();
+        assert!(d.contains("UNDO") && !d.contains("LIVE"), "{d}");
+        let plain = PinInfo {
+            redoable: false,
+            ..pin
+        };
+        assert!(!plain.is_protected());
+        assert!(force_reasons(&[plain], 30).is_empty());
+    }
+
+    #[test]
+    fn redo_target_unknown_protects_every_undo_pin() {
+        assert!(RedoTarget::Unknown.references("abc"));
+        assert!(!RedoTarget::Known(None).references("abc"));
+        assert!(RedoTarget::Known(Some("abc".into())).references("abc"));
+        assert!(!RedoTarget::Known(Some("abd".into())).references("abc"));
     }
 
     #[test]

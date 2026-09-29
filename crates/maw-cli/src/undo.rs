@@ -55,6 +55,13 @@ const DEFAULT_WS: &str = "default";
 const UNDO_TAG: &str = "maw-undo";
 const REDO_TAG: &str = "maw-redo";
 
+/// Recovery namespace of the pins `maw undo` writes (bn-43x5k).
+///
+/// The undone merge result is pinned at `refs/manifold/recovery/undo/<ts>`. It is not a
+/// workspace; `maw gc --recovery-snapshots` classifies these pins with
+/// [`pending_redo_target`].
+pub const UNDO_PIN_NAMESPACE: &str = "undo";
+
 /// Which way the next `maw undo` moves the epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
@@ -270,6 +277,43 @@ fn build_plan(root: &Path, ops: &[RepoOp], op_id: Option<&str>) -> Result<Plan> 
     }
 }
 
+/// The merge result a `maw undo` (redo) would re-apply right now, if the next
+/// `maw undo` is a redo (bn-43x5k).
+///
+/// This is exactly the decision [`build_plan`] makes with no op id: the most
+/// recent epoch-mutating op is a `maw-undo` compensation, and the redo moves
+/// the epoch forward to that merge's `epoch_after`. The undo pins
+/// (`refs/manifold/recovery/undo/*`) pointing at this commit are what keep it
+/// reachable, so `maw gc` must not drop them silently. `None` means no redo is
+/// pending and no undo pin is referenced.
+///
+/// The epoch rail (`gather_refusals`) is deliberately not applied: a redo
+/// that is only temporarily blocked still counts as pending (fail closed).
+///
+/// # Errors
+/// Returns an error if the op log cannot be listed or the merge the pending
+/// redo refers to cannot be read.
+pub fn pending_redo_target(root: &Path) -> Result<Option<GitOid>> {
+    let ops = collect_repo_ops(root)?;
+    let Some(op) = ops.iter().find(|o| is_epoch_op(&o.payload)) else {
+        return Ok(None);
+    };
+    let OpPayload::Compensate { target_op, reason } = &op.payload else {
+        return Ok(None);
+    };
+    if !reason.starts_with(UNDO_TAG) {
+        return Ok(None);
+    }
+    let merge = read_operation(root, target_op)
+        .map_err(|e| anyhow::anyhow!("read the merge a pending redo refers to: {e}"))?;
+    let OpPayload::Merge { epoch_after, .. } = merge.payload else {
+        bail!("the last undo does not reference a merge");
+    };
+    GitOid::new(epoch_after.as_str())
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// Is this payload an epoch-level operation that `maw undo` toggles over?
 fn is_epoch_op(payload: &OpPayload) -> bool {
     match payload {
@@ -431,7 +475,7 @@ fn execute(root: &Path, plan: &Plan) -> Result<()> {
     // subsequent `maw undo` (redo) replays.
     let ea_oid = GitOid::new(plan.epoch_after.as_str())
         .map_err(|e| anyhow::anyhow!("invalid epoch_after: {e}"))?;
-    let undo_pin = recovery_ref("undo", &now_timestamp_iso8601_precise());
+    let undo_pin = recovery_ref(UNDO_PIN_NAMESPACE, &now_timestamp_iso8601_precise());
     if let Err(e) = refs::write_ref(root, &undo_pin, &ea_oid) {
         bail!("Failed to pin the merge result before undoing (aborted, nothing changed): {e}");
     }

@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## Unreleased
+
+**Recovery snapshots**
+- **`maw gc --recovery-snapshots` keeps the `maw undo` pin that a redo still needs (bn-43x5k).** `refs/manifold/recovery/undo/*` pins are no longer treated as a destroyed workspace named `undo`. The pin of the merge result that the next `maw undo` (redo) re-applies is protected like a live workspace's pin: only `--include-live` considers it, dropping it needs `--force`, and the refusal listing marks it `UNDO`. If the op log cannot be read, every undo pin is protected. After the redo, or once a newer merge replaces the undo, an undo pin ages out like any other snapshot.
+- **`--include-live --force` no longer leaves a destroy record that claims a deleted ref (bn-43x5k).** When the sweep drops a snapshot of a workspace whose name was reused, it removes the old workspace's destroy record for that snapshot in the same pass. Before, `maw ws recover` showed the record with a missing ref, and after the new workspace was destroyed, `maw doctor`/`maw fsck` reported it as unpinned and `fsck --repair` could pin the swept snapshot again.
+
 ## v1.0.0-pre.18 (2026-09-28)
 
 Eighteenth dogfood pre-release. It fixes data-loss bugs found by running the deterministic-simulation tests on the consolidated layout for the first time and by widening the SG1 soak to cover uncommitted trunk edits across merges. Several of these bugs shipped in pre.17 and earlier. **Upgrading is strongly recommended.** One behaviour change affects scripts: `maw gc --recovery-snapshots --older-than 0` now needs `--force`.

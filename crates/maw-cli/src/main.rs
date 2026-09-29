@@ -394,6 +394,16 @@ enum Commands {
     ///     snapshot pinned less than 1 day ago, or a live workspace's
     ///     snapshot, deletes nothing and lists the refs (workspace, pin age)
     ///     it would drop. Re-run with --force to drop them.
+    ///   - refs/manifold/recovery/undo/* are `maw undo` pins, not a workspace's.
+    ///     The pin of the merge result a pending redo (the next `maw undo`)
+    ///     would re-apply is kept like a live workspace's pin: only
+    ///     --include-live considers it, dropping it needs --force, and
+    ///     listings mark it UNDO. Once no redo references an undo pin (after
+    ///     the redo, or a newer merge), it ages out like any other snapshot.
+    ///   - When --include-live --force drops a snapshot of a workspace whose
+    ///     name was reused, the old workspace's destroy record for that
+    ///     snapshot is removed in the same pass, so `maw ws recover` and
+    ///     `maw doctor`/`maw fsck` never point at the deleted ref.
     ///
     /// Examples:
     ///   maw gc                              # epoch GC + dangling head-ref cleanup
@@ -421,12 +431,14 @@ enum Commands {
 
         /// With --recovery-snapshots: also remove snapshots of workspaces that
         /// still exist (e.g. refs/manifold/recovery/default/* dirty-trunk
-        /// pins). Needs --force to apply.
+        /// pins) and UNDO pins a pending redo still needs. Needs --force to
+        /// apply.
         #[arg(long, requires = "recovery_snapshots")]
         include_live: bool,
 
         /// With --recovery-snapshots: allow dropping snapshots pinned less
-        /// than 1 day ago, live workspaces' snapshots, or everything with
+        /// than 1 day ago, live workspaces' snapshots, UNDO pins a redo still
+        /// needs, or everything with
         /// --older-than 0. Without it such a run deletes nothing and lists
         /// what it would drop.
         #[arg(long, requires = "recovery_snapshots")]
