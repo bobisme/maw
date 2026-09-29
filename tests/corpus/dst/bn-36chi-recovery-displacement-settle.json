@@ -1,0 +1,224 @@
+{
+  "seed": 4294972401,
+  "crash_phase": "validate",
+  "num_steps": 14,
+  "num_workspaces": 6,
+  "create_candidate": false,
+  "expected": "pass",
+  "description": "bn-36chi: pre.18 soak STOP (seed 4294972401, minimized 14 steps). A dirty-trunk symlink on a path the last merge turns into a regular file; that merge dies before its target update (FP_VALIDATE_BEFORE_CHECK), so the end-of-drive drain recovers it. The recovery keeps the merged file and REPORTS the type conflict. The harness settled committed paths (disk == HEAD) BEFORE judging the displacement oracle on the recovery, dropping every path the recovery displaced, so TrunkDirtyDisplacement judged 0 entries and the vacuity guard raised HarnessError(vacuous_displacement). Oracle gap, not a maw bug. Must be Clean with displacement verdicts.",
+  "plan": {
+    "seed": 4294972401,
+    "profile": {
+      "concurrency_degree": 1,
+      "mid_op_kill_prob": 0.0,
+      "overlapping_edit_rate": 0.0,
+      "stale_workspace_rate": 0.0,
+      "advance_weight": 0,
+      "escape_weight": 0,
+      "corrupt_weight": 0,
+      "dirty_trunk_crash_pct": 0,
+      "trunk_weight": 0
+    },
+    "steps": [
+      {
+        "index": 0,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-0",
+          "from": {
+            "kind": "main"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767225600
+      },
+      {
+        "index": 1,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-4",
+          "from": {
+            "kind": "main"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767225911
+      },
+      {
+        "index": 2,
+        "op": {
+          "op": "dirty_trunk_write",
+          "files": [
+            {
+              "path": "shared/file-2.txt",
+              "content": "dangling-a",
+              "kind": "symlink"
+            }
+          ]
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767225952
+      },
+      {
+        "index": 3,
+        "op": {
+          "op": "destroy",
+          "ws": "ws-4",
+          "force": false
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226046
+      },
+      {
+        "index": 4,
+        "op": {
+          "op": "recover",
+          "ws": "ws-4",
+          "to": "ws-5"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226084
+      },
+      {
+        "index": 5,
+        "op": {
+          "op": "destroy",
+          "ws": "ws-5",
+          "force": false
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226102
+      },
+      {
+        "index": 6,
+        "op": {
+          "op": "recover",
+          "ws": "ws-5",
+          "to": "ws-8"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226252
+      },
+      {
+        "index": 7,
+        "op": {
+          "op": "destroy",
+          "ws": "ws-8",
+          "force": false
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226407
+      },
+      {
+        "index": 8,
+        "op": {
+          "op": "recover",
+          "ws": "ws-8",
+          "to": "ws-16"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227016
+      },
+      {
+        "index": 9,
+        "op": {
+          "op": "destroy",
+          "ws": "ws-16",
+          "force": true
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227018
+      },
+      {
+        "index": 10,
+        "op": {
+          "op": "recover",
+          "ws": "ws-16",
+          "to": "ws-19"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227289
+      },
+      {
+        "index": 11,
+        "op": {
+          "op": "edit_files",
+          "ws": "ws-19",
+          "files": [
+            {
+              "path": "shared/file-2.txt",
+              "content": "ws=ws-19\nseed-slot=332222666729688012\nidx=2\n"
+            },
+            {
+              "path": "ws-19/file-0.txt",
+              "content": "ws=ws-19\nseed-slot=6731041942177002446\nidx=0\n"
+            },
+            {
+              "path": "ws-19/file-1.txt",
+              "content": "ws=ws-19\nseed-slot=11808605581103368198\nidx=1\n"
+            }
+          ]
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227421
+      },
+      {
+        "index": 12,
+        "op": {
+          "op": "commit",
+          "ws": "ws-19",
+          "msg": "commit @ ws-19 #3595033371"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227515
+      },
+      {
+        "index": 13,
+        "op": {
+          "op": "merge",
+          "srcs": [
+            "ws-19"
+          ],
+          "into": {
+            "kind": "default"
+          },
+          "destroy": false
+        },
+        "fault": {
+          "kind": "failpoint",
+          "name": "FP_VALIDATE_BEFORE_CHECK",
+          "phase": "validate"
+        },
+        "git_time": 1767227575
+      }
+    ]
+  },
+  "planted": [],
+  "replay_command": "SG1_REPLAY_BUNDLE=tests/corpus/dst/bn-36chi-recovery-displacement-settle.json MAW_INPROC_DEBUG=1 cargo test -p maw-assurance --features oracles --test sg1_dst sg1_replay_bundle -- --ignored --exact --nocapture"
+}

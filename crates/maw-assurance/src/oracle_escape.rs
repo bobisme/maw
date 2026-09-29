@@ -594,6 +594,13 @@ impl TrunkDirtyDisplacement {
         self.pending.len()
     }
 
+    /// `Some(on_disk)` iff `path` is still expected back: whether its
+    /// recorded entry is what sits at `abs`. `None` = not tracked.
+    #[must_use]
+    pub fn expects_on_disk(&self, path: &str, abs: &Path) -> Option<bool> {
+        self.pending.get(path).map(|e| entry_on_disk(abs, e))
+    }
+
     /// Per-path verdicts rendered so far (0 = the oracle judged nothing).
     #[must_use]
     pub const fn judged(&self) -> u64 {
@@ -796,12 +803,40 @@ fn classify_report(output: &str, path: &str, residual_ok: bool) -> Report {
     {
         return Report::Displaced;
     }
-    let names_path = output.lines().any(|line| line_names_path(line, path));
-    if names_path && RECOVERY_HANDLES.iter().any(|h| output.contains(h)) {
+    if report_sections(output).any(|section| {
+        section.iter().any(|line| line_names_path(line, path))
+            && section
+                .iter()
+                .any(|line| RECOVERY_HANDLES.iter().any(|h| line.contains(h)))
+    }) {
         Report::Displaced
     } else {
         Report::Silent
     }
+}
+
+/// bn-36chi: the output split into report sections. Every per-path report
+/// the target update prints (type conflicts, local-vs-merge conflicts, the
+/// stash-replay conflict list, the snapshot-failed "could not be replayed"
+/// list) opens with its own `WARNING:` line and carries its recovery handles
+/// inside the same section, so "reported" = some ONE section names the path
+/// AND carries a handle. Before, any line naming the path anywhere plus any
+/// handle anywhere counted, so a progress line naming a displaced path next
+/// to an unrelated conflict's `maw ws resolve` acknowledged it.
+fn report_sections(output: &str) -> impl Iterator<Item = Vec<&str>> {
+    let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in output.lines() {
+        if line.trim_start().starts_with("WARNING:")
+            && let Some(last) = sections.last()
+            && !last.is_empty()
+        {
+            sections.push(Vec::new());
+        }
+        if let Some(last) = sections.last_mut() {
+            last.push(line);
+        }
+    }
+    sections.into_iter()
 }
 
 // ---------------------------------------------------------------------------
@@ -1939,6 +1974,19 @@ mod tests {
         // The replay model never reads the residual notice as whole-snapshot.
         assert!(!has_whole_snapshot_notice(residual));
         assert_eq!(report_for(residual, "pre.txt"), Report::Silent);
+    }
+
+    /// bn-36chi: "reported" needs the path AND a recovery handle in the same
+    /// report section; a path named in one place and a handle for another
+    /// path's conflict elsewhere is not a report.
+    #[test]
+    fn report_needs_path_and_handle_in_one_section() {
+        let unrelated = "  progress: touching shared/a.txt\n\n  WARNING: 1 file(s) in 'default' have local-vs-merge conflicts.\n    [ content] shared/b.txt\n    maw ws resolve default --list\n";
+        assert_eq!(report_for(unrelated, "shared/a.txt"), Report::Silent);
+        assert_eq!(report_for(unrelated, "shared/b.txt"), Report::Displaced);
+        let two = "  WARNING: type conflict\n    shared/a.txt\n      restore yours: maw ws recover --ref R --restore-file shared/a.txt\n  WARNING: 1 file(s) have conflicts\n    [ content] shared/b.txt\n    maw ws resolve default --list\n";
+        assert_eq!(report_for(two, "shared/a.txt"), Report::Displaced);
+        assert_eq!(report_for(two, "shared/b.txt"), Report::Displaced);
     }
 
     /// bn-3jqfk: a retargeted symlink must come back as a link to the user's

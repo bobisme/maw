@@ -50,9 +50,12 @@ begin() {
     "${1:-$SG1_NIGHTLY_SEEDS}" "${2:-$SG1_NIGHTLY_STEPS}" "${3:-$SG1_BASE_SEED}"
 }
 # The real harness's end line: the allocated range plus the canonical seed.
+# The evidence counters are what a healthy trunk-tier harness reports for
+# SLOT_SEEDS=10 (bn-36chi evidence floor: all at or above it).
+TRUNK_OK="trunk_updates=30 trunk_crashes=6 dirty_trunk_merges=27 displacement_checks=91 replay_checks=200 trunk_drains=1"
 end_clean() {
   local n=$(( ${1:-$SG1_NIGHTLY_SEEDS} + 1 ))
-  echo "[sg1] nightly soak end: seeds=$n clean=$n violations=0 driver_total=1s wall=1s"
+  echo "[sg1] nightly soak end: seeds=$n clean=$n violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 $TRUNK_OK harness_errors=0"
 }
 case "${STUB_MODE:?}" in
   clean)
@@ -81,7 +84,18 @@ case "${STUB_MODE:?}" in
     exit 0 ;;
   clean_evidence)
     begin
-    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 trunk_writes=40 trunk_updates=12 trunk_crashes=2 dirty_trunk_merges=9 displacement_checks=31 replay_judgements=10 replay_checks=77 harness_errors=0"
+    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 workspaces_observed=9 commits_observed=6 trunk_writes=40 trunk_updates=12 trunk_crashes=2 dirty_trunk_merges=9 displacement_checks=31 replay_judgements=10 replay_checks=77 trunk_drains=3 harness_errors=0"
+    exit 0 ;;
+  clean_no_trunk)
+    # A pre-bn-1h9ue harness: no trunk counters at all.
+    begin
+    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s"
+    exit 0 ;;
+  clean_no_crashes)
+    # Clean and non-vacuous per seed, but the campaign stopped crashing the
+    # target update (e.g. a generator change zeroed the crash windows).
+    begin
+    echo "[sg1] nightly soak end: seeds=$((SG1_NIGHTLY_SEEDS + 1)) clean=$((SG1_NIGHTLY_SEEDS + 1)) violations=0 driver_total=1s wall=1s oracle_a_checks=55 oracle_b_checks=55 witnesses=17 trunk_updates=30 trunk_crashes=0 dirty_trunk_merges=27 displacement_checks=91 replay_checks=200 trunk_drains=0 harness_errors=0"
     exit 0 ;;
   harness_error)
     echo "[sg1] HARNESS-ERROR seed=3 (oracles did not judge this seed; counted as a violation): HarnessError(..)"
@@ -163,6 +177,15 @@ impl Campaign {
             String::from_utf8_lossy(&out.stderr)
         );
         (out.status.code().unwrap_or(-1), text)
+    }
+
+    /// Append a `KEY=value` line to the campaign's `config.env`.
+    fn config(&self, line: &str) {
+        let p = self.state.join("config.env");
+        let mut cfg = fs::read_to_string(&p).unwrap();
+        cfg.push_str(line);
+        cfg.push('\n');
+        fs::write(p, cfg).unwrap();
     }
 
     fn slot(&self, mode: &str) -> (i32, String) {
@@ -338,7 +361,9 @@ fn clean_rows_record_evidence_totals() {
     let c = Campaign::new();
     let (code, text) = c.slot("clean_evidence");
     assert_eq!(code, 0, "{text}");
-    let (code, text) = c.slot("clean");
+    // A pre-trunk-tier binary only runs with the evidence floor switched off.
+    c.config("TRUNK_EVIDENCE_FLOOR=0");
+    let (code, text) = c.slot("clean_no_trunk");
     assert_eq!(code, 0, "{text}");
     let ledger = c.ledger();
     assert_eq!(ledger.len(), 2);
@@ -353,6 +378,7 @@ fn clean_rows_record_evidence_totals() {
     assert_eq!(new["dirty_trunk_merges"], 9);
     assert_eq!(new["displacement_checks"], 31);
     assert_eq!(new["replay_checks"], 77);
+    assert_eq!(new["trunk_drains"], 3);
     let old: serde_json::Value = serde_json::from_str(&ledger[1]).expect("JSON");
     assert_eq!(old["status"], "clean");
     assert!(old["oracle_a_checks"].is_null(), "{old}");
@@ -455,4 +481,47 @@ fn infra_halt_never_overwrites_a_peer_violation_stop() {
     let status = c.status();
     assert!(status.contains("STOPPED (VIOLATION)"), "{status}");
     assert!(!status.contains("INFRA-HALT"), "{status}");
+}
+
+/// bn-36chi: a clean slot whose dirty-trunk evidence is below the campaign
+/// floor (or missing) does not accrue and STOPs the campaign as a violation:
+/// per-seed vacuity guards cannot see a harness that quietly stopped
+/// crashing, draining or dirtying the trunk.
+#[test]
+fn clean_slots_below_the_trunk_evidence_floor_stop_the_campaign() {
+    if !tools_available() {
+        return;
+    }
+    for (mode, short) in [
+        ("clean_no_crashes", "trunk_crashes=0<1"),
+        ("clean_no_trunk", "trunk_updates=null<10"),
+        ("clean_evidence", ""),
+    ] {
+        let c = Campaign::new();
+        let (code, text) = c.slot(mode);
+        if mode == "clean_evidence" {
+            // 12 >= 10 etc.: at the floor, accrues normally.
+            assert_eq!(code, 0, "{mode}: {text}");
+            assert_eq!(c.num("cumulative"), SLOT_SEEDS * STEPS, "{mode}");
+            assert!(c.stop().is_none(), "{mode}");
+            continue;
+        }
+        assert_eq!(code, 1, "{mode}: {text}");
+        let stop = c.stop().unwrap_or_else(|| panic!("{mode}: must STOP"));
+        assert!(stop.starts_with("VIOLATION:"), "{mode}: {stop}");
+        assert!(stop.contains(short), "{mode}: {stop}");
+        assert_eq!(c.num("cumulative"), 0, "{mode}: must not accrue");
+        let ledger = c.ledger();
+        assert_eq!(ledger.len(), 1, "{mode}");
+        let row: serde_json::Value = serde_json::from_str(&ledger[0]).expect("JSON");
+        assert_eq!(row["status"], "VIOLATION_OR_ERROR", "{mode}");
+        assert_eq!(row["reason"], "evidence_floor", "{mode}");
+        assert!(c.status().contains("STOPPED (VIOLATION)"), "{mode}");
+    }
+    // Explicitly off: a pre-trunk-tier harness accrues.
+    let c = Campaign::new();
+    c.config("TRUNK_EVIDENCE_FLOOR=0");
+    let (code, text) = c.slot("clean_no_trunk");
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(c.num("cumulative"), SLOT_SEEDS * STEPS);
 }

@@ -33,9 +33,9 @@ env:
 
 jobs:
   feature-matrix-and-proptests:
-    name: No-default-features clippy + proptests + Stateright
+    name: No-default-features clippy + proptests + failpoint tests + Stateright
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -49,6 +49,11 @@ jobs:
 
       - name: Merge proptests (--features proptests)
         run: just proptests
+
+      # bn-36chi: the failpoints-gated crash/recovery integration tests.
+      # No workflow runs `just check`, so this lane is wired here too.
+      - name: Failpoint integration tests (--features failpoints)
+        run: just failpoint-tests
 
       - name: Stateright model check
         run: just formal-check

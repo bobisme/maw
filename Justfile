@@ -80,6 +80,9 @@ build-bin:
 test: build-bin
   cargo test
   cargo test -p maw-cli
+  # bn-36chi: the op-stream digest pins (soak/production/default profiles)
+  # live here and no gate ran them.
+  cargo test -p maw-scenario
 
 install:
   cargo install --locked --path crates/maw-cli
@@ -143,6 +146,17 @@ kani-full:
 nodefault-check:
   cargo clippy --no-default-features --all-targets -- -D warnings
 
+# failpoint-tests: the `#[cfg(feature = "failpoints")]` integration tests in
+# crates/maw-cli/tests (crash/recovery/fallback: bn-1eg2u, bn-1dlkd, bn-3jqfk,
+# bn-2ds48, bn-15fzo, recover_front_door_bn_2nhl's verbatim restore, ...) and
+# maw-core's failpoint registry tests. `just test` builds without the feature,
+# so nothing ran them and they rotted (bn-36chi). Own target dir: the feature
+# changes the `maw` binary, and sharing target/ would make the plain suite
+# rebuild (and, until rebuilt, test a failpoints binary). ~40 s warm.
+failpoint-tests:
+  CARGO_TARGET_DIR=target/failpoints-lane cargo test -p maw-cli --features failpoints
+  CARGO_TARGET_DIR=target/failpoints-lane cargo test -p maw-core --features failpoints
+
 # proptests: merge determinism + pushout property tests (src/merge/
 # determinism_tests.rs, pushout_tests.rs), gated behind the `proptests`
 # feature so the default `cargo test` stays fast. Part of `just check`
@@ -159,7 +173,7 @@ verify: proptests kani-fast formal-check
 # bn-2zubk: sg1-assurance-clippy is part of check so the local gate lints the
 # same feature builds as CI (dst-faithful.yml) — pre.17 went RED on main from
 # model.rs lints no local gate ran.
-check: fmt-check clippy sg1-assurance-clippy nodefault-check test proptests dst-fast formal-fast contract-drift
+check: fmt-check clippy sg1-assurance-clippy nodefault-check test failpoint-tests proptests dst-fast formal-fast contract-drift
 
 coverage:
   cargo llvm-cov
@@ -237,7 +251,7 @@ sg1-production-tier:
 # the same green window as sg1-production-tier, so any violation is fault-induced).
 # bn-1jfui: the tier runs on BOTH layouts (consolidated = the `maw init`
 # default, plus legacy v2); odd seeds configure a passing [merge.validation]
-# so VALIDATE-phase sites are live; DST_DIRTY_TRUNK_CRASH_PCT (default 60)
+# so VALIDATE-phase sites are live; DST_DIRTY_TRUNK_CRASH_PCT (default 80)
 # biases dirty-trunk merges towards a crash in the target update (faults only,
 # ops unchanged). bn_1jfui_* proves SubprocFault's real SIGKILL lands AT the
 # commit- and prepare-phase sites.

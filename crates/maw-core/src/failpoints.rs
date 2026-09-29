@@ -327,6 +327,7 @@ pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_REBASE_BEFORE_SETHEAD",
     "FP_RECOVER_BEFORE_RESTORE",
     "FP_RECOVER_BEFORE_SEARCH",
+    "FP_SNAPSHOT_AFTER_CLEAN",
     "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
     "FP_UPDATE_DEFAULT_CAPTURE",
     "FP_VALIDATE_AFTER_CHECK",
@@ -735,8 +736,8 @@ mod tests {
             assert!(parse_env_spec("FP_X=sleep:abc").is_empty());
         }
 
-        /// Trailing-`*` glob expands against the canonical table; the three
-        /// real `FP_CLEANUP_*` sites must all appear with the same action.
+        /// Trailing-`*` glob expands against the canonical table; every real
+        /// `FP_CLEANUP_*` site must appear with the same action.
         #[test]
         fn glob_expands_against_known() {
             let v = parse_env_spec("FP_CLEANUP_*=sleep:5000");
@@ -748,6 +749,8 @@ mod tests {
                     "FP_CLEANUP_AFTER_CAPTURE".to_string(),
                     "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT".to_string(),
                     "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT".to_string(),
+                    "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT".to_string(),
+                    "FP_CLEANUP_REPLAY_BEFORE_APPLY".to_string(),
                 ]
             );
             for (_, a) in &v {

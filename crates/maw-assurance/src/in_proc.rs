@@ -468,9 +468,9 @@ struct PendingUpdate {
     /// worktree may already hold the merged tree); `false` = the merge died
     /// before the target update began and the worktree is still pre-merge.
     update_started: bool,
-    /// The trunk was edited while the update was pending: the pre-crash
-    /// capture no longer describes the user's state, so the reference model
-    /// does not judge the recovery (the byte oracles still do).
+    /// The trunk was edited while the update was pending: unless the
+    /// recovery resumes a checkout intent, the pre-crash capture no longer
+    /// describes the user's state (see `TrunkTier::recover`).
     tainted: bool,
 }
 
@@ -1306,6 +1306,13 @@ impl InProcDriver {
             self.stats.dirty_trunk_merges += 1;
         }
         t.step_output.clear();
+        // The same step may run this merge's own update next, which may
+        // legitimately change a path the recovery just committed the user's
+        // exact entry for. Settled only AFTER the judgement above (bn-36chi:
+        // settling first dropped every path the recovery had replaced with
+        // the merged entry — disk == HEAD — so a displacement by a recovery
+        // was never judged; seed 4294972401 went vacuous on exactly that).
+        t.settle_committed()?;
         Ok(())
     }
 
@@ -1841,6 +1848,12 @@ impl TrunkTier {
         let mut settled = Vec::new();
         for rel in &self.recorded {
             let abs = self.ws_path.join(rel);
+            // Only the USER's entry being committed settles a path: a path
+            // the displacement oracle still expects must hold that entry
+            // (disk == HEAD alone is also what a displacement looks like).
+            if self.displacement.expects_on_disk(rel, &abs) == Some(false) {
+                continue;
+            }
             let same = match head.get(rel) {
                 Some(trunk::TrunkEntry::File { bytes, .. }) => {
                     std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_file())
@@ -1918,6 +1931,21 @@ impl TrunkTier {
     ) -> std::io::Result<()> {
         let merged = trunk::capture_tree(root, epoch_after)?;
         let disk = trunk::capture_worktree(&self.ws_path)?;
+        // bn-1eg2u/bn-36chi: the replay pins its filtered replay commit at
+        // `refs/manifold/replay/<ws>` for the duration of ONE replay. A crash
+        // mid-replay may leave it behind (tolerated while the update is
+        // pending: it only adds reachability); a COMPLETED update — the live
+        // one or the recovery that resumed a crashed one — must not.
+        let pin = format!("refs/manifold/replay/{DEFAULT_WS}");
+        if self.step_mismatch.is_none() && resolve_ref(root, &pin)?.is_some() {
+            self.step_mismatch = Some(ReplayMismatch {
+                path: pin.clone(),
+                detail: format!(
+                    "a completed target update to {epoch_after} left its transient replay pin \
+                     {pin} behind"
+                ),
+            });
+        }
         let j = trunk::judge_replay(base, user, &merged, &disk, output);
         stats.replay_judgements += 1;
         stats.replay_checks += usize::try_from(j.judged).unwrap_or(usize::MAX);
@@ -1959,8 +1987,7 @@ impl TrunkTier {
         let maw_fp = match fault {
             FaultSpec::None => None,
             FaultSpec::Failpoint { name, .. }
-                if name == "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"
-                    || name == "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT" =>
+                if crate::scenario::TARGET_UPDATE_WINDOWS.contains(&name.as_str()) =>
             {
                 Some(crate::fault::production_fp_spec(name))
             }
@@ -1997,6 +2024,18 @@ impl TrunkTier {
             return Ok(false);
         };
         self.pending_len_before_recovery = self.displacement.pending_len();
+        // bn-36chi: a TAINTED pending update (the trunk was edited while it
+        // was pending) is judged too. What the recovery replays depends on
+        // whether the crashed attempt left a checkout intent: with one, maw
+        // RESUMES — it pins and cleans whatever is on disk now (the residual
+        // notice) and replays the crashed attempt's own snapshot, i.e. the
+        // pre-crash capture; without one (the merge died before the update
+        // wrote it), it runs a fresh update over the worktree as it is now.
+        let user_now = if p.tainted && !checkout_intent_exists(root) {
+            Some(trunk::capture_worktree(&self.ws_path)?)
+        } else {
+            None
+        };
         let ws_epoch = resolve_ref(root, &format!("refs/manifold/epoch/ws/{DEFAULT_WS}"))?;
         let anchor = if ws_epoch.as_deref() == Some(p.epoch_after.as_str()) {
             p.epoch_after.clone()
@@ -2037,16 +2076,21 @@ impl TrunkTier {
                 ),
             });
         }
-        if !p.tainted {
-            let output = out.output;
-            self.judge(root, &p.epoch_after, &p.base, &p.user, &output, stats)?;
-        }
-        // The same step may run this merge's own update next, which may
-        // legitimately change a path the recovery just committed the user's
-        // exact entry for.
-        self.settle_committed()?;
+        let user = user_now.as_ref().unwrap_or(&p.user);
+        self.judge(root, &p.epoch_after, &p.base, user, &out.output, stats)?;
+        // NOT settled here: the caller judges the displacement oracle on the
+        // recovery first (see `InProcDriver::recover_trunk`, bn-36chi).
         Ok(true)
     }
+}
+
+/// Whether the default workspace has a durable target-checkout intent
+/// (`<manifold>/target-checkout-default.json`, bn-15fzo).
+fn checkout_intent_exists(root: &Path) -> bool {
+    maw_core::model::layout::LayoutFlavor::detect(root)
+        .manifold_dir(root)
+        .join(format!("target-checkout-{DEFAULT_WS}.json"))
+        .exists()
 }
 
 /// Stable HarnessError site for a failed plan step.

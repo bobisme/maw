@@ -979,7 +979,9 @@ fn sg1_nightly_soak() {
 
 /// A hand-built plan that drives the PRODUCTION target update through every
 /// window the soak profile crashes in — the snapshot-failed fallback, a crash
-/// after the checkout (bn-15fzo resume) and a crash before the update — over
+/// after the checkout (bn-15fzo resume), a crash after the snapshot cleaned
+/// the tree but before the checkout, one inside the snapshot-failed fallback,
+/// one inside the replay (bn-36chi) and a crash before the update — over
 /// a dirty trunk (tracked edit, new untracked file, new symlink), and proves
 /// the seed is judged clean AND non-vacuously: crashes happened, the
 /// displacement oracle judged entries, the replay model judged updates, and
@@ -1095,6 +1097,29 @@ fn sg1_trunk_tier_production_windows_are_judged() {
         "four\n",
         fp("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT"),
     ));
+    // bn-36chi: the crash after the snapshot cleaned the worktree, before
+    // the checkout (tree = anchor, edits only in the snapshot).
+    all.extend(round2(
+        6,
+        "shared/file-2.txt",
+        "six\n",
+        fp("FP_SNAPSHOT_AFTER_CLEAN"),
+    ));
+    // bn-36chi (bn-1eg2u windows): a crash inside the snapshot-failed
+    // fallback after its force checkout, and one inside the replay after the
+    // replay commit is pinned.
+    all.extend(round2(
+        7,
+        "shared/file-3.txt",
+        "seven\n",
+        fp("FP_CLEANUP_FALLBACK_AFTER_CHECKOUT"),
+    ));
+    all.extend(round2(
+        8,
+        "shared/file-2.txt",
+        "eight\n",
+        fp("FP_CLEANUP_REPLAY_BEFORE_APPLY"),
+    ));
     all.extend(round2(5, "shared/file-3.txt", "five\n", FaultSpec::None));
     let plan = ScenarioPlan {
         seed: 0x1_19E0,
@@ -1123,8 +1148,8 @@ fn sg1_trunk_tier_production_windows_are_judged() {
         out.stats
     );
     let s = out.stats;
-    assert_eq!(s.trunk_crashes, 2, "{s:?}");
-    assert!(s.trunk_updates >= 6, "{s:?}");
+    assert_eq!(s.trunk_crashes, 5, "{s:?}");
+    assert!(s.trunk_updates >= 12, "{s:?}");
     assert!(s.dirty_trunk_merges >= 2, "{s:?}");
     assert!(s.displacement_checks >= 4, "{s:?}");
     assert!(s.replay_judgements >= 5, "{s:?}");
@@ -1145,6 +1170,29 @@ fn sg1_trunk_tier_production_windows_are_judged() {
         fs::read_to_string(w.join("shared/file-3.txt")).unwrap(),
         "five\n"
     );
+}
+
+/// bn-36chi regression (pre.18 soak STOP, seed 4294972401): a merge that died
+/// before its target update left it to the end-of-drive drain, whose recovery
+/// replaced three dirty-trunk symlinks with the merged regular files and
+/// REPORTED the type conflicts. The harness settled "committed" paths
+/// (disk == HEAD) before judging the displacement oracle on the recovery, so
+/// the oracle judged nothing and the seed was a vacuous harness error. The
+/// recovery's displacements must be judged (and here: acknowledged).
+#[test]
+fn sg1_recovery_displacements_are_judged_before_settling() {
+    let entry = corpus_scenario_entry("bn-36chi-recovery-displacement-settle.json");
+    let out = drive_corpus_scenario_plan(&entry);
+    assert!(
+        matches!(out.verdict, StepVerdict::Clean),
+        "verdict={:?} stats={:?}",
+        out.verdict,
+        out.stats
+    );
+    let s = out.stats;
+    assert_eq!(s.trunk_drains, 1, "{s:?}");
+    assert_eq!(s.dirty_trunk_merges, 1, "{s:?}");
+    assert!(s.displacement_checks >= 1, "{s:?}");
 }
 
 // ---------------------------------------------------------------------------

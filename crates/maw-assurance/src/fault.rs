@@ -76,7 +76,32 @@ pub const DANGEROUS_FAILPOINTS: &[&str] = &[
     // and the user's pre-merge edits exist only in the pinned snapshot, so a
     // crash here is only proven by a real kill + the checkout-intent resume.
     "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+    // bn-36chi: the other target-update windows. Each leaves the user's
+    // pre-merge edits only in a pinned snapshot / intent (after the clean,
+    // after the fallback's force checkout, mid-replay with the replay commit
+    // pinned), so only a real kill + the intent resume proves them.
+    "FP_SNAPSHOT_AFTER_CLEAN",
+    "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT",
+    "FP_CLEANUP_REPLAY_BEFORE_APPLY",
 ];
+
+/// bn-36chi: the `MAW_FP` segment a site needs armed ALONGSIDE it to be
+/// reachable at all. `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` sits inside the
+/// snapshot-failed fallback, so the snapshot must fail first
+/// (`FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error`, the handled site).
+#[must_use]
+pub fn prerequisite_fp(failpoint: &str) -> Option<&'static str> {
+    (failpoint == "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT")
+        .then_some("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected")
+}
+
+/// `spec` with [`prerequisite_fp`]'s segment for `failpoint` prepended.
+fn with_prerequisite(failpoint: &str, spec: String) -> String {
+    match prerequisite_fp(failpoint) {
+        Some(pre) => format!("{pre};{spec}"),
+        None => spec,
+    }
+}
 
 /// Error-style sites (bn-1sbjf): an injected `error` here is not a crash, it
 /// is a failure maw HANDLES in-line and the handling is what the site exists
@@ -99,11 +124,12 @@ pub const HANDLED_ERROR_FAILPOINTS: &[&str] = &["FP_UPDATE_DEFAULT_BEFORE_SNAPSH
 /// mid-op process death).
 #[must_use]
 pub fn production_fp_spec(failpoint: &str) -> String {
-    if HANDLED_ERROR_FAILPOINTS.contains(&failpoint) {
+    let spec = if HANDLED_ERROR_FAILPOINTS.contains(&failpoint) {
         format!("{failpoint}=error:dst-injected")
     } else {
         format!("{failpoint}=abort")
-    }
+    };
+    with_prerequisite(failpoint, spec)
 }
 
 /// The full pool of crashable `FP_*` sites, grouped by FSM phase, that the
@@ -198,7 +224,7 @@ impl FaultPlan {
             // separately by the harness at the observed phase.
             CrashKind::Unwind | CrashKind::SigKill => "error:dst-injected",
         };
-        format!("{}={action}", self.failpoint)
+        with_prerequisite(&self.failpoint, format!("{}={action}", self.failpoint))
     }
 
     /// The `MAW_FP` spec [`SubprocFault`] arms (bn-1jfui).
@@ -213,7 +239,10 @@ impl FaultPlan {
     #[must_use]
     pub fn maw_fp_spec_blocking(&self, marker: &Path) -> String {
         match self.kind {
-            CrashKind::SigKill => format!("{}=hang:{}", self.failpoint, marker.display()),
+            CrashKind::SigKill => with_prerequisite(
+                &self.failpoint,
+                format!("{}=hang:{}", self.failpoint, marker.display()),
+            ),
             CrashKind::Unwind | CrashKind::Panic => self.maw_fp_spec(),
         }
     }
@@ -252,18 +281,41 @@ impl InProcFault {
             }
         };
         failpoints::set(failpoint, action);
+        if let Some(pre) = prerequisite_fp(failpoint) {
+            for (name, action) in failpoints::parse_env_spec(pre) {
+                failpoints::set(prerequisite_static(&name), action);
+            }
+        }
         Self { failpoint }
     }
 
     /// Disarm just this fault (idempotent).
     pub fn disarm(&self) {
-        failpoints::clear(self.failpoint);
+        clear_with_prerequisite(self.failpoint);
     }
 }
 
 impl Drop for InProcFault {
     fn drop(&mut self) {
-        failpoints::clear(self.failpoint);
+        clear_with_prerequisite(self.failpoint);
+    }
+}
+
+/// The `'static` registry key of a prerequisite site (they are all known).
+fn prerequisite_static(name: &str) -> &'static str {
+    maw_core::failpoints::KNOWN_FAILPOINTS
+        .iter()
+        .copied()
+        .find(|k| *k == name)
+        .unwrap_or("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT")
+}
+
+fn clear_with_prerequisite(failpoint: &'static str) {
+    failpoints::clear(failpoint);
+    if let Some(pre) = prerequisite_fp(failpoint) {
+        for (name, _) in failpoints::parse_env_spec(pre) {
+            failpoints::clear(prerequisite_static(&name));
+        }
     }
 }
 
@@ -484,20 +536,28 @@ impl SubprocFault {
     /// because the legacy-path phase reader never let a consolidated run get
     /// this far). A still-present journal (e.g. the dead owner not yet
     /// observed) keeps retrying, as before.
+    ///
+    /// bn-36chi: a non-zero exit with the journal gone counts only when the
+    /// same invocation SAYS it finished the interrupted merge
+    /// ([`FINALIZED_NOTICE`]). Any other failing run that happens to leave no
+    /// journal (a pre-commit recovery that aborted the journal and then
+    /// failed the re-merge, a crash before the journal was ever written, an
+    /// error that cleaned up after itself) is not a recovery; it keeps
+    /// retrying and ends as `RecoveryExhausted` for the oracle to judge.
     #[must_use]
     pub fn recover_with_retry(&self) -> Option<u32> {
         for attempt in 1..=self.max_recovery_attempts {
-            let exited_ok = Command::new(&self.maw_bin)
+            let out = Command::new(&self.maw_bin)
                 .args(&self.merge_args)
                 .current_dir(&self.repo_root)
                 .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00 +0000")
                 .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00 +0000")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
+                .stdin(Stdio::null())
+                .output();
             let journal_cleared = !crate::merge_state_path(&self.repo_root).exists();
-            if exited_ok || journal_cleared {
+            if let Ok(out) = &out
+                && attempt_recovered(out, journal_cleared)
+            {
                 return Some(attempt);
             }
             if attempt < self.max_recovery_attempts {
@@ -506,6 +566,23 @@ impl SubprocFault {
         }
         None
     }
+}
+
+/// What `maw ws merge`'s journal recovery prints when it FINISHED an
+/// interrupted merge whose commit had landed (`recover.rs`,
+/// `finalized_lines`).
+pub const FINALIZED_NOTICE: &str = "Recovered an interrupted merge";
+
+/// Whether one recovery attempt recovered (see
+/// [`SubprocFault::recover_with_retry`]): it exited 0, or it left no journal
+/// AND reported finishing the interrupted merge.
+fn attempt_recovered(out: &std::process::Output, journal_cleared: bool) -> bool {
+    if out.status.success() {
+        return true;
+    }
+    journal_cleared
+        && (String::from_utf8_lossy(&out.stderr).contains(FINALIZED_NOTICE)
+            || String::from_utf8_lossy(&out.stdout).contains(FINALIZED_NOTICE))
 }
 
 /// Read the merge phase from the repo's `merge-state.json`, if present.
@@ -548,6 +625,58 @@ fn kill_process_group(pgid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// bn-36chi: "journal gone" is a recovery only when the attempt exited 0
+    /// or said it finished the interrupted merge. A failing attempt that
+    /// merely left no journal used to count as `Recovered`.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_needs_success_or_a_finalize_report() {
+        let t = tempfile::TempDir::new().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join(".maw").join("manifold")).unwrap();
+        let journal = crate::merge_state_path(root);
+        let fault = |script: &str| {
+            let p = root.join("fake-maw.sh");
+            std::fs::write(&p, format!("{script}\n")).unwrap();
+            SubprocFault::new(
+                FaultPlan::from_seed(0),
+                "/bin/sh",
+                root,
+                vec![p.to_string_lossy().into_owned()],
+            )
+            .with_recovery(2, Duration::from_millis(1))
+        };
+        // Exit 0: recovered.
+        std::fs::write(&journal, "{}").unwrap();
+        assert_eq!(fault("exit 0").recover_with_retry(), Some(1));
+        // Journal gone, non-zero, no finalize report: NOT recovered.
+        std::fs::write(&journal, "{}").unwrap();
+        let rm = format!("rm -f '{}'", journal.display());
+        assert_eq!(
+            fault(&format!(
+                "{rm}\necho 'error: validation failed' >&2\nexit 1"
+            ))
+            .recover_with_retry(),
+            None,
+            "a failing attempt that only left no journal is not a recovery"
+        );
+        // Journal gone, non-zero, finished the landed merge (then refused the
+        // stale re-merge): recovered.
+        std::fs::write(&journal, "{}").unwrap();
+        let finalize = format!(
+            "{rm}\necho '{FINALIZED_NOTICE} (phase: cleanup): its commit had already landed.' >&2\n\
+             echo 'error: workspace is stale' >&2\nexit 1"
+        );
+        assert_eq!(fault(&finalize).recover_with_retry(), Some(1));
+        // Journal still present: never recovered on a non-zero exit, even
+        // with the notice.
+        std::fs::write(&journal, "{}").unwrap();
+        assert_eq!(
+            fault(&format!("echo '{FINALIZED_NOTICE}' >&2\nexit 1")).recover_with_retry(),
+            None
+        );
+    }
 
     /// `from_seed` is deterministic: same seed ⇒ identical plan.
     #[test]
@@ -600,7 +729,10 @@ mod tests {
         for seed in 0..200_u64 {
             let p = FaultPlan::from_seed(seed);
             let parsed = failpoints::parse_env_spec(&p.maw_fp_spec());
-            assert_eq!(parsed.len(), 1, "seed {seed} spec must be one pair");
+            // bn-36chi: plus the prerequisite segment, first, if any.
+            let pre = usize::from(prerequisite_fp(&p.failpoint).is_some());
+            assert_eq!(parsed.len(), 1 + pre, "seed {seed} spec must be one pair");
+            let parsed = &parsed[pre..];
             assert_eq!(parsed[0].0, p.failpoint);
             match (p.kind, &parsed[0].1) {
                 (CrashKind::Panic, FailpointAction::Panic(_))
@@ -619,7 +751,10 @@ mod tests {
         for seed in 0..200_u64 {
             let p = FaultPlan::from_seed(seed);
             let parsed = failpoints::parse_env_spec(&p.maw_fp_spec_blocking(marker));
-            assert_eq!(parsed.len(), 1, "seed {seed} spec must be one pair");
+            // bn-36chi: plus the prerequisite segment, first, if any.
+            let pre = usize::from(prerequisite_fp(&p.failpoint).is_some());
+            assert_eq!(parsed.len(), 1 + pre, "seed {seed} spec must be one pair");
+            let parsed = &parsed[pre..];
             assert_eq!(parsed[0].0, p.failpoint);
             match (p.kind, &parsed[0].1) {
                 (CrashKind::SigKill, FailpointAction::Hang(m)) => {
@@ -657,10 +792,8 @@ mod tests {
             .find(|(p, _)| *p == "cleanup")
             .map(|(_, s)| s.to_vec())
             .expect("cleanup phase");
-        for fp in [
-            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
-            "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
-        ] {
+        for fp in crate::scenario::TARGET_UPDATE_WINDOWS {
+            let fp = *fp;
             assert!(cleanup.contains(&fp), "{fp} missing from cleanup pool");
             assert!(
                 failpoints::KNOWN_FAILPOINTS.contains(&fp),
@@ -669,6 +802,20 @@ mod tests {
         }
         assert!(DANGEROUS_FAILPOINTS.contains(&"FP_CLEANUP_AFTER_DEFAULT_CHECKOUT"));
         assert!(!DANGEROUS_FAILPOINTS.contains(&"FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"));
+        // bn-36chi: every other window is a real-kill boundary, and the one
+        // inside the snapshot-failed fallback arms the failing snapshot too.
+        for fp in [
+            "FP_SNAPSHOT_AFTER_CLEAN",
+            "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT",
+            "FP_CLEANUP_REPLAY_BEFORE_APPLY",
+        ] {
+            assert!(DANGEROUS_FAILPOINTS.contains(&fp), "{fp}");
+        }
+        assert_eq!(
+            production_fp_spec("FP_CLEANUP_FALLBACK_AFTER_CHECKOUT"),
+            "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected;\
+             FP_CLEANUP_FALLBACK_AFTER_CHECKOUT=abort"
+        );
         assert_eq!(
             production_fp_spec("FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT"),
             "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT=error:dst-injected"

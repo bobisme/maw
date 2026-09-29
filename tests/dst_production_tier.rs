@@ -100,7 +100,7 @@
 //! Other bn-1jfui knobs: odd seeds configure a passing `[merge.validation]`
 //! so VALIDATE-phase failpoints are live; the faulted tier biases dirty-trunk
 //! merges towards a crash in the target update
-//! (`DST_DIRTY_TRUNK_CRASH_PCT`, default 60; faults only, ops unchanged) and
+//! (`DST_DIRTY_TRUNK_CRASH_PCT`, default 80; faults only, ops unchanged) and
 //! prints per-site `armed/fired` counts. `DST_ALLOW_NO_DEFERRAL=1` relaxes the
 //! deferred-displacement liveness guard for tiny shrink budgets.
 //!
@@ -177,22 +177,43 @@ fn failpoints_maw_bin() -> &'static std::path::Path {
         // plain binary used by the rest of the suite.
         let target_dir = manifest_dir.join("target").join("dst-prod-fp-bn-2byw");
 
-        let status = Command::new(env!("CARGO"))
-            .args([
-                "build",
-                "-p",
-                "maw-cli",
-                "--features",
-                "failpoints",
-                "--target-dir",
-            ])
-            .arg(&target_dir)
-            .current_dir(&manifest_dir)
-            .status()
-            .expect("failed to spawn `cargo build` for the failpoints binary");
+        // bn-36chi: the faulted tests run in parallel and each needs this
+        // binary. The OnceLock builds it once per process, but a failed init
+        // (a panicking closure) leaves the lock empty, so a sibling test
+        // simply rebuilt and passed while the first reported a spurious
+        // failure ("failed to write .../invoked.timestamp"). Serialize the
+        // build across PROCESSES too (the recipe's other `cargo test`
+        // invocations, a concurrent `just check`) with a lock file, and retry
+        // a failed build once before failing: cargo's incremental state makes
+        // a retry cheap, and only a build that fails twice is real.
+        std::fs::create_dir_all(&target_dir).expect("create failpoints target dir");
+        let lock = std::fs::File::create(target_dir.join(".maw-fp-build.lock"))
+            .expect("create failpoints build lock");
+        lock.lock().expect("lock failpoints build");
+        let build = || {
+            Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "-p",
+                    "maw-cli",
+                    "--features",
+                    "failpoints",
+                    "--target-dir",
+                ])
+                .arg(&target_dir)
+                .current_dir(&manifest_dir)
+                .status()
+                .expect("failed to spawn `cargo build` for the failpoints binary")
+        };
+        let mut status = build();
+        if !status.success() {
+            eprintln!("failpoints maw build failed ({status}); retrying once");
+            status = build();
+        }
+        drop(lock);
         assert!(
             status.success(),
-            "`cargo build -p maw-cli --features failpoints` failed; cannot run \
+            "`cargo build -p maw-cli --features failpoints` failed twice; cannot run \
              the faulted production-tier DST"
         );
 
@@ -1079,7 +1100,11 @@ fn run_seed(
         .with_escape_weight(escape_weight)
         .with_corrupt_weight(corrupt_weight);
     if inject_faults {
-        let pct = u32::try_from(env_count("DST_DIRTY_TRUNK_CRASH_PCT", 60)).unwrap_or(60);
+        // bn-36chi: 80 (was 60). The pool of target-update windows grew
+        // from 4 to 7 entries, which reshuffled the drawn sites; at 60 the
+        // default 16-seed budget no longer landed a single crash while
+        // recorded dirty bytes were off disk (the liveness assert below).
+        let pct = u32::try_from(env_count("DST_DIRTY_TRUNK_CRASH_PCT", 80)).unwrap_or(80);
         profile = profile.with_dirty_trunk_crash_pct(pct);
     }
     let plan = generate_plan(seed, &profile, n_steps);

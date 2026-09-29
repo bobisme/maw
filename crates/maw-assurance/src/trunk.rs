@@ -45,45 +45,60 @@
 //!   plan's LAST merge is recovered by an end-of-drive drain
 //!   (`InProcDriver::drain_trunk`, bn-3adck) — before it, ~16% of 64-step soak
 //!   seeds ended with a pending update nobody recovered or judged.
-//! - Only two crash windows are inside the production update
-//!   (`FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` = the handled snapshot-failed
-//!   fallback, `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` = abort between checkout
-//!   and replay). Every other fault is modelled as "died before the update
-//!   began". A crash INSIDE the replay (a partial replay) is not reachable
-//!   here.
+//! - Five crash windows are inside the production update
+//!   ([`crate::scenario::TARGET_UPDATE_WINDOWS`]):
+//!   `FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT` (the handled snapshot-failed
+//!   fallback), `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` (abort inside that
+//!   fallback after its force checkout; armed together with the failing
+//!   snapshot), `FP_SNAPSHOT_AFTER_CLEAN` (abort after the snapshot, the
+//!   checkout intent and the clean, before the checkout),
+//!   `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` (abort between checkout and replay)
+//!   and `FP_CLEANUP_REPLAY_BEFORE_APPLY` (abort inside the replay, after the
+//!   replay commit is pinned at `refs/manifold/replay/<ws>`, before the
+//!   apply). Every other fault is modelled as "died before the update
+//!   began". A completed update (live or recovery) must leave no replay pin.
 //!
-//! # Oracle blind spots (documented, bn-3adck sweep)
+//! # Oracle blind spots (documented; bn-3adck sweep, narrowed by bn-36chi)
 //!
 //! What a clean seed does NOT prove, so coverage is not overstated:
 //!
-//! - **Both sides changed a regular file's bytes, no markers on disk**:
-//!   [`judge_replay`] accepts ANY bytes (it does not model diff3), and the
-//!   byte oracles only accept the user's exact bytes or markers carrying
-//!   them. So a replay that silently drops the user's hunks there is caught
-//!   only by `TrunkDirtyDisplacement` — and NOT when the user's content
-//!   already carried diff3 markers from an earlier unresolved conflict:
-//!   `TrunkTier::write` does not record those with the byte oracles, so that
-//!   path has no byte-level judge at all.
-//! - **Exec bit when the path was absent (or a symlink) at the anchor**: not
-//!   judged (no base mode to 3-way against).
-//! - **file<->directory paths** (`df_involved`): skipped by the replay
-//!   model, left to the byte oracles.
-//! - **A recovery of a TAINTED pending update** (the trunk was edited while
-//!   it was pending): not judged by the replay model; only the byte oracles
-//!   judge it.
+//! - **A PARTIAL replay** (a crash after the replay's first worktree write,
+//!   before its last): no failpoint exists there (`FP_CLEANUP_REPLAY_BEFORE_APPLY`
+//!   is before the apply), and adding one is a production change. The
+//!   resume's residual-pinning of a partial replay is not exercised. Not
+//!   closed.
+//! - **file<->directory groups BOTH sides touched** (a directory collision):
+//!   the replay settles them path by path (text merges, type conflicts,
+//!   partial keeps) and the model does not predict that; left to the byte
+//!   oracles. Groups only ONE side touched ARE judged (bn-36chi).
+//! - **Both sides changed a regular file's bytes and the reference diff3
+//!   conflicts, but the replay merged cleanly** (gix-merge accepts abutting
+//!   hunks git's xdiff refuses): the model then only checks that no line
+//!   either side added is missing, not the exact bytes. A clean reference
+//!   merge IS checked byte-for-byte (bn-36chi), including a user file that
+//!   still carries an earlier conflict's markers.
+//! - **A merge that changes ONLY the exec bit of a file the user turned into
+//!   a symlink**: the replay's overlap test compares content, not modes, so
+//!   it keeps the user's link without a report. Accepted (nothing is lost;
+//!   see `judge_replay`) — noted to the lead as a contract deviation from
+//!   bn-2ygs0's "type conflicts are reported".
 //! - **Whole-snapshot notices** (`replay_snapshot failed`, a stale intent's
 //!   `pre-merge edits pinned at`): acknowledge every user-changed path. The
 //!   resume's residual notice (`held changes beyond the interrupted
 //!   update`) acknowledges only entries edited SINCE the crash (bn-3adck).
-//! - **"Reported"** (`oracle_escape::classify_report`) is a heuristic: some
-//!   output line names the path as a token AND some recovery handle appears
-//!   ANYWHERE in the same output — not necessarily next to the path (the
-//!   production conflict list and its `maw ws resolve` commands are separate
-//!   paragraphs). A progress line that happened to name a displaced path
-//!   while another path's conflict printed a handle would acknowledge it;
-//!   no such line exists in the target update's output today.
+//! - **"Reported"** (`oracle_escape::classify_report`): some ONE report
+//!   section (a run of lines opened by a `WARNING:` line) names the path as a
+//!   token AND carries a recovery handle (bn-36chi; it used to be "the path
+//!   anywhere and a handle anywhere"). Within a section the handle is still
+//!   not tied to the path's own line: the conflict list and its `maw ws
+//!   resolve` commands are separate paragraphs of one section.
 //! - Byte oracles record only UTF-8 file content and symlink targets; mode
 //!   changes and non-UTF-8 content are judged by the replay model alone.
+//!
+//! Closed by bn-36chi (were blind spots): the exec bit of a path absent (or a
+//! symlink) at the anchor (the user's mode wins); recoveries of a TAINTED
+//! pending update (judged against the pre-crash capture when maw resumes a
+//! checkout intent, else against the worktree at recovery time).
 #![cfg(feature = "oracles")]
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
@@ -597,8 +612,8 @@ fn has_markers(bytes: &[u8]) -> bool {
 
 /// Paths involved in a file<->directory relation in any of `maps`: a path
 /// that is also a directory in some map, and everything under such a path.
-/// The reference model leaves them to the dirty-byte oracles (the replay's
-/// directory-collision grouping is not modelled path-by-path).
+/// The reference model judges them per group ([`judge_df_groups`]), not with
+/// the per-path table.
 fn df_involved(maps: &[&EntryMap]) -> BTreeSet<String> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     for m in maps {
@@ -637,7 +652,7 @@ fn df_involved(maps: &[&EntryMap]) -> BTreeSet<String> {
 /// `user` the default worktree right before the update (for a recovered
 /// update: before the crashed attempt), `merged` the merged tree, `disk` the
 /// worktree after the update and `output` the update's combined output. Per
-/// path (union of the four maps, minus file<->directory paths):
+/// path (union of the four maps; file<->directory paths by group):
 ///
 /// | user vs base | merged vs base | must be on disk |
 /// |---|---|---|
@@ -647,9 +662,11 @@ fn df_involved(maps: &[&EntryMap]) -> BTreeSet<String> {
 /// | changed | deleted | the user's entry (kept local) |
 /// | deleted | changed | the merged entry, or nothing |
 /// | changed | changed, a symlink on either side | the MERGED entry, and the output names the path with a way back (bn-2ygs0 type conflict) |
-/// | changed | changed, both regular files | a regular file; bytes: the side that changed them (both changed ⇒ any, but diff3 markers must be reported); exec bit: the user's if the user changed it, else the merged one (bn-3fcbu) |
+/// | changed (symlink) | only the exec bit changed | the user's link (not an overlap for the replay) |
+/// | changed | changed, both regular files | a regular file; bytes: the side that changed them; both changed ⇒ the clean `git merge-file` result, or reported markers (bn-36chi); exec bit: the user's if the user changed it (or the anchor had no regular file), else the merged one (bn-3fcbu) |
 ///
-/// A whole-snapshot notice ("replay_snapshot failed") acknowledges every
+/// File<->directory paths are judged per group (see `judge_df_groups`). A
+/// whole-snapshot notice ("replay_snapshot failed") acknowledges every
 /// user-changed path, which is then not judged.
 #[must_use]
 pub fn judge_replay(
@@ -666,6 +683,7 @@ pub fn judge_replay(
         paths.extend(m.keys());
     }
     let mut j = ReplayJudgement::default();
+    judge_df_groups(&skip, [base, user, merged, disk], output, &mut j);
     for p in paths {
         if skip.contains(p) {
             continue;
@@ -729,6 +747,28 @@ pub fn judge_replay(
             }
             continue;
         };
+        // The merge changed only the executable bit of a regular file the
+        // user turned into a symlink. The replay's overlap test compares
+        // committed CONTENT, not modes (`committed_content_changed`), so the
+        // path is not an overlap: the user's link is restored and nothing is
+        // reported. Nothing is lost (the mode change is committed, and a
+        // mode has no meaning on a link), so the model accepts the user's
+        // entry here — and requires it.
+        if let (
+            TrunkEntry::Symlink(_),
+            TrunkEntry::File { bytes: mb, .. },
+            Some(TrunkEntry::File { bytes: bb, .. }),
+        ) = (ue, me, b)
+            && mb == bb
+        {
+            if d != u {
+                fail(
+                    "the user's symlink over a mode-only merge change was not kept",
+                    TrunkEntry::describe(u),
+                );
+            }
+            continue;
+        }
         if ue.is_symlink() || me.is_symlink() {
             // bn-2ygs0: a symlink and a file (or two targets) cannot merge;
             // the merged side is kept on disk and the conflict is reported.
@@ -776,15 +816,19 @@ pub fn judge_replay(
             _ => None,
         };
         // Exec bit (bn-3fcbu): the user's if the user changed it, else merged.
-        if let Some((_, bx)) = base_file {
-            let want = if *ux == bx { *mx } else { *ux };
-            if *dx != want {
-                fail(
-                    "executable bit is not the 3-way result",
-                    format!("exec={want}"),
-                );
-                continue;
-            }
+        // With no regular file at the anchor (absent, or a symlink) the
+        // user's side is an addition / type change, and the replay's mode
+        // reconciliation lets the user's own mode win (bn-36chi).
+        let want = match base_file {
+            Some((_, bx)) if *ux == bx => *mx,
+            _ => *ux,
+        };
+        if *dx != want {
+            fail(
+                "executable bit is not the 3-way result",
+                format!("exec={want}"),
+            );
+            continue;
         }
         // Bytes: the side that changed them.
         let want_bytes = match base_file {
@@ -793,28 +837,229 @@ pub fn judge_replay(
             _ if ub == mb => Some(ub),
             _ => None,
         };
-        match want_bytes {
-            Some(w) if db != w => fail(
-                "file bytes are not the side that changed them",
-                format!("{:?}", String::from_utf8_lossy(&w[..w.len().min(48)])),
-            ),
-            // Markers the user's own version already carried (an earlier
-            // conflict left unresolved) are the user's bytes, not a new
-            // conflict this replay must report.
-            None if has_markers(db)
-                && !has_markers(ub)
-                && crate::oracle_escape::report_for(output, p)
-                    != crate::oracle_escape::Report::Displaced =>
-            {
+        let reported = || {
+            crate::oracle_escape::report_for(output, p) == crate::oracle_escape::Report::Displaced
+        };
+        if let Some(w) = want_bytes {
+            if db != w {
                 fail(
-                    "conflict markers were written but the conflict was not reported",
-                    "a conflict report naming the path".to_owned(),
+                    "file bytes are not the side that changed them",
+                    format!("{:?}", String::from_utf8_lossy(&w[..w.len().min(48)])),
                 );
             }
-            _ => {}
+            continue;
+        }
+        // Both sides changed the bytes differently (bn-36chi): judge against
+        // an independent diff3 — `git merge-file` over the same three inputs
+        // the replay merges (an absent anchor is empty; a symlink anchor
+        // contributes its target, as `read_file_at_commit` does). A clean
+        // reference merge must be on disk exactly (or, if the replay routed
+        // it through markers — the post-merge sanity check — reported); a
+        // conflicting one must leave reported markers. This also judges a
+        // user file that already carried markers from an earlier conflict,
+        // which the byte oracles cannot.
+        let bb: &[u8] = match b {
+            Some(TrunkEntry::File { bytes, .. } | TrunkEntry::Symlink(bytes)) => bytes,
+            None => &[],
+        };
+        match reference_merge(bb, mb, ub) {
+            Ok(Some(clean)) => {
+                if *db != clean && !(has_markers(db) && reported()) {
+                    fail(
+                        "file bytes are not the clean 3-way merge",
+                        format!(
+                            "{:?}",
+                            String::from_utf8_lossy(&clean[..clean.len().min(48)])
+                        ),
+                    );
+                }
+            }
+            // The reference conflicts. The replay's gix-merge may still merge
+            // cleanly where git's xdiff calls ABUTTING hunks a conflict (seen
+            // with a user file that carries an earlier conflict's markers
+            // right next to the merged change). So: NEW markers (more
+            // marker blocks than the user's own content had) must be
+            // reported; no new markers = the replay merged cleanly, and then
+            // no line either side added may be missing.
+            Ok(None) => {
+                if marker_blocks(db) > marker_blocks(ub) {
+                    if !reported() {
+                        fail(
+                            "conflict markers were written but the conflict was not reported",
+                            "a conflict report naming the path".to_owned(),
+                        );
+                    }
+                } else if let Some(line) =
+                    dropped_side_line(bb, mb, db).or_else(|| dropped_side_line(bb, ub, db))
+                {
+                    fail(
+                        "a clean replay dropped a line one side added",
+                        format!("a file containing {:?}", String::from_utf8_lossy(line)),
+                    );
+                }
+            }
+            Err(e) => fail(
+                "reference 3-way merge failed (harness)",
+                format!("git merge-file: {e}"),
+            ),
         }
     }
     j
+}
+
+/// Number of diff3 conflict blocks (`<<<<<<< ` lines) in `bytes`.
+fn marker_blocks(bytes: &[u8]) -> usize {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| l.starts_with(b"<<<<<<< ") || *l == b"<<<<<<<")
+        .count()
+}
+
+/// A line `side` added relative to `base` (multiset difference) that `disk`
+/// does not hold as often, if any.
+fn dropped_side_line<'a>(base: &[u8], side: &'a [u8], disk: &[u8]) -> Option<&'a [u8]> {
+    let count = |bytes: &'a [u8]| {
+        let mut m: BTreeMap<&'a [u8], usize> = BTreeMap::new();
+        for l in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            *m.entry(l).or_default() += 1;
+        }
+        m
+    };
+    let (b, d) = (count_owned(base), count_owned(disk));
+    count(side).into_iter().find_map(|(line, n)| {
+        let added = n.saturating_sub(b.get(line).copied().unwrap_or(0));
+        (added > 0 && d.get(line).copied().unwrap_or(0) < added).then_some(line)
+    })
+}
+
+fn count_owned(bytes: &[u8]) -> BTreeMap<Vec<u8>, usize> {
+    let mut m: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    for l in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        *m.entry(l.to_vec()).or_default() += 1;
+    }
+    m
+}
+
+/// `git merge-file -p` over (anchor, merged, user): `Some(bytes)` when the
+/// reference diff3 merges cleanly, `None` when it conflicts. The replay's
+/// own merge is gix-merge's port of the same xdiff algorithm.
+fn reference_merge(base: &[u8], merged: &[u8], user: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    let dir = tempfile::TempDir::new()?;
+    let write = |name: &str, bytes: &[u8]| -> std::io::Result<PathBuf> {
+        let p = dir.path().join(name);
+        std::fs::write(&p, bytes)?;
+        Ok(p)
+    };
+    let (m, b, u) = (
+        write("merged", merged)?,
+        write("base", base)?,
+        write("user", user)?,
+    );
+    let out = Command::new("git")
+        .args(["merge-file", "-p", "--diff3"])
+        .arg(&m)
+        .arg(&b)
+        .arg(&u)
+        .stdin(Stdio::null())
+        .output()?;
+    match out.status.code() {
+        Some(0) => Ok(Some(out.stdout)),
+        Some(c) if c > 0 && c < 128 => Ok(None),
+        _ => Err(std::io::Error::other(format!(
+            "exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+    }
+}
+
+/// bn-36chi: judge the file<->directory paths ([`df_involved`]) group by
+/// group (a group = one path that is a file on some side and a directory on
+/// another, plus everything under it). When only ONE side touched a group
+/// the outcome is determined: the user did not touch it ⇒ the merged
+/// entries, exactly; only the user touched it ⇒ the user's entries exactly,
+/// or the merged (= anchor) entries with a report (the replay's conservative
+/// `directory_change`). A group BOTH sides touched is a directory collision
+/// the replay settles path by path; it is left to the byte oracles
+/// (documented blind spot).
+fn judge_df_groups(
+    involved: &BTreeSet<String>,
+    [base, user, merged, disk]: [&EntryMap; 4],
+    output: &str,
+    j: &mut ReplayJudgement,
+) {
+    let whole_notice = crate::oracle_escape::has_whole_snapshot_notice(output);
+    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for p in involved {
+        let root = involved
+            .iter()
+            .filter(|r| {
+                p == *r
+                    || (p.len() > r.len()
+                        && p.starts_with(r.as_str())
+                        && p.as_bytes()[r.len()] == b'/')
+            })
+            .min_by_key(|r| r.len())
+            .map_or(p.as_str(), String::as_str);
+        groups.entry(root).or_default().push(p);
+    }
+    for members in groups.values() {
+        let touched = |side: &EntryMap| members.iter().any(|p| side.get(*p) != base.get(*p));
+        let all_are = |want: &EntryMap| members.iter().all(|p| disk.get(*p) == want.get(*p));
+        let (by_user, by_merge) = (touched(user), touched(merged));
+        // Both sides touched the group: a directory collision the replay
+        // settles path by path (text merges, type conflicts, partial keeps)
+        // — not modelled; left to the byte oracles (documented blind spot).
+        if by_user && (by_merge || whole_notice) {
+            continue;
+        }
+        j.judged += members.len() as u64;
+        let (ok, want, why) = if by_user {
+            // The replay reports a user file<->directory swap that collides
+            // with the MERGED tree's shape as a `directory_change` and keeps
+            // the merged side — even when the merge did not touch the group
+            // (it compares shapes against the merged tree, not changes):
+            // conservative, reported, nothing lost. Accepted outcomes: the
+            // whole group is the user's,
+            // or the whole group is merged AND some member is reported with
+            // a way back. Never a mix. (Only reached when the merge left the
+            // group alone, so "merged" is also the anchor's shape.)
+            let reported = members.iter().any(|p| {
+                crate::oracle_escape::report_for(output, p)
+                    == crate::oracle_escape::Report::Displaced
+            });
+            (
+                all_are(user) || (all_are(merged) && reported),
+                user,
+                "the user's file<->directory change (over a merge that left the group alone) \
+                 was neither kept nor reported",
+            )
+        } else {
+            (
+                all_are(merged),
+                merged,
+                "a file<->directory path the user did not touch is not the merged entry",
+            )
+        };
+        if ok {
+            continue;
+        }
+        let p = members
+            .iter()
+            .find(|p| disk.get(**p) != want.get(**p))
+            .unwrap_or(&members[0]);
+        j.mismatches.push(ReplayMismatch {
+            path: (*p).clone(),
+            detail: format!(
+                "{why}: expected {}, on disk {} (base {}, user {}, merged {})",
+                TrunkEntry::describe(want.get(*p)),
+                TrunkEntry::describe(disk.get(*p)),
+                TrunkEntry::describe(base.get(*p)),
+                TrunkEntry::describe(user.get(*p)),
+                TrunkEntry::describe(merged.get(*p)),
+            ),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -935,6 +1180,7 @@ mod tests {
         assert!(judge_replay(&b, &u, &m, &m, out).mismatches.is_empty());
     }
 
+    /// A group BOTH sides touched stays unjudged (documented blind spot).
     #[test]
     fn file_dir_paths_are_left_to_the_byte_oracles() {
         let b = map(&[("d", f("1"))]);
@@ -943,6 +1189,108 @@ mod tests {
         let j = judge_replay(&b, &u, &m, &m, "");
         assert!(j.mismatches.is_empty());
         assert_eq!(j.judged, 0);
+    }
+
+    /// bn-36chi: both sides changed the bytes. A clean diff3 must be on disk
+    /// exactly; the user's hunks silently dropped is a mismatch.
+    #[test]
+    fn both_sides_changed_bytes_judged_against_diff3() {
+        let b = map(&[("a", f("1\n2\n3\n4\n5\n"))]);
+        let u = map(&[("a", f("1\nU\n3\n4\n5\n"))]);
+        let m = map(&[("a", f("1\n2\n3\n4\nM\n"))]);
+        let good = map(&[("a", f("1\nU\n3\n4\nM\n"))]);
+        let j = judge_replay(&b, &u, &m, &good, "");
+        assert!(j.mismatches.is_empty(), "{j:?}");
+        assert_eq!(j.judged, 1);
+        // The user's hunk dropped (merged bytes kept, nothing reported).
+        let v = judge_replay(&b, &u, &m, &m, "");
+        assert_eq!(v.mismatches.len(), 1, "{v:?}");
+        assert!(
+            v.mismatches[0].detail.contains("clean 3-way merge"),
+            "{v:?}"
+        );
+    }
+
+    /// bn-36chi: a user file that already carries an earlier conflict's
+    /// markers is judged too (the byte oracles skip it).
+    #[test]
+    fn user_file_with_old_markers_is_judged() {
+        let old = "<<<<<<< ws\nx\n||||||| base\n=======\ny\n>>>>>>> default\n";
+        let b = map(&[("a", f(&format!("top\n{old}mid\nend\n")))]);
+        let u = map(&[("a", f(&format!("TOP\n{old}mid\nend\n")))]);
+        let m = map(&[("a", f(&format!("top\n{old}mid\nEND\n")))]);
+        let good = map(&[("a", f(&format!("TOP\n{old}mid\nEND\n")))]);
+        assert!(judge_replay(&b, &u, &m, &good, "").mismatches.is_empty());
+        // The replay kept the user's version verbatim, dropping the merge.
+        assert_eq!(judge_replay(&b, &u, &m, &u, "").mismatches.len(), 1);
+    }
+
+    /// bn-36chi: git's diff3 calls abutting hunks a conflict where the
+    /// replay's gix-merge may merge cleanly. No new markers: every line
+    /// either side added must still be there.
+    #[test]
+    fn reference_conflict_with_clean_replay_keeps_both_sides_lines() {
+        let b = map(&[("a", f("1\n2\n"))]);
+        let u = map(&[("a", f("1\n2\nU\n"))]);
+        let m = map(&[("a", f("1\nM\n"))]);
+        assert!(
+            reference_merge(b"1\n2\n", b"1\nM\n", b"1\n2\nU\n")
+                .unwrap()
+                .is_none()
+        );
+        let clean = map(&[("a", f("1\nM\nU\n"))]);
+        assert!(judge_replay(&b, &u, &m, &clean, "").mismatches.is_empty());
+        let dropped = map(&[("a", f("1\nM\n"))]);
+        let v = judge_replay(&b, &u, &m, &dropped, "");
+        assert_eq!(v.mismatches.len(), 1, "{v:?}");
+        assert!(v.mismatches[0].detail.contains("dropped a line"), "{v:?}");
+    }
+
+    /// bn-36chi: with no regular file at the anchor, the user's exec bit
+    /// wins (it was not judged at all before).
+    #[test]
+    fn exec_bit_judged_when_the_anchor_had_no_file() {
+        let b = EntryMap::new();
+        let u = map(&[("a", x("same\n"))]);
+        let m = map(&[("a", f("same\n"))]);
+        assert!(
+            judge_replay(&b, &u, &m, &map(&[("a", x("same\n"))]), "")
+                .mismatches
+                .is_empty()
+        );
+        let v = judge_replay(&b, &u, &m, &map(&[("a", f("same\n"))]), "");
+        assert_eq!(v.mismatches.len(), 1, "{v:?}");
+        assert!(v.mismatches[0].detail.contains("executable bit"), "{v:?}");
+    }
+
+    /// bn-36chi: a merge that only flipped +x on a file the user turned
+    /// into a symlink is not an overlap: the user's link must stay.
+    #[test]
+    fn user_symlink_over_mode_only_merge_change_is_kept() {
+        let b = map(&[("a", f("1"))]);
+        let u = map(&[("a", l("t"))]);
+        let m = map(&[("a", x("1"))]);
+        assert!(judge_replay(&b, &u, &m, &u, "").mismatches.is_empty());
+        assert_eq!(judge_replay(&b, &u, &m, &m, "").mismatches.len(), 1);
+    }
+
+    /// bn-36chi: file<->directory groups one side touched are judged.
+    #[test]
+    fn single_sided_file_dir_groups_are_judged() {
+        // Only the merge turned file `d` into a directory.
+        let b = map(&[("d", f("1")), ("o", f("o"))]);
+        let m = map(&[("d/inner.txt", f("2")), ("o", f("o"))]);
+        let j = judge_replay(&b, &b, &m, &m, "");
+        assert!(j.mismatches.is_empty(), "{j:?}");
+        assert_eq!(j.judged, 3);
+        // The stale file left behind: a mismatch.
+        assert_eq!(judge_replay(&b, &b, &m, &b, "").mismatches.len(), 1);
+        // Only the user turned `d` into a directory: kept, or merged + reported.
+        let u = map(&[("d/inner.txt", f("u")), ("o", f("o"))]);
+        assert!(judge_replay(&b, &u, &b, &u, "").mismatches.is_empty());
+        let report = "  WARNING: 1 path(s) in 'default' have a type conflict\n    d\n      inspect yours: maw ws recover --ref R --show d\n";
+        assert!(judge_replay(&b, &u, &b, &b, report).mismatches.is_empty());
+        assert_eq!(judge_replay(&b, &u, &b, &b, "").mismatches.len(), 1);
     }
 
     /// bn-3adck: only a SIGABRT death while an `abort` failpoint is armed is

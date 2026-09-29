@@ -102,6 +102,33 @@ ev_trunk_crashes=$(evidence trunk_crashes)
 ev_dirty_merges=$(evidence dirty_trunk_merges)
 ev_displacement=$(evidence displacement_checks)
 ev_replay=$(evidence replay_checks)
+ev_drains=$(evidence trunk_drains)
+
+# bn-36chi: campaign-wide trunk-evidence floor. The per-seed vacuity guards
+# only catch a seed that judged NOTHING; a harness that quietly stopped
+# crashing, draining or dirtying the trunk would still accrue clean slots.
+# Every clean slot must show at least this much dirty-trunk evidence per
+# allocated seed (floor = SLOT_SEEDS * num / den). Observed on the pre.18
+# harness (500 seeds x 64 steps): per seed ~3.0 trunk_updates, ~0.62
+# trunk_crashes, ~2.7 dirty_trunk_merges, ~9.1 displacement_checks, ~20
+# replay_checks, ~0.13 trunk_drains; the floors sit ~3-6x below that. A
+# missing counter (binary predates it) fails the floor. TRUNK_EVIDENCE_FLOOR=0
+# in config.env switches it off (only for a harness without the trunk tier).
+floor_short=""
+check_floor() { # name value num den
+  local need=$(( SLOT_SEEDS * $3 / $4 ))
+  if [ "$2" = null ] || [ "$2" -lt "$need" ]; then
+    floor_short+="$1=$2<$need "
+  fi
+}
+if [ "${TRUNK_EVIDENCE_FLOOR:-1}" != 0 ]; then
+  check_floor trunk_updates "$ev_trunk_updates" 1 1
+  check_floor trunk_crashes "$ev_trunk_crashes" 1 10
+  check_floor dirty_trunk_merges "$ev_dirty_merges" 1 2
+  check_floor displacement_checks "$ev_displacement" 1 1
+  check_floor replay_checks "$ev_replay" 2 1
+  check_floor trunk_drains "$ev_drains" 1 50
+fi
 infra_line=$(grep -m1 '^\[sg1\] INFRA-FAILURE:' <<<"$out" || true)
 # Belt and braces: any sign of an oracle violation in the output vetoes the
 # infra path (the harness already refuses to exit 75 after a violation).
@@ -156,10 +183,25 @@ if [ "$rc" -ne 0 ] || [ -z "$clean" ] || [ -z "$range_clean" ]; then
   exit 1
 fi
 
+# A clean run below the evidence floor is not evidence: no accrual, and the
+# campaign stops for a human (fail closed, like a harness error).
+if [ -n "$floor_short" ]; then
+  mkdir -p "$STATE/violations"
+  log="$STATE/violations/base-${base}-${ts//[:]/-}.log"
+  printf '%s\n' "$out" > "$log"
+  printf '{"ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"status":"VIOLATION_OR_ERROR","reason":"evidence_floor","short":"%s","rc":%s,"log":"%s"}\n' \
+    "$ts" "$base" "$SLOT_SEEDS" "$STEPS" "${floor_short% }" "$rc" "$log" >> "$STATE/ledger.jsonl"
+  printf 'VIOLATION: trunk evidence below the campaign floor at base_seed=%s (%s). The harness stopped exercising the dirty trunk; no op-steps accrued. Log: %s\n' \
+    "$base" "${floor_short% }" "$log" > "$STATE/STOP"
+  echo "SG1 SOAK HALTED: trunk evidence floor not met at base_seed=$base: ${floor_short% }" >&2
+  echo "  details: $log" >&2
+  exit 1
+fi
+
 op=$(( range_clean * STEPS ))
-printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"range_clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"trunk_updates":%s,"trunk_crashes":%s,"dirty_trunk_merges":%s,"displacement_checks":%s,"replay_checks":%s,"status":"clean"}\n' \
+printf '{"ts":"%s","end_ts":"%s","base_seed":%s,"slot_seeds":%s,"steps":%s,"clean":%s,"range_clean":%s,"op_steps":%s,"oracle_a_checks":%s,"witnesses":%s,"harness_errors":%s,"trunk_updates":%s,"trunk_crashes":%s,"dirty_trunk_merges":%s,"displacement_checks":%s,"replay_checks":%s,"trunk_drains":%s,"status":"clean"}\n' \
   "$ts" "$end_ts" "$base" "$SLOT_SEEDS" "$STEPS" "$clean" "$range_clean" "$op" "$ev_checks" "$ev_witnesses" "$ev_harness" \
-  "$ev_trunk_updates" "$ev_trunk_crashes" "$ev_dirty_merges" "$ev_displacement" "$ev_replay" >> "$STATE/ledger.jsonl"
+  "$ev_trunk_updates" "$ev_trunk_crashes" "$ev_dirty_merges" "$ev_displacement" "$ev_replay" "$ev_drains" >> "$STATE/ledger.jsonl"
 
 exec {tf}>"$STATE/total.lock"; flock "$tf"
 cum=$(( $(cat "$STATE/cumulative") + op )); echo "$cum" > "$STATE/cumulative"

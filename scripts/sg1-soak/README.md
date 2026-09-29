@@ -42,6 +42,14 @@ disk to your foreground compiles.
   counted (the ledger's `clean` includes it, `range_clean` does not). The slot
   only accrues if the harness's begin line echoes back the allocated
   `SLOT_SEEDS`/`STEPS`/base seed; any mismatch fails closed like a violation.
+- **Trunk-evidence floor (bn-36chi).** A clean slot must also report at least
+  `SLOT_SEEDS ×` {1 trunk_updates, 1/10 trunk_crashes, 1/2 dirty_trunk_merges,
+  1 displacement_checks, 2 replay_checks, 1/50 trunk_drains} (about 3-6x below
+  what the pre.18 harness produces). A counter below its floor, or missing,
+  STOPs the campaign as `VIOLATION: trunk evidence below the campaign floor`
+  (ledger `"reason":"evidence_floor"`, no accrual): the harness quietly stopped
+  exercising the dirty trunk. `TRUNK_EVIDENCE_FLOOR=0` in `config.env` turns it
+  off, only for a harness without the trunk tier.
 - `flock` bounds concurrency to `PARALLEL` (default 2). Cron can fire often; if
   all slots are busy it exits immediately.
 - **A slot whose binary exits non-zero = an Oracle violation.** The slot writes

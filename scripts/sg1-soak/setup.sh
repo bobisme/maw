@@ -10,6 +10,8 @@
 #                SG1_SOAK_PARALLEL, SG1_SOAK_TARGET, SG1_SOAK_BASE_START,
 #                SG1_SOAK_INFRA_HALT_AFTER (consecutive infra slots before
 #                an INFRA-HALT STOP; default 3),
+#                SG1_SOAK_TRUNK_EVIDENCE_FLOOR (1 = enforce slot.sh's per-slot
+#                dirty-trunk evidence floor, the default; 0 = off),
 #                SG1_SOAK_FORCE=1 (allow re-pin mid-campaign without reset).
 set -euo pipefail
 
@@ -21,6 +23,7 @@ PARALLEL="${SG1_SOAK_PARALLEL:-2}"
 TARGET="${SG1_SOAK_TARGET:-100000000}"           # 1e8 — v1.0 release-gate floor
 BASE_START="${SG1_SOAK_BASE_START:-4294967296}"  # 0x1_0000_0000, clear of corpus/canonical seeds
 INFRA_HALT_AFTER="${SG1_SOAK_INFRA_HALT_AFTER:-3}"
+TRUNK_EVIDENCE_FLOOR="${SG1_SOAK_TRUNK_EVIDENCE_FLOOR:-1}"
 
 mkdir -p "$STATE"
 
@@ -58,6 +61,7 @@ SLOT_SEEDS=$SLOT_SEEDS
 PARALLEL=$PARALLEL
 TARGET_OPSTEPS=$TARGET
 INFRA_HALT_AFTER=$INFRA_HALT_AFTER
+TRUNK_EVIDENCE_FLOOR=$TRUNK_EVIDENCE_FLOOR
 PINNED_SRC=$BIN
 PINNED_SRC_SHA=$SRC_SHA
 PINNED_BIN_SHA256=$NEW_BINSHA

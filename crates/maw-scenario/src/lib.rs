@@ -139,6 +139,19 @@ pub const CRASHABLE_BY_PHASE: &[(&str, &[&str])] = &[
             // deliberately re-pinned the op-stream digests (campaign reset).
             "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
             "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+            // bn-36chi: the rest of the target update's crash windows,
+            // appended (a deliberate re-pin of every op-stream digest, batched
+            // with the soak re-pin). `FP_SNAPSHOT_AFTER_CLEAN`: the tree was
+            // cleaned after the snapshot and intent, before the checkout.
+            // `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` (bn-1eg2u): inside the
+            // snapshot-failed fallback, after its force checkout — reached
+            // only with the snapshot failing too, which drivers arm alongside
+            // (`maw_assurance::fault::prerequisite_fp`).
+            // `FP_CLEANUP_REPLAY_BEFORE_APPLY` (bn-1eg2u): inside the replay,
+            // after the replay commit is pinned, before `stash_apply`.
+            "FP_SNAPSHOT_AFTER_CLEAN",
+            "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT",
+            "FP_CLEANUP_REPLAY_BEFORE_APPLY",
         ],
     ),
 ];
@@ -584,13 +597,30 @@ pub struct ConditionProfile {
 /// The target-update crash sites a dirty-trunk merge is biased towards by
 /// [`ConditionProfile::dirty_trunk_crash_pct`] (bn-1jfui), all cleanup-phase
 /// sites of [`CRASHABLE_BY_PHASE`]. `FP_CLEANUP_AFTER_DEFAULT_CHECKOUT` is
-/// listed twice: it is the one crash that leaves the user's edits only in the
-/// pinned snapshot (the displacement a recovering merge must undo).
+/// listed twice: it was the first crash that leaves the user's edits only in
+/// the pinned snapshot (the displacement a recovering merge must undo); the
+/// bn-36chi windows (after the clean, inside the fallback, inside the replay)
+/// leave them there too.
 pub const DIRTY_TRUNK_CRASH_SITES: &[&str] = &[
     "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
     "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
     "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
     "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
+    // bn-36chi: the other windows inside the update.
+    "FP_SNAPSHOT_AFTER_CLEAN",
+    "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT",
+    "FP_CLEANUP_REPLAY_BEFORE_APPLY",
+];
+
+/// Every crash window INSIDE the production target update
+/// (`update_default_workspace`), in execution order. A driver that models the
+/// update runs these inside it; any other fault is "died before the update".
+pub const TARGET_UPDATE_WINDOWS: &[&str] = &[
+    "FP_UPDATE_DEFAULT_BEFORE_SNAPSHOT",
+    "FP_CLEANUP_FALLBACK_AFTER_CHECKOUT",
+    "FP_SNAPSHOT_AFTER_CLEAN",
+    "FP_CLEANUP_AFTER_DEFAULT_CHECKOUT",
+    "FP_CLEANUP_REPLAY_BEFORE_APPLY",
 ];
 
 impl ConditionProfile {
@@ -3020,7 +3050,15 @@ pub fn op_stream_digest(profile: &ConditionProfile) -> u64 {
 /// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
 /// `git_time`s are byte-identical to the previous pin (verified by diffing
 /// the 3 x 256 x 128 step streams with fault names masked).
-pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x6449_2302_02ed_7fc2;
+/// Re-pinned by bn-36chi (deliberate campaign reset, batched with the SG1
+/// soak re-pin): the cleanup phase of [`CRASHABLE_BY_PHASE`] gained
+/// `FP_SNAPSHOT_AFTER_CLEAN`, `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` and
+/// `FP_CLEANUP_REPLAY_BEFORE_APPLY`, so cleanup-phase fault names reshuffle.
+/// Ops, phases and `git_time`s are byte-identical to the previous pin
+/// (verified: FNV-1a over the 256 x 128 step streams with fault names masked
+/// is unchanged for the default, production-tier, escape-heavy and soak
+/// profiles).
+pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x82e1_fe8f_fcda_1ab6;
 
 /// Op-stream digest with BOTH pre-bn-22jy gated knobs turned up
 /// (`advance_weight = 8`, `escape_weight = 8`), captured at trunk `4537c51e`.
@@ -3031,7 +3069,10 @@ pub const PRODUCTION_TIER_OP_STREAM_DIGEST: u64 = 0x6449_2302_02ed_7fc2;
 /// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
 /// `git_time`s are byte-identical to the previous pin (verified by diffing
 /// the 3 x 256 x 128 step streams with fault names masked).
-pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0x8e09_b3f9_d8e9_cdf1;
+/// Re-pinned by bn-36chi (deliberate campaign reset, batched with the SG1
+/// soak re-pin): three cleanup-phase sites appended; fault-name-masked
+/// streams unchanged (see [`DEFAULT_PROFILE_OP_STREAM_DIGEST`]).
+pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0x5e93_2bb6_6929_3ce4;
 
 /// The digest [`default_profile_op_stream_digest`] produced at trunk
 /// `4537c51e` — the last commit **before** bn-22jy added the
@@ -3051,12 +3092,29 @@ pub const ESCAPE_HEAVY_OP_STREAM_DIGEST: u64 = 0x8e09_b3f9_d8e9_cdf1;
 /// cleanup-phase `FaultSpec::Failpoint` names reshuffle. Ops, phases and
 /// `git_time`s are byte-identical to the previous pin (verified by diffing
 /// the 3 x 256 x 128 step streams with fault names masked).
-pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x47e8_0c03_96be_778b;
+/// Re-pinned by bn-36chi (deliberate campaign reset, batched with the SG1
+/// soak re-pin): the cleanup phase of [`CRASHABLE_BY_PHASE`] gained
+/// `FP_SNAPSHOT_AFTER_CLEAN`, `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` and
+/// `FP_CLEANUP_REPLAY_BEFORE_APPLY`, so cleanup-phase fault names reshuffle.
+/// Ops, phases and `git_time`s are byte-identical to the previous pin
+/// (verified: FNV-1a over the 256 x 128 step streams with fault names masked
+/// is unchanged for the default, production-tier, escape-heavy and soak
+/// profiles).
+pub const DEFAULT_PROFILE_OP_STREAM_DIGEST: u64 = 0x1157_72df_91f0_8621;
 
 /// Op-stream digest of [`ConditionProfile::sg1_soak`] — the in-proc SG1 soak
 /// (the v1.0 release gate) — introduced by bn-1h9ue (dirty-trunk soak,
 /// user-approved campaign reset). Changing it re-pins the soak.
-pub const SG1_SOAK_PROFILE_OP_STREAM_DIGEST: u64 = 0xc831_ec9b_c977_a7f0;
+///
+/// Re-pinned by bn-36chi (deliberate campaign reset, batched with the SG1
+/// soak re-pin): the cleanup phase of [`CRASHABLE_BY_PHASE`] gained
+/// `FP_SNAPSHOT_AFTER_CLEAN`, `FP_CLEANUP_FALLBACK_AFTER_CHECKOUT` and
+/// `FP_CLEANUP_REPLAY_BEFORE_APPLY`, so cleanup-phase fault names reshuffle.
+/// Ops, phases and `git_time`s are byte-identical to the previous pin
+/// (verified: FNV-1a over the 256 x 128 step streams with fault names masked
+/// is unchanged for the default, production-tier, escape-heavy and soak
+/// profiles).
+pub const SG1_SOAK_PROFILE_OP_STREAM_DIGEST: u64 = 0x573c_8904_9714_65e8;
 
 #[cfg(test)]
 mod bn_1h9ue_tests {
