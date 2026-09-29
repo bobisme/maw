@@ -1405,23 +1405,35 @@ pub enum WorkspaceCommands {
     /// merged files, the merge succeeds but leaves conflict markers in
     /// the target. Use `maw ws resolve` to resolve them:
     ///   maw ws resolve <target-workspace> --list
-    ///   maw ws resolve <target-workspace> --keep-all alice
+    ///   maw ws resolve <target-workspace> --keep alice
+    ///
+    /// --message is REQUIRED when stdin is not a terminal (agents, scripts,
+    /// CI): without it the merge refuses. Interactive runs without --message
+    /// open $EDITOR. --check, --plan and --dry-run do not need a message.
+    ///
+    /// If your project uses an orchestrator (e.g. edict), merge through it;
+    /// it runs maw ws merge for you after its checks.
     ///
     /// Examples:
-    ///   maw ws merge alice --into default                       # adopt alice into default
-    ///   maw ws merge alice --into crib2 --destroy               # merge into branch-attached workspace crib2
-    ///   maw ws merge alice --into `ws:crib2` --destroy          # explicit workspace target
-    ///   maw ws merge alice --into `change:ch-1xr` --destroy     # explicit active change target
-    ///   maw ws merge alice bob --into default                   # merge alice and bob into default
-    ///   maw ws merge alice bob --into default --destroy         # merge and clean up
+    ///   maw ws merge alice --into default --check               # pre-flight check
+    ///   maw ws merge alice --into default --check --format json # structured check
+    ///   maw ws merge alice --into default --destroy --message "feat: alice's work"
+    ///   maw ws merge alice --into default --message "feat: adopt alice"   # keep the workspace
+    ///   maw ws merge alice bob --into default --destroy --message "feat: alice + bob"
     ///   maw ws merge alice bob --into default --dry-run         # preview merge
     ///   maw ws merge alice bob --into default --plan            # deterministic plan
     ///   maw ws merge alice bob --into default --plan --json     # plan as JSON
-    ///   maw ws merge alice --into default --check               # pre-flight check
-    ///   maw ws merge alice --into default --check --format json # structured check
-    ///   maw ws merge alice --into default --format json         # structured result
-    ///   maw ws merge alice bob --into default --resolve cf-k7mx=alice --resolve cf-r3np=bob
-    ///   maw ws merge alice bob --into default --resolve-all=alice
+    ///   maw ws merge alice --into default --format json --message "feat: ..."
+    ///
+    ///   # Other targets: a branch-attached workspace (crib2), an explicit
+    ///   # workspace target, an explicit active change target
+    ///   maw ws merge alice --into crib2 --destroy --message "feat: ..."
+    ///   maw ws merge alice --into ws:crib2 --destroy --message "feat: ..."
+    ///   maw ws merge alice --into change:ch-1xr --destroy --message "feat: ..."
+    ///
+    ///   # Resolve pre-merge conflicts inline (IDs come from --check / maw ws conflicts)
+    ///   maw ws merge alice bob --into default --message "fix: ..." --resolve cf-k7mx=alice
+    ///   maw ws merge alice bob --into default --message "fix: ..." --resolve-all=alice
     ///
     /// --format json (success) — STABLE CONTRACT. One object per merge with, at least:
     ///   status            "success"
@@ -1507,7 +1519,7 @@ pub enum WorkspaceCommands {
         #[arg(short, long)]
         confirm: bool,
 
-        /// Custom merge commit message
+        /// Merge commit message (required when stdin is not a terminal)
         #[arg(short, long)]
         message: Option<String>,
 
@@ -1548,7 +1560,7 @@ pub enum WorkspaceCommands {
         /// When a merge produces conflicts, each conflict is assigned a short ID
         /// (e.g., cf-k7mx). Re-run the merge with --resolve flags to resolve them:
         ///
-        ///   maw ws merge alice bob --into default --resolve cf-k7mx=alice --resolve cf-r3np=bob
+        ///   maw ws merge alice bob --into default --message "fix: ..." --resolve cf-k7mx=alice
         ///
         /// Strategies:
         ///   WORKSPACE    — keep named workspace's version (e.g., alice, bob)
@@ -1568,7 +1580,7 @@ pub enum WorkspaceCommands {
         ///
         /// Individual --resolve flags take precedence over --resolve-all.
         ///
-        ///   maw ws merge alice bob --into default --resolve-all=alice
+        ///   maw ws merge alice bob --into default --message "fix: ..." --resolve-all=alice
         #[arg(
             long = "resolve-all",
             value_name = "WORKSPACE",

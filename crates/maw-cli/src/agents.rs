@@ -48,7 +48,7 @@ can happen concurrently without stomping each other.
 ### Quick Start
 
 ```bash
-maw ws create <your-name> --from origin/main  # Creates workspace from explicit source
+maw ws create <your-name> --from main  # Creates workspace from the local trunk
 # Edit files using the absolute workspace path shown by create
 # Save your work in your workspace:
 maw exec <your-name> -- git add -A
@@ -60,15 +60,30 @@ maw ws status                  # See all agent work
 
 | Task | Command |
 |------|---------|
-| Create workspace | `maw ws create <name> --from <source>` |
+| Create workspace | `maw ws create <name> --from main` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
 | Run command in workspace | `maw exec <name> -- <command>` |
-| Merge work | `maw ws merge <a> <b> --into default` |
+| Check a merge (dry run) | `maw ws merge <name> --into default --check` |
+| Merge work | `maw ws merge <name> --into default --destroy --message "feat: ..."` |
+| List conflicts | `maw ws resolve <name> --list` |
 | Destroy workspace | `maw ws destroy <name>` |
 
 **Note:** Always run commands through `maw exec <name> -- ...` in sandboxed environments
 where `cd` does not persist.
+
+### Merging
+
+`--message` is required when stdin is not a terminal (agents, scripts, CI); without
+it the merge refuses. Check first, then merge:
+
+```bash
+maw ws merge <name> --into default --check
+maw ws merge <name> --into default --destroy --message "feat: what you did"
+```
+
+If your project uses an orchestrator (e.g. edict), merge through it; it runs the merge
+for you after its checks.
 
 ### Session Start
 
@@ -108,17 +123,20 @@ sibling rebases entirely (siblings then stay stale until they run `maw ws sync`)
 
 ### Conflicts
 
-If merge reports conflicts, resolve them in workspace files, then commit the resolution:
+Conflicts are state, not failure. List them, then pick a side with `--keep`
+(a workspace name, `epoch`, `both`, or `union`; `PATH=NAME` resolves one file):
 
 ```bash
-maw exec <name> -- git status
-# Edit files to remove <<<<<<< conflict markers
-maw exec <name> -- git add -A
-maw exec <name> -- git commit -m "resolve: ..."
+maw ws conflicts <name>                 # pre-merge conflicts between workspaces
+maw ws resolve <name> --list            # conflicted files in the workspace
+maw ws resolve <name> --keep epoch      # or: --keep <name> | --keep both | --keep union
 ```
 
-### Pushing to Remote (Coordinator)
+Then retry the merge.
 
+### Pushing to Remote (Lead / Orchestrator)
+
+Pushing is done by the lead or orchestrator, not by individual workers.
 After merging workspaces:
 
 ```bash

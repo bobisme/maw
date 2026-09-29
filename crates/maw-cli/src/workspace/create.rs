@@ -275,14 +275,20 @@ fn create_with_output(
         if let Some(change_id) = bound_change_id.as_deref() {
             if name == change_id {
                 println!("  maw ws create --change {change_id} <agent-workspace>");
-                println!("  maw ws merge <agent-workspace> --into change:{change_id} --destroy");
+                println!(
+                    "  maw ws merge <agent-workspace> --into change:{change_id} --destroy --message \"feat: ...\""
+                );
             } else {
-                println!("  maw ws merge {name} --into change:{change_id} --destroy");
+                println!(
+                    "  maw ws merge {name} --into change:{change_id} --destroy --message \"feat: ...\""
+                );
             }
         } else if attached_branch.is_some() && persistent {
-            println!("  maw ws merge <agent-workspace> --into {name} --destroy");
+            println!(
+                "  maw ws merge <agent-workspace> --into {name} --destroy --message \"feat: ...\""
+            );
         } else {
-            println!("  maw ws merge {name} --into default --destroy");
+            println!("  maw ws merge {name} --into default --destroy --message \"feat: ...\"");
         }
         println!();
         if persistent {

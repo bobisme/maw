@@ -39,7 +39,7 @@ use maw_cli::workspace;
 ///
 /// QUICK START:
 ///
-///   maw ws create <your-name> --from origin/main
+///   maw ws create <your-name> --from main
 ///
 ///   # All file operations use the workspace path shown by create.
 ///   # Run tools inside your workspace:
@@ -51,12 +51,24 @@ use maw_cli::workspace;
 ///
 /// WORKFLOW:
 ///
-///   1. Create workspace: maw ws create <name> --from <source>
+///   1. Create workspace: maw ws create <name> --from main
 ///   2. Edit files under .maw/workspaces/<name>/ (use absolute paths)
-///   3. Save work with git commits in your workspace
+///   3. Save work with git commits in your workspace:
+///        maw exec <name> -- git add -A && maw exec <name> -- git commit -m "feat: ..."
 ///   4. Check status: maw ws status
-///   5. Merge work: maw ws merge <name1> <name2> --into default
-///   6. Resolve conflicts if needed, then continue
+///   5. Merge work (--message is required when stdin is not a terminal):
+///        maw ws merge <name> --into default --check
+///        maw ws merge <name> --into default --destroy --message "feat: ..."
+///   6. Resolve conflicts if needed, then retry the merge:
+///        maw ws resolve <name> --list
+///        maw ws resolve <name> --keep epoch | --keep <name> | --keep both
+///
+///   If your project uses an orchestrator (e.g. edict), merge through it;
+///   it runs maw ws merge for you after its checks. Pushing (maw push) is
+///   done by the lead or orchestrator, not by individual workers.
+// The doc comment above is verbatim `--help` text, not rustdoc: the
+// indented command lines under numbered WORKFLOW steps are intentional.
+#[allow(clippy::doc_overindented_list_items)]
 #[derive(Parser)]
 #[command(name = "maw")]
 #[command(version, about)]

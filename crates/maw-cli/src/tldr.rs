@@ -25,6 +25,8 @@ use anyhow::Result;
 /// `\t# comment` which the renderer aligns as an inline note.
 struct Block {
     title: &'static str,
+    /// Optional one- or two-line prose note printed under the title.
+    note: Option<&'static str>,
     cmds: &'static [&'static str],
 }
 
@@ -33,6 +35,7 @@ struct Block {
 const BLOCKS: &[Block] = &[
     Block {
         title: "Create a workspace (isolated git worktree)",
+        note: None,
         cmds: &[
             "maw ws create <name> --from main",
             "maw ws create <bone-id> --from main --description \"<title>\"",
@@ -40,6 +43,7 @@ const BLOCKS: &[Block] = &[
     },
     Block {
         title: "See what's going on",
+        note: None,
         cmds: &[
             "maw status\t# repo + workspace overview",
             "maw ws list\t# workspaces with state (active / stale / conflicted / +N to merge)",
@@ -48,18 +52,23 @@ const BLOCKS: &[Block] = &[
     },
     Block {
         title: "Run a command inside a workspace (cd doesn't persist)",
+        note: None,
         cmds: &[
             "maw exec <name> -- <command>",
             "maw exec <name> -- git add -A && maw exec <name> -- git commit -m \"feat: ...\"",
-            "maw exec default -- bn <args>\t# bones always runs through the default workspace",
         ],
     },
     Block {
         title: "Refresh a stale workspace onto the latest epoch",
+        note: None,
         cmds: &["maw ws sync <name>"],
     },
     Block {
-        title: "Merge work into default",
+        title: "Merge work into default (--message is required when stdin is not a terminal)",
+        note: Some(
+            "If your project uses an orchestrator (e.g. edict), merge through it; it runs the\n\
+             merge for you after its checks. The lead or orchestrator pushes, not workers.",
+        ),
         cmds: &[
             "maw ws merge <name> --into default --check\t# dry-run first",
             "maw ws merge <name> --into default --destroy --message \"feat: <title>\"",
@@ -67,6 +76,7 @@ const BLOCKS: &[Block] = &[
     },
     Block {
         title: "Recover work from a destroyed workspace (nothing is ever lost)",
+        note: None,
         cmds: &[
             "maw ws recover\t# list destroyed workspaces",
             "maw ws recover <name>\t# inspect its contents",
@@ -75,13 +85,16 @@ const BLOCKS: &[Block] = &[
     },
     Block {
         title: "Resolve conflicts (conflicts are state, not failure)",
+        note: None,
         cmds: &[
             "maw ws conflicts <name>\t# what conflicts, and where",
+            "maw ws resolve <name> --list\t# conflicted files in the workspace",
             "maw ws resolve <name> --keep epoch | --keep <name> | --keep both",
         ],
     },
     Block {
         title: "Check substrate health",
+        note: None,
         cmds: &[
             "maw doctor",
             "maw doctor --repair\t# apply known-safe auto-fixes",
@@ -99,7 +112,13 @@ pub fn render() -> String {
     use std::fmt::Write as _;
     let mut out = String::from("QUICK REFERENCE\n");
     for block in BLOCKS {
-        let _ = write!(out, "\n  {}\n\n", block.title);
+        let _ = write!(out, "\n  {}\n", block.title);
+        if let Some(note) = block.note {
+            for line in note.lines() {
+                let _ = writeln!(out, "  {}", line.trim_start());
+            }
+        }
+        out.push('\n');
         for cmd in block.cmds {
             match cmd.split_once('\t') {
                 Some((command, note)) => {

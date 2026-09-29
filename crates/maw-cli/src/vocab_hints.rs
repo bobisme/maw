@@ -128,7 +128,7 @@ pub fn classify_rejected_verb(args: &[&str]) -> Option<VerbHint> {
         // Bones reach-for: agents sometimes try `bn` as a top-level verb.
         ["bn" | "bone" | "bones", ..] => Some(VerbHint {
             suggestion: "maw exec default -- bn <args>",
-            note: "bones always runs through `maw exec default`",
+            note: "bn is not a maw verb; `maw exec default` runs it at the repo root (default workspace)",
         }),
 
         // `maw merge ...` is for quarantine, not workspace merge — high-friction overload.

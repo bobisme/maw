@@ -261,7 +261,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
             "Refusing to advance '{branch}' to epoch {epoch_short}: epoch currently tracks active change '{change_id}' (branch '{change_branch}').\n  \
              This usually means work was merged into a change target, not trunk.\n  \
              To land work on {branch}, merge into default explicitly:\n    \
-             maw ws merge <workspace> --into default\n  \
+             maw ws merge <workspace> --into default --message \"...\"\n  \
              Or continue the change workflow:\n    \
              maw changes show {change_id}"
         );

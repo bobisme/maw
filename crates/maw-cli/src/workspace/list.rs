@@ -647,7 +647,9 @@ fn print_list_text(
     if !mergeable.is_empty() {
         println!();
         for name in &mergeable {
-            println!("Merge ready: maw ws merge {name} --into default --destroy");
+            println!(
+                "Merge ready: maw ws merge {name} --into default --destroy --message \"feat: ...\""
+            );
         }
     }
 
@@ -920,7 +922,7 @@ fn print_list_pretty(
             "  Ephemeral workspaces should be merged or destroyed — they survived an epoch advance."
         );
         println!(
-            "  Fix: maw ws sync --all  (to sync) or maw ws merge <name> --into default (to merge and destroy)"
+            "  Fix: maw ws sync --all  (to sync) or maw ws merge <name> --into default --destroy --message \"...\" (to merge and destroy)"
         );
     }
 

@@ -886,7 +886,7 @@ fn merge_into_branch_attached_workspace_advances_branch_without_trunk_epoch() {
         "branch target should show branch-local work, got: {list}"
     );
     assert!(
-        !list.contains("Merge ready: maw ws merge crib2 --into default --destroy"),
+        !list.contains("Merge ready: maw ws merge crib2 "),
         "branch target should not be advertised as ready to merge into default, got: {list}"
     );
 }
