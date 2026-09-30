@@ -1639,37 +1639,28 @@ fn check_blockers_removable(default_ws: &Path, blockers: &[String], force: bool)
         })
     };
     for blocker in blockers {
-        let full = default_ws.join(blocker);
-        let meta = full
-            .symlink_metadata()
-            .with_context(|| format!("inspect {}", full.display()))?;
-        if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&full)
-                .with_context(|| format!("read symlink {}", full.display()))?;
-            let committed = head
-                .and_then(|h| repo.read_blob_at_path(h, blocker).ok().flatten())
-                .is_some_and(|(mode, _, content)| {
-                    mode == EntryMode::Link && symlink_target_bytes(&target) == content
-                });
-            if !committed {
-                bail!(
-                    "Refusing restore path '{blocker}': '{}' is a symlink that is not committed \
-                     content. No files were changed.",
-                    full.display()
-                );
-            }
-            continue;
-        }
-        if force {
-            continue;
-        }
         let mut stack = vec![blocker.clone()];
         while let Some(rel) = stack.pop() {
             let full = default_ws.join(&rel);
             let meta = full
                 .symlink_metadata()
                 .with_context(|| format!("inspect {}", full.display()))?;
-            if meta.is_dir() {
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&full)
+                    .with_context(|| format!("read symlink {}", full.display()))?;
+                let committed = head
+                    .and_then(|h| repo.read_blob_at_path(h, &rel).ok().flatten())
+                    .is_some_and(|(mode, _, content)| {
+                        mode == EntryMode::Link && symlink_target_bytes(&target) == content
+                    });
+                if !committed {
+                    bail!(
+                        "Refusing restore path '{rel}': '{}' is a symlink that is not committed \
+                         content. No files were changed.",
+                        full.display()
+                    );
+                }
+            } else if meta.is_dir() {
                 for child in std::fs::read_dir(&full)
                     .with_context(|| format!("read directory {}", full.display()))?
                 {
@@ -1681,7 +1672,7 @@ fn check_blockers_removable(default_ws: &Path, blockers: &[String], force: bool)
                     };
                     stack.push(format!("{rel}/{name}"));
                 }
-            } else if !tracked(&rel) {
+            } else if !force && !tracked(&rel) {
                 bail!(
                     "Refusing to remove '{blocker}' to make room for the restore: '{rel}' is not \
                      committed content (untracked or ignored). No files were changed.\n  \
@@ -1779,6 +1770,25 @@ fn restore_file_at_oid(
 
     let blockers = restore_blockers(default_ws, &entries)?;
     check_blockers_removable(default_ws, &blockers, force)?;
+    if !force {
+        // Status omits ignored files. Check existing leaf destinations too,
+        // before removing blockers or writing any part of a directory.
+        let mut leaves = Vec::new();
+        for (entry_path, _) in &entries {
+            if blockers
+                .iter()
+                .any(|b| Path::new(entry_path).starts_with(b))
+            {
+                continue;
+            }
+            match default_ws.join(entry_path).symlink_metadata() {
+                Ok(_) => leaves.push(entry_path.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).context("inspect restore destination"),
+            }
+        }
+        check_blockers_removable(default_ws, &leaves, false)?;
+    }
     remove_blockers(default_ws, &blockers)?;
 
     for ((entry_path, entry), content) in entries.iter().zip(contents) {

@@ -8177,6 +8177,8 @@ fn report_unreplayed_snapshot(
     snapshot_oid: &str,
     recovery_ref: Option<&str>,
 ) {
+    use super::working_copy::blocking_parent_at;
+
     let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
         return;
     };
@@ -8206,12 +8208,38 @@ fn report_unreplayed_snapshot(
         {
             continue;
         }
+        // A swap must be restored as a unit. A blob diff calls file p ->
+        // directory p/ a deletion plus additions; printing rm p followed
+        // by restores of p/x makes the latter refuse the now-dirty parent.
+        // Likewise, children deleted to make room for file p are not
+        // independent deletions to run after restoring p.
+        let rel = [
+            Some(PathBuf::from(&rel)),
+            blocking_parent_at(&repo, snapshot_oid, Path::new(&rel)),
+            blocking_parent_at(&repo, "HEAD", Path::new(&rel)),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|p| p.components().count())
+        .expect("the changed path is present")
+        .to_string_lossy()
+        .into_owned();
+        let in_snapshot = repo.find_entry_at_path(snap, &rel).ok().flatten().is_some();
+        let disk = DiskSide::capture_at(ws_path, Path::new(&rel)).ok();
         let committed = head.and_then(|h| repo.read_blob_at_path(h, &rel).ok().flatten());
         let disk_is_committed = disk
             .as_ref()
             .is_some_and(|d| disk_matches_tree_entry(d, committed.as_ref()));
-        lost.push((rel, pinned.is_some(), disk_is_committed));
+        lost.push((rel, in_snapshot, disk_is_committed));
     }
+    lost.sort_by(|a, b| a.0.cmp(&b.0));
+    lost.dedup_by(|a, b| a.0 == b.0);
+    let roots: Vec<_> = lost.iter().map(|(rel, _, _)| PathBuf::from(rel)).collect();
+    lost.retain(|(rel, _, _)| {
+        !roots
+            .iter()
+            .any(|root| root != Path::new(rel) && Path::new(rel).starts_with(root))
+    });
     if lost.is_empty() {
         return;
     }

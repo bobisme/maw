@@ -377,6 +377,134 @@ fn restore_refuses_to_remove_a_dirty_parent_file() {
     assert_eq!(read_regular(&root.join("d")), "merged file\nedited after\n");
 }
 
+/// Git status omits ignored leaf destinations inside a restored directory.
+#[test]
+fn restore_directory_refuses_ignored_destination() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    init_repo(root, &[("d/x", "snapshot x\n"), ("d/y", "snapshot y\n")]);
+    let pin = "refs/manifold/recovery/default/ignored-destination";
+    git_quiet(root, &["update-ref", pin, "HEAD"]);
+    std::fs::remove_file(root.join("d/y")).expect("remove y");
+    std::fs::write(root.join(".gitignore"), "d/y\n").expect("ignore y");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "stop tracking y"]);
+    std::fs::write(root.join("d/y"), "only local copy\n").expect("ignored y");
+
+    let out = maw_raw(
+        root,
+        &["ws", "recover", "--ref", pin, "--restore-file", "d"],
+        None,
+    );
+    assert!(
+        !out.status.success(),
+        "must refuse ignored destination:\n{}",
+        combined(&out)
+    );
+    assert_eq!(read_regular(&root.join("d/y")), "only local copy\n");
+    assert_eq!(read_regular(&root.join("d/x")), "snapshot x\n");
+    maw(
+        root,
+        &[
+            "ws",
+            "recover",
+            "--ref",
+            pin,
+            "--restore-file",
+            "d",
+            "--force",
+        ],
+    );
+    assert_eq!(read_regular(&root.join("d/y")), "snapshot y\n");
+}
+
+/// --force must still refuse an uncommitted symlink inside a blocker.
+#[test]
+fn restore_force_refuses_nested_uncommitted_symlink() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    init_repo(root, &[("p", "snapshot file\n")]);
+    let pin = "refs/manifold/recovery/default/nested-link";
+    git_quiet(root, &["update-ref", pin, "HEAD"]);
+    std::fs::remove_file(root.join("p")).expect("remove p");
+    std::fs::create_dir_all(root.join("p/sub")).expect("mkdir");
+    std::fs::write(root.join("p/sub/x"), "committed x\n").expect("write x");
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "directory"]);
+    std::os::unix::fs::symlink("unique target", root.join("p/sub/link")).expect("symlink");
+
+    let out = maw_raw(
+        root,
+        &[
+            "ws",
+            "recover",
+            "--ref",
+            pin,
+            "--restore-file",
+            "p",
+            "--force",
+        ],
+        None,
+    );
+    assert!(
+        !out.status.success(),
+        "must refuse nested symlink:\n{}",
+        combined(&out)
+    );
+    assert_eq!(
+        std::fs::read_link(root.join("p/sub/link")).expect("link survives"),
+        Path::new("unique target")
+    );
+    assert_eq!(read_regular(&root.join("p/sub/x")), "committed x\n");
+    // Committed symlinks can safely make way, including inside directories.
+    git_quiet(root, &["add", "-A"]);
+    git_quiet(root, &["commit", "-m", "commit link"]);
+    maw(
+        root,
+        &[
+            "ws",
+            "recover",
+            "--ref",
+            pin,
+            "--restore-file",
+            "p",
+            "--force",
+        ],
+    );
+    assert_eq!(read_regular(&root.join("p")), "snapshot file\n");
+}
+
+/// A local deletion below a directory replaced by a merged symlink must
+/// never unlink a file in the symlink's target outside the repository.
+#[test]
+fn replay_deletion_does_not_follow_merged_parent_symlink() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&root).expect("mkdir repo");
+    std::fs::create_dir(&outside).expect("mkdir outside");
+    std::fs::write(outside.join("x"), "irreplaceable outside work\n").expect("outside x");
+    init_repo(&root, &[("d/x", "base\n")]);
+    ws_commit(&root, |ws| {
+        std::fs::remove_dir_all(ws.join("d")).expect("remove directory");
+        std::os::unix::fs::symlink(&outside, ws.join("d")).expect("merged symlink");
+    });
+    std::fs::remove_file(root.join("d/x")).expect("local deletion");
+
+    let out = merge_a(&root, None);
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("x")).ok().as_deref(),
+        Some("irreplaceable outside work\n"),
+        "replaying a deletion must not remove outside work:\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_link(root.join("d")).expect("merged link"),
+        outside
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot-failed fallback path.
 // ---------------------------------------------------------------------------
@@ -454,4 +582,65 @@ fn fallback_merged_file_over_local_dir_restores_whole_dir() {
     assert_eq!(read_regular(&root.join("d/x")), "x\nuser\n", "{text}");
     assert_eq!(read_regular(&root.join("d/y")), "y\n", "{text}");
     assert_eq!(read_regular(&root.join("d/new")), "untracked\n", "{text}");
+}
+
+/// A failed replay after recovery must report a directory swap as one
+/// restore, not a deletion followed by commands invalidated by that deletion.
+#[cfg(feature = "failpoints")]
+#[test]
+fn resumed_failed_replay_directory_commands_work_verbatim() {
+    for local_is_dir in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        if local_is_dir {
+            init_repo(root, &[("p", "base\n")]);
+            ws_commit(root, |ws| {
+                std::fs::write(ws.join("p"), "merged\n").expect("edit");
+            });
+            std::fs::remove_file(root.join("p")).expect("remove p");
+            std::fs::create_dir(root.join("p")).expect("mkdir");
+            std::fs::write(root.join("p/x"), "user x\n").expect("write x");
+            std::fs::write(root.join("p/y"), "user y\n").expect("write y");
+        } else {
+            init_repo(root, &[("p/x", "base\n")]);
+            ws_commit(root, |ws| {
+                std::fs::write(ws.join("p/x"), "merged\n").expect("edit");
+            });
+            std::fs::remove_dir_all(root.join("p")).expect("remove p");
+            std::fs::write(root.join("p"), "user file\n").expect("write p");
+        }
+        let crash = merge_a(root, Some("FP_CLEANUP_AFTER_DEFAULT_CHECKOUT=abort"));
+        assert!(!crash.status.success(), "{}", combined(&crash));
+        let out = maw_raw(
+            root,
+            &["ws", "merge", "--recover"],
+            Some("FP_CLEANUP_REPLAY_BEFORE_APPLY=error:injected"),
+        );
+        let text = combined(&out);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("replay_snapshot failed"), "{text}");
+        let commands: Vec<_> = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("restore yours: "))
+            .collect();
+        assert!(!commands.is_empty(), "{text}");
+        for cmd in commands {
+            let out = Command::new("sh")
+                .args(["-c", &cmd.replacen("maw ", &format!("{MAW} "), 1)])
+                .current_dir(root)
+                .output()
+                .expect("run printed command");
+            assert!(
+                out.status.success(),
+                "command {cmd} failed:\n{}\n{text}",
+                combined(&out)
+            );
+        }
+        if local_is_dir {
+            assert_eq!(read_regular(&root.join("p/x")), "user x\n");
+            assert_eq!(read_regular(&root.join("p/y")), "user y\n");
+        } else {
+            assert_eq!(read_regular(&root.join("p")), "user file\n");
+        }
+    }
 }

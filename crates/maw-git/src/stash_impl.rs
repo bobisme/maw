@@ -316,7 +316,7 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                         message: format!("failed to read blob {oid} for '{path_str}': {e}"),
                     })?;
 
-                let file_path = workdir.join(path_str);
+                let file_path = checked_stash_path(workdir, path_str)?;
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| GitError::BackendError {
                         message: format!("failed to create directory for '{path_str}': {e}"),
@@ -416,7 +416,7 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                 // Remove file (or symlink) from worktree.
                 // Use symlink_metadata instead of exists() so dangling symlinks
                 // are also detected and removed.
-                let file_path = workdir.join(path_str);
+                let file_path = checked_stash_path(workdir, path_str)?;
                 if std::fs::symlink_metadata(&file_path).is_ok() {
                     std::fs::remove_file(&file_path).map_err(|e| GitError::BackendError {
                         message: format!("failed to remove file '{path_str}': {e}"),
@@ -444,6 +444,46 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
         })?;
 
     Ok(())
+}
+
+/// A leaf symlink may be replaced, but no replay operation may traverse a
+/// symlinked parent, including deletions. Check from the worktree outwards
+/// before creating directories, unlinking entries, or writing bytes.
+fn checked_stash_path(
+    workdir: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, GitError> {
+    let mut full = workdir.to_path_buf();
+    let mut components = std::path::Path::new(rel).components().peekable();
+    while let Some(component) = components.next() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(GitError::BackendError {
+                message: format!("refusing unsafe replay path '{rel}'"),
+            });
+        }
+        full.push(component);
+        if components.peek().is_none() {
+            break;
+        }
+        match full.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(GitError::BackendError {
+                    message: format!(
+                        "refusing replay path '{rel}': parent '{}' is a symlink",
+                        full.display()
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(GitError::BackendError {
+                    message: format!("cannot inspect replay parent '{}': {e}", full.display()),
+                });
+            }
+        }
+    }
+    Ok(full)
 }
 
 /// Remove `dir` if it holds nothing but (nested) empty directories; never
@@ -913,6 +953,31 @@ mod tests {
             std::fs::read_to_string(root.join("d/keep")).expect("d/keep survives"),
             "not tracked, not captured\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stash_apply_refuses_writes_through_parent_symlink() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::create_dir(root.join("d")).expect("mkdir");
+        std::fs::write(root.join("d/x"), "base\n").expect("write base");
+        commit_all(root, "directory");
+        std::fs::write(root.join("d/x"), "local edit\n").expect("edit");
+        let snap = worktree_state_commit(&repo, "snap")
+            .expect("snapshot")
+            .expect("dirty");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("x"), "outside work\n").expect("outside x");
+        std::fs::remove_dir_all(root.join("d")).expect("remove d");
+        std::os::unix::fs::symlink(outside.path(), root.join("d")).expect("symlink");
+
+        let result = stash_apply(&repo, snap);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("x")).expect("outside survives"),
+            "outside work\n"
+        );
+        assert!(result.is_err(), "replay must refuse the symlinked parent");
     }
 
     /// Regression test (bn-17o1): `worktree_state_commit` must go through the
