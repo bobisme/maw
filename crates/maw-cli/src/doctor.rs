@@ -657,11 +657,17 @@ fn check_reserved_workspace_names(root: Option<&Path>) -> DoctorCheck {
         })
         .unwrap_or_default();
     live.sort();
-    let destroyed: Vec<String> = workspace::destroy_record::list_destroyed_workspaces(root)
+    // bn-1axaz: `(name, restored)`: whether the `<name>-work` workspace the
+    // hint restores into already exists (the records outlive the rename).
+    let destroyed: Vec<(String, bool)> = workspace::destroy_record::list_destroyed_workspaces(root)
         .unwrap_or_default()
         .into_iter()
         .filter(|n| n == maw_core::model::types::WorkspaceId::UNDO_PIN_NAMESPACE)
         .filter(|n| !live.contains(n))
+        .map(|n| {
+            let restored = flavor.workspace_path(root, &format!("{n}-work")).exists();
+            (n, restored)
+        })
         .collect();
     reserved_names_check(&live, &destroyed)
 }
@@ -678,7 +684,7 @@ fn is_reserved_legacy_name(name: &str) -> bool {
 }
 
 /// Pure core of [`check_reserved_workspace_names`].
-fn reserved_names_check(live: &[String], destroyed_undo: &[String]) -> DoctorCheck {
+fn reserved_names_check(live: &[String], destroyed_undo: &[(String, bool)]) -> DoctorCheck {
     let name = "reserved workspace names".to_string();
     if live.is_empty() && destroyed_undo.is_empty() {
         return DoctorCheck {
@@ -709,12 +715,23 @@ fn reserved_names_check(live: &[String], destroyed_undo: &[String]) -> DoctorChe
             "maw ws destroy {ws} --force && maw ws recover {ws} --to {ws}-work"
         ));
     }
-    for ws in destroyed_undo {
+    for (ws, restored) in destroyed_undo {
+        // bn-1axaz: with no live `undo` workspace, gc ages these snapshots
+        // like any destroyed workspace's (only a pending redo's pin is kept),
+        // so "gc keeps them all" would be false here.
         parts.push(format!(
-            "destroyed workspace '{ws}' has destroy records under a reserved name ({})",
-            why(ws)
+            "destroyed workspace '{ws}' has destroy records under a reserved name (its \
+             recovery snapshots share refs/manifold/recovery/{ws}/ with `maw undo` pins)"
         ));
-        fixes.push(format!("maw ws recover {ws} --to {ws}-work"));
+        if *restored {
+            // Re-running the recover would fail: `{ws}-work` exists.
+            fixes.push(format!(
+                "already restored as '{ws}-work'; nothing to run (the records clear when \
+                 `maw gc --recovery-snapshots` sweeps their snapshots)"
+            ));
+        } else {
+            fixes.push(format!("maw ws recover {ws} --to {ws}-work"));
+        }
     }
     DoctorCheck {
         name,
@@ -1171,8 +1188,21 @@ mod tests {
         assert!(c.message.contains("maw undo"), "{}", c.message);
         let fix = c.fix.expect("fix");
         assert!(fix.contains("maw ws recover undo --to undo-work"), "{fix}");
-        let c = reserved_names_check(&[], &["undo".to_string()]);
+        let c = reserved_names_check(&[], &[("undo".to_string(), false)]);
         assert!(c.message.contains("destroy record"), "{}", c.message);
+        // bn-1axaz: no live `undo` workspace, so gc does NOT keep them all;
+        // once restored, the hint does not repeat the (now failing) recover.
+        assert!(!c.message.contains("gc keeps them all"), "{}", c.message);
+        assert!(
+            c.fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("maw ws recover undo --to undo-work")
+        );
+        let c = reserved_names_check(&[], &[("undo".to_string(), true)]);
+        let fix = c.fix.expect("fix");
+        assert!(!fix.contains("maw ws recover"), "{fix}");
+        assert!(fix.contains("already restored as 'undo-work'"), "{fix}");
     }
 
     #[test]

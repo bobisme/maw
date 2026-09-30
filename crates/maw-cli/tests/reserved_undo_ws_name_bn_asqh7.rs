@@ -337,3 +337,53 @@ fn destroyed_legacy_undo_workspace_does_not_misclassify_redo_pin() {
     let redo = maw_ok(&root, &["undo"]);
     assert!(redo.contains("Redid merge"), "{redo}");
 }
+
+/// bn-1axaz: every command in the doctor hint runs as printed, before AND
+/// after following it. After the rename the `undo` destroy records remain (so
+/// doctor still reports them), but the hint used to repeat `maw ws recover
+/// undo --to undo-work`, which then fails ("already exists"). And for a
+/// destroyed `undo` it claimed "gc keeps them all", which only holds while a
+/// live `undo` workspace exists.
+#[test]
+fn doctor_hint_commands_run_as_printed_after_the_rename() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = setup_repo(tmp.path());
+    let ws = legacy_undo_workspace(&root);
+    std::fs::write(ws.join("draft.txt"), "draft\n").expect("write");
+
+    let run_fix = |check: &serde_json::Value| {
+        let fix = check["fix"].as_str().unwrap_or_default().to_owned();
+        let fix = fix.strip_prefix("Rename: ").unwrap_or(&fix).to_owned();
+        // Hint alternatives are `  |  `-separated; a command alternative is
+        // `maw ...[ && maw ...]`, anything else is prose.
+        for cmd in fix
+            .split("  |  ")
+            .filter(|alt| alt.starts_with("maw "))
+            .flat_map(|alt| alt.split(" && ").map(str::to_owned).collect::<Vec<_>>())
+        {
+            let cmd = cmd.trim().trim_start_matches("maw ").to_owned();
+            let words: Vec<&str> = cmd.split_whitespace().collect();
+            let out = maw(&root, &words);
+            assert!(
+                out.status.success(),
+                "doctor hint `maw {cmd}` failed as printed:\n{}\nfull check: {check:#}",
+                combined(&out)
+            );
+        }
+    };
+    let check = reserved_check(&root);
+    assert_eq!(check["status"], "warn", "{check:#}");
+    run_fix(&check);
+    assert_eq!(
+        std::fs::read_to_string(root.join(".maw/workspaces/undo-work/draft.txt")).expect("read"),
+        "draft\n"
+    );
+    let check = reserved_check(&root);
+    let msg = check["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("destroy record"), "{check:#}");
+    assert!(
+        !msg.contains("gc keeps them all"),
+        "no live `undo` workspace any more:\n{check:#}"
+    );
+    run_fix(&check);
+}

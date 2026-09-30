@@ -74,7 +74,8 @@
 //! - **Both sides changed a regular file's bytes and the reference diff3
 //!   conflicts, but the replay merged cleanly** (gix-merge accepts abutting
 //!   hunks git's xdiff refuses): the model then only checks that no line
-//!   either side added is missing, not the exact bytes. A clean reference
+//!   either side added is missing and that the disk is not simply the merged
+//!   side (bn-1axaz), not the exact bytes. A clean reference
 //!   merge IS checked byte-for-byte (bn-36chi), including a user file that
 //!   still carries an earlier conflict's markers.
 //! - **Whole-snapshot notices** (`replay_snapshot failed`, a stale intent's
@@ -876,6 +877,15 @@ pub fn judge_replay(
                         "a clean replay dropped a line one side added",
                         format!("a file containing {:?}", String::from_utf8_lossy(line)),
                     );
+                } else if db == mb {
+                    // bn-1axaz: the user's version silently replaced by the
+                    // merged one (a reported replacement was accepted above).
+                    // Catches a lost user DELETION, which the added-line
+                    // check cannot see.
+                    fail(
+                        "a clean replay silently replaced the user's version with the merged one",
+                        "the user's change merged in, or a reported conflict".to_owned(),
+                    );
                 }
             }
             Err(e) => fail(
@@ -1198,6 +1208,27 @@ mod tests {
         assert!(judge_replay(&b, &u, &m, &good, "").mismatches.is_empty());
         // The replay kept the user's version verbatim, dropping the merge.
         assert_eq!(judge_replay(&b, &u, &m, &u, "").mismatches.len(), 1);
+    }
+
+    /// bn-1axaz: the reference conflicts (the user deleted a line the merge
+    /// changed) and the disk holds EXACTLY the merged side, with no markers
+    /// and no report. That silently replaced the user's version; the
+    /// "no added line missing" check alone accepted it (the user added no
+    /// line). With a report it is the documented keep-merged outcome.
+    #[test]
+    fn reference_conflict_with_merged_side_silently_on_disk_is_a_mismatch() {
+        let b = map(&[("a", f("1\n2\n3\n"))]);
+        let u = map(&[("a", f("1\n3\n"))]);
+        let m = map(&[("a", f("1\nM\n3\n"))]);
+        assert!(
+            reference_merge(b"1\n2\n3\n", b"1\nM\n3\n", b"1\n3\n")
+                .unwrap()
+                .is_none()
+        );
+        let v = judge_replay(&b, &u, &m, &m, "");
+        assert_eq!(v.mismatches.len(), 1, "{v:?}");
+        let report = "  WARNING: 1 file(s) in 'default' have local-vs-merge conflicts.\n    [ content] a\n    maw ws resolve default --list\n";
+        assert!(judge_replay(&b, &u, &m, &m, report).mismatches.is_empty());
     }
 
     /// bn-36chi: git's diff3 calls abutting hunks a conflict where the
