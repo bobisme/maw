@@ -161,7 +161,8 @@ impl fmt::Display for InitResult {
                 writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
                 writeln!(
                     f,
-                    "  maw ws create --from main <agent-name>    # create agent workspace"
+                    "  maw ws create --from {} <agent-name>    # create agent workspace",
+                    self.branch
                 )?;
             }
         }
@@ -1226,7 +1227,8 @@ impl fmt::Display for BrownfieldInitResult {
         }
         writeln!(
             f,
-            "  maw ws create --from main <agent-name>    # create agent workspace"
+            "  maw ws create --from {} <agent-name>    # create agent workspace",
+            self.head_branch.as_deref().unwrap_or("main")
         )?;
         writeln!(
             f,
@@ -2903,6 +2905,27 @@ mod brownfield_tests {
         assert!(s.contains("main"));
         assert!(s.contains("5 root item(s)"));
         assert!(s.contains("maw ws create --from main <agent-name>"));
+    }
+
+    #[test]
+    fn brownfield_init_hint_uses_actual_branch() {
+        let result = BrownfieldInitResult {
+            repo_root: PathBuf::from("/tmp/myrepo"),
+            default_workspace: PathBuf::from("/tmp/myrepo"),
+            epoch0: EpochId::new(&"b".repeat(40)).expect("operation should succeed"),
+            epoch_resynced_from: None,
+            head_branch: Some("master".to_owned()),
+            already_initialized: false,
+            dirty_files_at_root: Vec::new(),
+            cleaned_root_files: 0,
+            consolidated: true,
+        };
+        let s = format!("{result}");
+        assert!(
+            s.contains("maw ws create --from master <agent-name>"),
+            "{s}"
+        );
+        assert!(!s.contains("--from main"), "{s}");
     }
 
     #[test]

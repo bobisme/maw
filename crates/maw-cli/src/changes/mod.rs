@@ -1701,7 +1701,8 @@ mod tests {
     }
 
     fn setup_git_repo(root: &Path) {
-        run_git(root, &["init"]);
+        // Explicit branch: CI runners' git still defaults to `master`.
+        run_git(root, &["init", "-b", "main"]);
         run_git(root, &["config", "user.name", "Test"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
