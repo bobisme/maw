@@ -2,11 +2,43 @@
 
 All notable changes to maw.
 
-## Unreleased
+## v1.0.0-pre.19 (2026-09-30)
 
-**Recovery snapshots**
-- **`maw gc --recovery-snapshots` keeps the `maw undo` pin that a redo still needs (bn-43x5k).** `refs/manifold/recovery/undo/*` pins are no longer treated as a destroyed workspace named `undo`. The pin of the merge result that the next `maw undo` (redo) re-applies is protected like a live workspace's pin: only `--include-live` considers it, dropping it needs `--force`, and the refusal listing marks it `UNDO`. If the op log cannot be read, every undo pin is protected. After the redo, or once a newer merge replaces the undo, an undo pin ages out like any other snapshot.
-- **`--include-live --force` no longer leaves a destroy record that claims a deleted ref (bn-43x5k).** When the sweep drops a snapshot of a workspace whose name was reused, it removes the old workspace's destroy record for that snapshot in the same pass. Before, `maw ws recover` showed the record with a missing ref, and after the new workspace was destroyed, `maw doctor`/`maw fsck` reported it as unpinned and `fsck --repair` could pin the swept snapshot again.
+Nineteenth dogfood pre-release. It fixes data-loss bugs in the replay of uncommitted trunk edits and in `maw ws recover --restore-file`; the worst, found by the codex sweep, can delete files outside the repository and is in pre.18 and earlier. It also makes uncommitted trunk edits survive more merge and crash paths, and restarts the SG1 soak on a stricter harness. **Upgrading is recommended.** One behaviour change: `undo` is now a reserved workspace name.
+
+**Data loss fixed**
+- **Replaying uncommitted trunk edits no longer deletes or writes files outside the repository (bn-3u5a4, found by the codex sweep).** Suppose a merge replaced a tracked directory `d` with a symlink to a directory outside the repo, and your uncommitted state deleted `d/x`. The replay then deleted `x` in the symlink's target. Writes could follow a symlinked parent the same way. Every replay path is now checked component by component: a symlinked parent makes the replay refuse, and your state stays pinned and reported. This bug is in pre.18 and earlier.
+- **`maw ws recover --restore-file <dir>` no longer overwrites an ignored file in the destination without `--force` (bn-3u5a4).** Status omits ignored files, so the check missed them. With `--force`, it no longer deletes an uncommitted symlink nested inside a directory in the way.
+- **A crash inside the snapshot-failed fallback no longer leaves your edits only in a recovery ref (bn-1eg2u).** The fallback now writes a checkout intent before its forced checkout, so `maw ws merge --recover` replays your edits.
+
+**Uncommitted trunk edits across merges**
+- **The snapshot-failed fallback now merges your edits instead of keeping only the merged version (bn-2ds48).** It replays your pinned state through the same path a crash recovery uses. When you and the merge edit different hunks of one file, both survive; the same hunk gets conflict markers plus a report. Before, only a crash recovery merged them.
+- **An uncommitted file↔directory swap on a path the merge didn't touch stays in place (bn-ihi4h).** Before, it was always replaced by the merged version and reported. The replay also applies deletions before additions now, and removes a directory only if it holds nothing but empty directories.
+- **Directory conflicts have a one-step restore (bn-1eg2u).** `maw ws recover --ref <pin> --restore-file <dir>` restores a whole directory, untracked files included. It removes the merged file or directory in its way only if that content is committed and clean, unless you pass `--force`. Conflict messages now say "replaced by file p" instead of "deleted".
+- **A merge that only flips +x on a file you replaced with a symlink is reported as a type conflict (bn-ihi4h).** The printed restore command puts your symlink back.
+- **The replay's filtered snapshot is pinned at `refs/manifold/replay/<ws>` while the replay runs (bn-1eg2u),** so a concurrent `git gc`/prune can no longer remove it mid-merge.
+- **Every restore command printed after a failed replay runs as printed (bn-7xuvm, bn-3u5a4).** The broken `git stash apply <oid>` hint is gone; maw prints one command per path, and one per file↔directory swap.
+
+**Recovery snapshots and workspace names**
+- **`maw gc --recovery-snapshots` keeps the `maw undo` pin that a redo still needs (bn-43x5k).** `refs/manifold/recovery/undo/*` pins are no longer treated as a destroyed workspace named `undo`. The pin the next redo re-applies is protected like a live workspace's pin: only `--include-live` considers it, dropping it needs `--force`, and the refusal listing marks it `UNDO`. If the op log can't be read, every undo pin is protected.
+- **`--include-live --force` no longer leaves a destroy record that points at a deleted ref (bn-43x5k).** When a workspace name was reused, the old record is removed in the same pass.
+- **`undo` is a reserved workspace name (bn-asqh7).** `maw ws create undo` and `maw ws recover … --to undo` refuse and suggest another name. `maw doctor` warns about an existing `undo` workspace, and every command in its rename hint runs as printed.
+
+**Agent guidance**
+- **The examples in `maw --help`, `maw ws merge --help`, `maw tldr` and `maw agents show` run non-interactively as written (bn-39nsp).** They use `--from main`, pass `--message` on every landing merge, resolve conflicts with `maw ws resolve --list/--keep`, and say that an orchestrator (e.g. edict) may run the merge and that the lead pushes. A test runs them with stdin closed.
+- **Suggested merge commands in hints and JSON fields (`recommended_command`, `recommended_action`) include `--message "<msg>"` (bn-hfge7).** Replace the placeholder with a real message.
+
+**Verification (the v1.0 gate)**
+- **The SG1 soak's checks judge more and are stricter (bn-36chi, bn-ihi4h, bn-1axaz).**
+  - A pre.18 soak seed showed that recoveries were settled before the displacement check ran, so a displaced path during a recovery could go unjudged. Recoveries are now judged first.
+  - Edits both sides made to one file are checked against a `git merge-file` reference. A merged side kept silently where the reference conflicts is now a failure.
+  - Also checked now: the exec bit on newly added paths, one-sided file↔directory changes, tainted recoveries, and a report that names the path together with its recovery command.
+  - Replacing an untouched swap is now a failure, even when reported.
+  - New crash windows cover the fallback and replay.
+  - `slot.sh` stops a slot whose trunk evidence falls below a minimum.
+  - The campaign restarts on this release.
+- **`just check` now runs the `failpoints`-feature test suites, and CI's verify workflow runs them too (bn-36chi).** Until now, no gate ran the fallback and crash tests behind that feature. `just check` also runs `maw-scenario`'s tests, where the soak's seed-stream checksums are pinned.
+- **`notes/v1.0-acceptance.md` lists each v1.0 gate as a yes/no check with its owner, status and evidence (bn-l6o7).**
 
 ## v1.0.0-pre.18 (2026-09-28)
 
