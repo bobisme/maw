@@ -570,7 +570,7 @@ toward §7.1, for three reasons found on 2026-09-27:
 The state directory is kept as-is as an archive. Its op-steps are not
 carried forward (stop condition 3: the harness surface changed).
 
-### 8.2 Local campaign on harness `e526f7d1`: running
+### 8.2 Local campaign on harness `e526f7d1`: superseded
 
 Started 2026-09-27 22:06 UTC on trunk `e526f7d1` (v1.0.0-pre.16 plus the
 bn-1ijl, bn-hcbc8, bn-30v6e, bn-1fcox, bn-28s78, bn-qi5br, bn-2eszz and
@@ -626,3 +626,40 @@ observed throughput); pilot ran GREEN at 64 032 op-steps; publishable
 artifact + recipe + cron harness all wired at the pinned SHA. The 1e8
 floor (v1.0 release gate) and 1e9 stretch are now cron-calendar
 follow-on work tracked in §8.
+
+Superseded 2026-09-28 by a re-pin (harness changes in bn-2zubk and bn-1h9ue).
+
+### 8.3 Local campaigns on pre.17 (`4af8d5c6`) and pre.18 (`d414d3de`): superseded
+
+- **pre.17** (state `maw-sg1-soak-pre17`): re-pinned before it accrued much. The
+  soak was widened to a real trunk worktree (bn-1h9ue), and that wider soak found
+  real bugs (bn-1dlkd, bn-2nnuz) that were fixed in pre.18.
+- **pre.18** (state `maw-sg1-soak-pre18`, pinned 2026-09-28 16:33 UTC): 11 clean
+  slots (352 000 op-steps). It stopped at 18:11 UTC on seed 4294972401 with
+  `HarnessError(vacuous_displacement)`. That was an oracle gap, not a maw bug:
+  recoveries were settled before the displacement oracle judged them (bn-36chi).
+  Its op-steps are not carried forward.
+
+### 8.4 Local campaign on v1.0.0-pre.19 (`247fe0b5`): running
+
+Pinned 2026-09-30 on the v1.0.0-pre.19 release commit. State
+`~/.local/state/maw-sg1-soak-pre19`, selected by the drop-in `state.conf`.
+`SLOT_SEEDS=500`, `STEPS=64`, `PARALLEL=2`. `slot.sh` enforces a per-slot
+dirty-trunk evidence floor (`SG1_SOAK_TRUNK_EVIDENCE_FLOOR=1`).
+
+Harness changes since 8.3:
+- recoveries are judged before they are settled;
+- a both-sides edit is checked against a `git merge-file` reference;
+- exec bits and one-sided file<->directory groups are judged;
+- tainted recoveries are judged;
+- a report must name the path and a recovery handle in the same section;
+- new crash windows: FP_SNAPSHOT_AFTER_CLEAN, FP_CLEANUP_FALLBACK_AFTER_CHECKOUT and
+  FP_CLEANUP_REPLAY_BEFORE_APPLY;
+- an untouched uncommitted swap must stay in place.
+
+Before pinning: an 800 x 64 sweep on `f983a09f` was clean, and the planted-violation
+smoke tripped. At roughly 70 op-steps/s the campaign needs about 16 to 19 days to
+reach 1e8 if it never stops. `status.sh` averages over wall time, so time spent
+stopped inflates its ETA.
+Check progress with
+`SG1_SOAK_STATE=~/.local/state/maw-sg1-soak-pre19 scripts/sg1-soak/status.sh`.
